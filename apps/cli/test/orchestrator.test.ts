@@ -125,6 +125,7 @@ function harness(
     mutateHeadDuring?:
       | "workspace-cleanup"
       | "workspace-prepare"
+      | "pending-review-removal"
       | "reaction-removal"
       | "completion-creation"
       | "review-creation";
@@ -179,7 +180,7 @@ function harness(
       if (headRequests === 3 && options.headError !== undefined) {
         throw options.headError;
       }
-      if (headRequests === 4 && options.postcheckError !== undefined) {
+      if (headRequests === 5 && options.postcheckError !== undefined) {
         throw options.postcheckError;
       }
       if (options.headNeverSettles && headRequests === 3) {
@@ -201,6 +202,9 @@ function harness(
     async removeOwnPendingReview() {
       events.push("remove-pending-review");
       options.pendingReviewState?.clear();
+      if (options.mutateHeadDuring === "pending-review-removal") {
+        currentSha = "3".repeat(40);
+      }
     },
     async getPriorReviewState() {
       events.push("get-prior-review-state");
@@ -413,6 +417,7 @@ describe("clean review orchestrator", () => {
       "get-prior-review-state",
       "get-head",
       "remove-pending-review",
+      "get-head",
       "add-+1",
       "get-head",
     ]);
@@ -445,11 +450,12 @@ describe("clean review orchestrator", () => {
         },
       ],
     });
-    assert.deepEqual(events.slice(-7), [
+    assert.deepEqual(events.slice(-8), [
       "delete-10",
       "get-prior-review-state",
       "get-head",
       "remove-pending-review",
+      "get-head",
       "create-review",
       "get-head",
       "submit-review-20",
@@ -566,6 +572,27 @@ describe("clean review orchestrator", () => {
     assert.equal((await orchestrator.review(reference)).status, "stale");
     assert.equal(events.includes("resolve-threads-THREAD_OLD"), false);
     assert.equal(events.includes("remove-pending-review"), false);
+    assert.equal(events.includes("create-review"), false);
+    assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("does not resolve obsolete threads when the head changes during pending review reconciliation", async () => {
+    const { events, orchestrator } = harness({
+      mutateHeadDuring: "pending-review-removal",
+      priorReviewState: {
+        activeFingerprints: [],
+        ownedOpenThreads: [{ id: "THREAD_OLD", fingerprint: "c".repeat(64) }],
+        runHeadShas: [],
+      },
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "stale",
+      reviewedSha: "2".repeat(40),
+      currentSha: "3".repeat(40),
+    });
+    assert.equal(events.includes("resolve-threads-THREAD_OLD"), false);
     assert.equal(events.includes("create-review"), false);
     assert.equal(events.includes("add-+1"), false);
   });
@@ -764,9 +791,10 @@ describe("clean review orchestrator", () => {
 
     await assert.rejects(() => failed.orchestrator.review(reference), /postcheck failed/u);
 
-    assert.deepEqual(failed.events.slice(-5), [
+    assert.deepEqual(failed.events.slice(-6), [
       "get-head",
       "remove-pending-review",
+      "get-head",
       "add-+1",
       "get-head",
       "delete-11",
@@ -826,11 +854,12 @@ describe("clean review orchestrator", () => {
       () => completionFailure.orchestrator.review(reference),
       /reaction failed/u,
     );
-    assert.deepEqual(completionFailure.events.slice(-6), [
+    assert.deepEqual(completionFailure.events.slice(-7), [
       "delete-10",
       "get-prior-review-state",
       "get-head",
       "remove-pending-review",
+      "get-head",
       "add-+1",
       "remove-own-+1",
     ]);

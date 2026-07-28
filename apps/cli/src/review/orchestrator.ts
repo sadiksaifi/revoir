@@ -373,7 +373,12 @@ export class CleanReviewOrchestrator implements ManualReviewService {
             );
             await github.removeOwnPendingReview(reference, signal);
             throwIfAborted(signal);
-            if (reconciliation.obsoleteThreadIds.length > 0) {
+            const preResolutionSha = await github.getHeadSha(reference, signal);
+            throwIfAborted(signal);
+            if (
+              preResolutionSha === pullRequest.headSha &&
+              reconciliation.obsoleteThreadIds.length > 0
+            ) {
               await github.resolveReviewThreads(
                 reference,
                 reconciliation.obsoleteThreadIds,
@@ -382,8 +387,9 @@ export class CleanReviewOrchestrator implements ManualReviewService {
               throwIfAborted(signal);
             }
             const postReconciliationSha =
+              preResolutionSha !== pullRequest.headSha ||
               reconciliation.obsoleteThreadIds.length === 0
-                ? currentSha
+                ? preResolutionSha
                 : await github.getHeadSha(reference, signal);
             throwIfAborted(signal);
             if (postReconciliationSha !== pullRequest.headSha) {
