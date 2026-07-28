@@ -1,4 +1,4 @@
-import type { ReviewFindingV1 } from "./findings.js";
+import { prerequisiteFindingFingerprint, type ReviewFindingV1 } from "./findings.js";
 
 const FINDING_MARKER = /<!-- revoir:finding:v1:([0-9a-f]{64}) -->/gu;
 const RUN_MARKER = /<!-- revoir:run:v1:([0-9a-f]{40,64}) -->/gu;
@@ -35,7 +35,11 @@ export function planFindingReconciliation(
   findings: readonly ReviewFindingV1[],
   prior: PriorReviewState,
 ): FindingReconciliationPlan {
-  const currentFingerprints = new Set(findings.map(({ fingerprint }) => fingerprint));
+  const findingFingerprints = findings.map((finding) => [
+    finding.fingerprint,
+    prerequisiteFindingFingerprint(finding),
+  ]);
+  const currentFingerprints = new Set(findingFingerprints.flat());
   const activeFingerprints = new Set(prior.activeFingerprints);
   const obsoleteThreadIds = new Set<string>();
 
@@ -47,7 +51,9 @@ export function planFindingReconciliation(
   }
 
   return {
-    netNewFindings: findings.filter(({ fingerprint }) => !activeFingerprints.has(fingerprint)),
+    netNewFindings: findings.filter((_finding, index) =>
+      findingFingerprints[index]!.every((fingerprint) => !activeFingerprints.has(fingerprint)),
+    ),
     obsoleteThreadIds: [...obsoleteThreadIds].toSorted(),
   };
 }

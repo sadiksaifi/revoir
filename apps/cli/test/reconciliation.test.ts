@@ -26,6 +26,26 @@ function finding(fingerprint: string, startLine: number): ReviewFindingV1 {
 }
 
 describe("finding reconciliation", () => {
+  it("keeps a finding published with the prerequisite v1 fingerprint unchanged", () => {
+    const unchanged = finding("a".repeat(64), 40);
+    const publishedV1Fingerprint =
+      "ad56f42afdf550df6ca0ae4627140ed572f1e4a5c4be3754b838503a1aea2920";
+
+    assert.deepEqual(
+      planFindingReconciliation([unchanged], {
+        activeFingerprints: [publishedV1Fingerprint],
+        ownedOpenThreads: [
+          { id: "THREAD_PUBLISHED_V1", fingerprint: publishedV1Fingerprint },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [],
+        obsoleteThreadIds: [],
+      },
+    );
+  });
+
   it("keeps unchanged findings, publishes net-new findings, and resolves obsolete owned threads", () => {
     const unchanged = finding("a".repeat(64), 40);
     const changed = finding("b".repeat(64), 12);

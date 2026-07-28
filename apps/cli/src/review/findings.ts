@@ -235,6 +235,26 @@ export function findingFingerprint(
   return createHash("sha256").update(identity).digest("hex");
 }
 
+export function prerequisiteFindingFingerprint(
+  finding: Pick<
+    ModelFindingV1,
+    "path" | "range" | "defectKind" | "impactKind" | "fixAction" | "anchor"
+  >,
+): string {
+  const identity = JSON.stringify([
+    FINDING_CONTRACT_VERSION,
+    finding.path,
+    finding.range?.start ?? null,
+    finding.range?.end ?? null,
+    finding.range?.side ?? null,
+    finding.defectKind,
+    finding.impactKind,
+    finding.fixAction,
+    finding.anchor,
+  ]);
+  return createHash("sha256").update(identity).digest("hex");
+}
+
 function attachment(file: DiffFile, finding: ModelFindingV1): FindingAttachment {
   if (finding.range === null || !isAttachableRange(file, finding.range)) {
     return { kind: "file", path: file.apiPath };
