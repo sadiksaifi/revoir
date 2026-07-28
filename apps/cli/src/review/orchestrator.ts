@@ -398,17 +398,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
                 reviewedSha: pullRequest.headSha,
                 currentSha: postReconciliationSha,
               };
-            } else if (engineResult.findings.length > 0) {
-              if (reconciliation.netNewFindings.length === 0 && !reconciliation.bodyStateChanged) {
-                result = {
-                  status: "findings",
-                  reviewedSha: pullRequest.headSha,
-                  currentSha: postReconciliationSha,
-                  publishedFindings: 0,
-                  rejectedFindings: engineResult.diagnostics.length,
-                  diagnostics: engineResult.diagnostics,
-                };
-              } else {
+            } else {
+              const shouldPublishReview =
+                reconciliation.netNewFindings.length > 0 || reconciliation.bodyStateChanged;
+              if (shouldPublishReview) {
                 const publication = createReviewPublication(
                   pullRequest.headSha,
                   reconciliation.netNewFindings,
@@ -440,14 +433,6 @@ export class CleanReviewOrchestrator implements ManualReviewService {
                     throw error;
                   }
                   pendingReviewCleanup = undefined;
-                  result = {
-                    status: "findings",
-                    reviewedSha: pullRequest.headSha,
-                    currentSha: postDraftSha,
-                    publishedFindings: reconciliation.netNewFindings.length,
-                    rejectedFindings: engineResult.diagnostics.length,
-                    diagnostics: engineResult.diagnostics,
-                  };
                 } else {
                   const pendingReviewFailures = await completePendingReview(pendingReviewCleanup);
                   pendingReviewCleanup = undefined;
@@ -462,38 +447,48 @@ export class CleanReviewOrchestrator implements ManualReviewService {
                   };
                 }
               }
-            } else {
-              activeReaction = createTerminalHandle(() =>
-                github.removeOwnReaction(reference, "+1", terminalSignal),
-              );
-              const completionReactionId = await github.addReaction(reference, "+1", signal);
-              activeReaction = createTerminalHandle(() =>
-                github.deleteReaction(reference, completionReactionId, terminalSignal),
-              );
-              throwIfAborted(signal);
-              const postCompletionSha = await github.getHeadSha(reference, signal);
-              throwIfAborted(signal);
-              if (postCompletionSha === pullRequest.headSha) {
-                activeReaction = undefined;
+              if (result === undefined && engineResult.findings.length > 0) {
                 result = {
-                  status: "clean",
+                  status: "findings",
                   reviewedSha: pullRequest.headSha,
-                  currentSha: postCompletionSha,
+                  currentSha: postReconciliationSha,
+                  publishedFindings: reconciliation.netNewFindings.length,
+                  rejectedFindings: engineResult.diagnostics.length,
+                  diagnostics: engineResult.diagnostics,
                 };
-              } else {
-                const completionCleanupFailures = await completeTerminal(activeReaction);
-                activeReaction = undefined;
-                if (completionCleanupFailures.length > 0) {
-                  throw new AggregateError(
-                    completionCleanupFailures,
-                    "Completion reaction cleanup required retries.",
-                  );
+              } else if (result === undefined) {
+                activeReaction = createTerminalHandle(() =>
+                  github.removeOwnReaction(reference, "+1", terminalSignal),
+                );
+                const completionReactionId = await github.addReaction(reference, "+1", signal);
+                activeReaction = createTerminalHandle(() =>
+                  github.deleteReaction(reference, completionReactionId, terminalSignal),
+                );
+                throwIfAborted(signal);
+                const postCompletionSha = await github.getHeadSha(reference, signal);
+                throwIfAborted(signal);
+                if (postCompletionSha === pullRequest.headSha) {
+                  activeReaction = undefined;
+                  result = {
+                    status: "clean",
+                    reviewedSha: pullRequest.headSha,
+                    currentSha: postCompletionSha,
+                  };
+                } else {
+                  const completionCleanupFailures = await completeTerminal(activeReaction);
+                  activeReaction = undefined;
+                  if (completionCleanupFailures.length > 0) {
+                    throw new AggregateError(
+                      completionCleanupFailures,
+                      "Completion reaction cleanup required retries.",
+                    );
+                  }
+                  result = {
+                    status: "stale",
+                    reviewedSha: pullRequest.headSha,
+                    currentSha: postCompletionSha,
+                  };
                 }
-                result = {
-                  status: "stale",
-                  reviewedSha: pullRequest.headSha,
-                  currentSha: postCompletionSha,
-                };
               }
             }
           }

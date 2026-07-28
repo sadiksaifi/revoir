@@ -25,7 +25,11 @@ import {
 } from "../src/review/pi.js";
 import type { ReviewPublication } from "../src/review/publication.js";
 import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pull-request.js";
-import type { PriorReviewState } from "../src/review/reconciliation.js";
+import {
+  bodyStateFindingIdentities,
+  planFindingReconciliation,
+  type PriorReviewState,
+} from "../src/review/reconciliation.js";
 import type { PreparedWorkspace, WorkspacePreparer } from "../src/review/workspace.js";
 import { WorkspacePreparationError } from "../src/review/workspace.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
@@ -576,6 +580,47 @@ describe("clean review orchestrator", () => {
     assert.equal(createdPublications[0]?.payload.comments, undefined);
     assert.match(createdPublications[0]?.payload.body ?? "", /<!-- revoir:body-state:v1 -->/u);
     assert.doesNotMatch(createdPublications[0]?.payload.body ?? "", /revoir:body-finding/u);
+  });
+
+  it("persists clean body retirement before a stale successor consumes the completion reaction", async () => {
+    const returnedBodyFinding = {
+      ...validatedFinding(),
+      range: null,
+      anchor: "source.ts",
+      attachment: { kind: "file", path: "source.ts" } as const,
+    };
+    const cleanRun = harness({
+      priorReviewState: {
+        activeFingerprints: [returnedBodyFinding.fingerprint],
+        bodyFindings: [{ fingerprint: returnedBodyFinding.fingerprint }],
+        ownedOpenThreads: [],
+        runHeadShas: ["1".repeat(40)],
+      },
+    });
+
+    assert.equal((await cleanRun.orchestrator.review(reference)).status, "clean");
+    assert.equal(cleanRun.createdPublications.length, 1);
+    const persistedBodyFindings = bodyStateFindingIdentities(
+      cleanRun.createdPublications[0]?.payload.body ?? "",
+    );
+    assert.deepEqual(persistedBodyFindings, []);
+    assert.ok(
+      cleanRun.events.indexOf("submit-review-20") < cleanRun.events.indexOf("add-+1"),
+      JSON.stringify(cleanRun.events),
+    );
+
+    const staleSuccessor = harness({ mutateHeadDuring: "workspace-cleanup" });
+    assert.equal((await staleSuccessor.orchestrator.review(reference)).status, "stale");
+    assert.equal(staleSuccessor.createdPublications.length, 0);
+    assert.deepEqual(
+      planFindingReconciliation([returnedBodyFinding], {
+        activeFingerprints: [],
+        bodyFindings: persistedBodyFindings,
+        ownedOpenThreads: [],
+        runHeadShas: ["2".repeat(40)],
+      }).netNewFindings,
+      [returnedBodyFinding],
+    );
   });
 
   it("refreshes prior state after an uncertain pending review becomes submitted", async () => {
