@@ -9,6 +9,7 @@ import { CLI_VERSION, runCli, type CliIo } from "../src/cli.js";
 import { resolveApplicationPaths } from "../src/config/paths.js";
 import { loadConfiguration } from "../src/config/store.js";
 import { createDefaultDiagnosticGateway, type DiagnosticGateway } from "../src/diagnostics.js";
+import { FindingContractError, validateModelReviewOutput } from "../src/review/findings.js";
 import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
 import { passingGateway, TEST_PRIVATE_KEY } from "./helpers.js";
@@ -356,6 +357,38 @@ describe("CLI", () => {
     assert.match(stdout.output, /Clean review completed/u);
 
     stdout.output = "";
+    stderr.output = "";
+    const findingsService: ManualReviewService = {
+      async review() {
+        return {
+          status: "findings",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+          publishedFindings: 2,
+          rejectedFindings: 1,
+          diagnostics: [
+            {
+              index: 2,
+              code: "invalid",
+              message: "findings[2].priority must be supported.",
+            },
+          ],
+        };
+      },
+    };
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: findingsService,
+      }),
+      0,
+    );
+    assert.match(stdout.output, /Published 2 findings/u);
+    assert.match(stderr.output, /rejected 1 invalid or duplicate model finding/u);
+    assert.match(stderr.output, /priority must be supported/u);
+
+    stdout.output = "";
+    stderr.output = "";
     const staleService: ManualReviewService = {
       async review() {
         return {
@@ -429,5 +462,208 @@ describe("CLI", () => {
     );
     assert.match(stderr.output, /\[REDACTED\]/u);
     assert.doesNotMatch(stderr.output, /cli-cloudflare-secret/u);
+  });
+
+  it("prints redacted per-candidate reasons when Pi returns only invalid findings", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const allInvalid: ManualReviewService = {
+      async review() {
+        throw new FindingContractError("Pi returned no publishable findings (2 rejected).", [
+          {
+            index: 0,
+            code: "invalid",
+            message: "findings[0].priority must be one of P0, P1, P2, or P3.",
+          },
+          {
+            index: 1,
+            code: "invalid",
+            message: "findings[1].evidence contained cli-cloudflare-secret.",
+          },
+        ]);
+      },
+    };
+
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: allInvalid,
+      }),
+      1,
+    );
+    assert.match(stderr.output, /no publishable findings/u);
+    assert.match(stderr.output, /#1: findings\[0\]\.priority must be one of P0, P1, P2, or P3/u);
+    assert.match(stderr.output, /#2: findings\[1\]\.evidence contained \[REDACTED\]/u);
+    assert.doesNotMatch(stderr.output, /cli-cloudflare-secret/u);
+    assert.equal(stdout.output, "");
+  });
+
+  it("never prints model-controlled contract versions or field names", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const sourceSecret = "PRIVATE_SOURCE_TOKEN";
+    const outputs: readonly [string, RegExp][] = [
+      [`{"version":"${sourceSecret}","findings":[]}`, /expected version 1/u],
+      [
+        JSON.stringify({
+          version: 1,
+          findings: [
+            {
+              priority: "P1",
+              path: "source.ts",
+              range: null,
+              defectKind: "correctness",
+              impactKind: "incorrect-result",
+              fixAction: "guard",
+              anchor: "source.ts",
+              [sourceSecret]: "echo",
+            },
+          ],
+        }),
+        /findings\[0\] contains an unknown field/u,
+      ],
+    ];
+
+    for (const [value, safeReason] of outputs) {
+      const allInvalid: ManualReviewService = {
+        async review() {
+          await validateModelReviewOutput(value, { checkout: root, diff: "" });
+          throw new Error("Expected model output to be rejected.");
+        },
+      };
+
+      // Keep each source-bearing rejection isolated so every CLI rendering path is checked.
+      // eslint-disable-next-line no-await-in-loop
+      const exitCode = await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: allInvalid,
+      });
+      assert.equal(exitCode, 1);
+      assert.match(stderr.output, /Rejected model findings/u);
+      assert.match(stderr.output, safeReason);
+      assert.doesNotMatch(stderr.output, new RegExp(sourceSecret, "u"));
+      stderr.output = "";
+    }
+    assert.equal(stdout.output, "");
+  });
+
+  it("prints only static diagnostics for unknown model semantic values", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const modelDefectKind = "PRIVATE_SOURCE_TOKEN";
+    const allInvalid: ManualReviewService = {
+      async review() {
+        await validateModelReviewOutput(
+          JSON.stringify({
+            version: 1,
+            findings: [
+              {
+                priority: "P1",
+                path: "source.ts",
+                range: null,
+                defectKind: modelDefectKind,
+                impactKind: "incorrect-result",
+                fixAction: "guard",
+                anchor: "source.ts",
+              },
+            ],
+          }),
+          { checkout: root, diff: "" },
+        );
+        throw new Error("Expected unknown semantic value to be rejected.");
+      },
+    };
+
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: allInvalid,
+      }),
+      1,
+    );
+    assert.match(stderr.output, /defectKind must be a supported defect kind/u);
+    assert.doesNotMatch(stderr.output, new RegExp(modelDefectKind, "u"));
+    assert.doesNotMatch(stderr.output, /PRIVATE_SOURCE_TOKEN/u);
+    assert.equal(stdout.output, "");
+  });
+
+  it("does not print malformed model anchor source text", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const modelAnchor = " PRIVATE_IMPACT_SOURCE ";
+    const allInvalid: ManualReviewService = {
+      async review() {
+        await validateModelReviewOutput(
+          JSON.stringify({
+            version: 1,
+            findings: [
+              {
+                priority: "P1",
+                path: "source.ts",
+                range: null,
+                defectKind: "correctness",
+                impactKind: "incorrect-result",
+                fixAction: "guard",
+                anchor: modelAnchor,
+              },
+            ],
+          }),
+          { checkout: root, diff: "" },
+        );
+        throw new Error("Expected malformed anchor to be rejected.");
+      },
+    };
+
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: allInvalid,
+      }),
+      1,
+    );
+    assert.match(stderr.output, /anchor must contain 1-160 trimmed characters/u);
+    assert.doesNotMatch(stderr.output, new RegExp(modelAnchor.trim(), "u"));
+    assert.doesNotMatch(stderr.output, /PRIVATE_IMPACT_SOURCE/u);
+    assert.equal(stdout.output, "");
   });
 });

@@ -11,18 +11,23 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
+    "prebuild": "pnpm --filter @revoir/contracts run build",
     "build": "tsc",
+    "predev": "pnpm --filter @revoir/contracts run build",
     "dev": "tsx src/main.ts",
     "format": "pnpm --workspace-root run format apps/cli",
     "format:check": "pnpm --workspace-root run format:check apps/cli",
     "lint": "pnpm --workspace-root run lint apps/cli",
     "lint:fix": "pnpm --workspace-root run lint:fix apps/cli",
     "start": "node dist/main.js",
+    "pretest": "pnpm --filter @revoir/contracts run build",
     "test": "node --test --import tsx 'test/**/*.test.ts'",
+    "pretypecheck": "pnpm --filter @revoir/contracts run build",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.82.1"
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@revoir/contracts": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

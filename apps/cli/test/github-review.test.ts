@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { createPublicKey, createVerify } from "node:crypto";
 import { describe, it } from "node:test";
 
+import type { ReviewFindingV1 } from "../src/review/findings.js";
 import {
   createGitHubAppJwt,
   GitHubAppReviewGateway,
+  ReviewSubmissionUncertainError,
   type FetchLike,
 } from "../src/review/github.js";
+import { createReviewPublication } from "../src/review/publication.js";
 import { parsePullRequestUrl } from "../src/review/pull-request.js";
 import { createTestConfiguration, TEST_PRIVATE_KEY } from "./helpers.js";
 
@@ -163,6 +166,519 @@ describe("GitHub App review gateway", () => {
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/34")).length, 1);
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/35")).length, 0);
     assert.ok(requests.every((request) => request.init?.signal === abortController.signal));
+  });
+
+  it("creates, submits, and deletes exact non-blocking pending reviews", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    let reviewId = 80;
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
+        reviewId += 1;
+        return json({ id: reviewId });
+      }
+      if (url.endsWith("/reviews/81/events") && init?.method === "POST") {
+        return json({ id: 81, state: "COMMENTED" });
+      }
+      if (url.endsWith("/reviews/82") && init?.method === "DELETE") {
+        return json({ id: 82, state: "PENDING" });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const candidate: ReviewFindingV1 = {
+      version: 1,
+      fingerprint: "a".repeat(64),
+      priority: "P1",
+      path: "source.ts",
+      range: { start: 2, end: 2, side: "RIGHT" },
+      defectKind: "concurrency",
+      impactKind: "execution-stall",
+      fixAction: "propagate",
+      anchor: "signal",
+      attachment: {
+        kind: "inline",
+        path: "source.ts",
+        startLine: 2,
+        endLine: 2,
+        side: "RIGHT",
+      },
+    };
+    const publication = createReviewPublication("2".repeat(40), [candidate]);
+    const submitted = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+    assert.equal(submitted.id, 81);
+    await submitted.submit(new AbortController().signal, new AbortController().signal);
+
+    const deleted = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+    assert.equal(deleted.id, 82);
+    await deleted.delete(new AbortController().signal);
+
+    const creations = requests.filter((request) => request.url.endsWith("/pulls/17/reviews"));
+    assert.equal(creations.length, 2);
+    assert.deepEqual(JSON.parse(String(creations[0]?.init?.body)), publication.payload);
+    assert.equal("event" in JSON.parse(String(creations[0]?.init?.body)), false);
+    const submission = requests.find((request) => request.url.endsWith("/reviews/81/events"));
+    assert.deepEqual(JSON.parse(String(submission?.init?.body)), { event: "COMMENT" });
+  });
+
+  it("reconciles only bot-owned pending reviews before a findings publication", async () => {
+    const deleted: number[] = [];
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+        return json([
+          { id: 71, state: "PENDING", user: { login: "revoir-test[bot]" } },
+          { id: 72, state: "PENDING", user: { login: "human" } },
+          { id: 73, state: "COMMENTED", user: { login: "revoir-test[bot]" } },
+        ]);
+      }
+      const reviewId = /\/reviews\/(\d+)$/u.exec(url)?.[1];
+      if (reviewId !== undefined && init?.method === "DELETE") {
+        deleted.push(Number(reviewId));
+        return json({ id: Number(reviewId), state: "PENDING" });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    await session.removeOwnPendingReview(reference, new AbortController().signal);
+    assert.deepEqual(deleted, [71]);
+  });
+
+  it("uses the bounded state-aware fence while reconciling an owned pending review", async () => {
+    const events: string[] = [];
+    let deletionAttempt = 0;
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+        return json([{ id: 74, state: "PENDING", user: { login: "revoir-test[bot]" } }]);
+      }
+      if (url.endsWith("/reviews/74") && init?.method === "DELETE") {
+        deletionAttempt += 1;
+        events.push(`DELETE ${deletionAttempt}`);
+        return deletionAttempt === 1
+          ? json({ message: "review transition in progress" }, 422)
+          : json({ id: 74, state: "PENDING" });
+      }
+      if (url.endsWith("/reviews/74") && init?.method === undefined) {
+        events.push("GET PENDING");
+        return json({
+          id: 74,
+          state: "PENDING",
+          user: { login: "revoir-test[bot]" },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+      5,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    await session.removeOwnPendingReview(reference, new AbortController().signal);
+    assert.deepEqual(events, ["DELETE 1", "GET PENDING", "DELETE 2"]);
+  });
+
+  it("falls back from rejected inline anchors to one file-level pending review", async () => {
+    const creationBodies: unknown[] = [];
+    let attempts = 0;
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
+        attempts += 1;
+        creationBodies.push(JSON.parse(String(init.body)));
+        return attempts === 1 ? json({ message: "invalid line" }, 422) : json({ id: 91 });
+      }
+      if (url.endsWith("/reviews/91") && init?.method === "DELETE") {
+        return json({ message: "Not Found" }, 404);
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const publication = {
+      payload: {
+        commit_id: "2".repeat(40),
+        comments: [
+          {
+            path: "source.ts",
+            line: 2,
+            side: "RIGHT" as const,
+            body: "validated finding",
+          },
+        ],
+      },
+      fallbackPayload: {
+        commit_id: "2".repeat(40),
+        body: "validated finding with explicit location",
+      },
+    };
+    const pending = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+    await pending.delete(new AbortController().signal);
+
+    assert.deepEqual(creationBodies, [publication.payload, publication.fallbackPayload]);
+  });
+
+  it("rejects invalid pending-review responses and submission states", async () => {
+    let mode: "missing-id" | "submit-rejected" = "missing-id";
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
+        return mode === "missing-id" ? json({}) : json({ id: 101 });
+      }
+      if (url.endsWith("/reviews/101/events") && init?.method === "POST") {
+        return json({ message: "not pending" }, 422);
+      }
+      if (url.endsWith("/reviews/101") && init?.method === undefined) {
+        return json({
+          id: 101,
+          state: "PENDING",
+          user: { login: "revoir-test[bot]" },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const publication = {
+      payload: { commit_id: "2".repeat(40), body: "finding" },
+      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
+    };
+    await assert.rejects(
+      () => session.createPendingReview(reference, publication, new AbortController().signal),
+      /pending review id/u,
+    );
+    mode = "submit-rejected";
+    const pending = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+    await assert.rejects(
+      () => pending.submit(new AbortController().signal, new AbortController().signal),
+      /rejected the non-blocking review/u,
+    );
+  });
+
+  it("reconciles a deadline-cancelled submit when GitHub confirms publication", async () => {
+    const submitController = new AbortController();
+    const reconciliationController = new AbortController();
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
+        return json({ id: 111 });
+      }
+      if (url.endsWith("/reviews/111/events") && init?.method === "POST") {
+        submitController.abort(new Error("deadline elapsed after submission"));
+        return json({ id: 111, state: "COMMENTED" });
+      }
+      if (url.endsWith("/reviews/111") && init?.method === undefined) {
+        assert.equal(init?.signal?.aborted, false);
+        assert.notEqual(init?.signal, submitController.signal);
+        return json({
+          id: 111,
+          state: "COMMENTED",
+          user: { login: "revoir-test[bot]" },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const publication = {
+      payload: { commit_id: "2".repeat(40), body: "finding" },
+      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
+    };
+    const pending = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+    await pending.submit(submitController.signal, reconciliationController.signal);
+  });
+
+  it("retries a transient read while reconciling an ambiguous submission", async () => {
+    const submitController = new AbortController();
+    const reconciliationController = new AbortController();
+    let reconciliationReads = 0;
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
+        return json({ id: 112 });
+      }
+      if (url.endsWith("/reviews/112/events") && init?.method === "POST") {
+        submitController.abort(new Error("deadline elapsed after submission"));
+        return json({ id: 112, state: "COMMENTED" });
+      }
+      if (url.endsWith("/reviews/112") && init?.method === undefined) {
+        assert.equal(init?.signal?.aborted, false);
+        assert.notEqual(init?.signal, submitController.signal);
+        reconciliationReads += 1;
+        if (reconciliationReads === 1) {
+          throw new Error("transient reconciliation failure");
+        }
+        return json({
+          id: 112,
+          state: "COMMENTED",
+          user: { login: "revoir-test[bot]" },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const publication = {
+      payload: { commit_id: "2".repeat(40), body: "finding" },
+      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
+    };
+    const pending = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+
+    await pending.submit(submitController.signal, reconciliationController.signal);
+    assert.equal(reconciliationReads, 2);
+  });
+
+  it("lets exact deletion win after an ambiguous submit still reads PENDING", async () => {
+    const submitController = new AbortController();
+    const events: string[] = [];
+    const deadline = new Error("deadline elapsed while submission was in flight");
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
+        return json({ id: 113 });
+      }
+      if (url.endsWith("/reviews/113/events") && init?.method === "POST") {
+        events.push("POST");
+        submitController.abort(deadline);
+        return json({ id: 113, state: "PENDING" });
+      }
+      if (url.endsWith("/reviews/113") && init?.method === undefined) {
+        events.push("GET PENDING");
+        return json({
+          id: 113,
+          state: "PENDING",
+          user: { login: "revoir-test[bot]" },
+        });
+      }
+      if (url.endsWith("/reviews/113") && init?.method === "DELETE") {
+        events.push("DELETE 200");
+        return json({ id: 113, state: "PENDING" });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+      5,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const publication = {
+      payload: { commit_id: "2".repeat(40), body: "finding" },
+      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
+    };
+    const pending = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+
+    await assert.rejects(
+      () => pending.submit(submitController.signal, new AbortController().signal),
+      deadline,
+    );
+    assert.deepEqual(events, ["POST", "GET PENDING", "DELETE 200"]);
+  });
+
+  it("lets a late COMMENT win the compensating fence after a PENDING read", async () => {
+    const submitController = new AbortController();
+    const events: string[] = [];
+    let state = "PENDING";
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
+        return json({ id: 114 });
+      }
+      if (url.endsWith("/reviews/114/events") && init?.method === "POST") {
+        events.push("POST");
+        submitController.abort(new Error("deadline elapsed while submission was in flight"));
+        return json({ id: 114, state: "PENDING" });
+      }
+      if (url.endsWith("/reviews/114") && init?.method === undefined) {
+        events.push(`GET ${state}`);
+        const observed = state;
+        if (state === "PENDING") {
+          state = "COMMENTED";
+        }
+        return json({
+          id: 114,
+          state: observed,
+          user: { login: "revoir-test[bot]" },
+        });
+      }
+      if (url.endsWith("/reviews/114") && init?.method === "DELETE") {
+        events.push("DELETE 422");
+        return json({ message: "review is already submitted" }, 422);
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+      5,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const publication = {
+      payload: { commit_id: "2".repeat(40), body: "finding" },
+      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
+    };
+    const pending = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+
+    await pending.submit(submitController.signal, new AbortController().signal);
+    assert.deepEqual(events, ["POST", "GET PENDING", "DELETE 422", "GET COMMENTED"]);
+  });
+
+  it("bounds never-settling reads and deletion while preserving typed submission uncertainty", async () => {
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
+        return json({ id: 115 });
+      }
+      if (url.endsWith("/reviews/115/events") && init?.method === "POST") {
+        throw new Error("network connection reset");
+      }
+      if (url.endsWith("/reviews/115")) {
+        return new Promise<Response>(() => {});
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+      2,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const publication = {
+      payload: { commit_id: "2".repeat(40), body: "finding" },
+      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
+    };
+    const pending = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+
+    await assert.rejects(
+      () =>
+        Promise.race([
+          pending.submit(new AbortController().signal, new AbortController().signal),
+          new Promise<never>((_resolve, reject) => {
+            setTimeout(() => reject(new Error("pending-review fence did not terminate")), 250);
+          }),
+        ]),
+      ReviewSubmissionUncertainError,
+    );
   });
 
   it("treats only deleted and already-absent reaction responses as successful", async () => {

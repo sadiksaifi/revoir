@@ -5,10 +5,15 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { createConfiguration } from "../src/config/schema.js";
+import type { ReviewFindingV1 } from "../src/review/findings.js";
 import type {
   GitHubReviewGateway,
   GitHubReviewSession,
   ReviewReaction,
+} from "../src/review/github.js";
+import {
+  PendingReviewUncertainError,
+  ReviewSubmissionUncertainError,
 } from "../src/review/github.js";
 import { FileReviewLock, ReviewInProgressError, type ReviewLock } from "../src/review/lock.js";
 import { CleanReviewOrchestrator, ReviewTimeoutError } from "../src/review/orchestrator.js";
@@ -39,7 +44,7 @@ async function waitFor(
     // Poll only test-owned terminal work.
     // eslint-disable-next-line no-await-in-loop
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 1);
+      setImmediate(resolve);
     });
   }
 }
@@ -114,7 +119,20 @@ function harness(
     headError?: Error;
     postcheckError?: Error;
     headNeverSettles?: boolean;
-    mutateHeadDuring?: "workspace-cleanup" | "reaction-removal" | "completion-creation";
+    mutateHeadDuring?:
+      | "workspace-cleanup"
+      | "reaction-removal"
+      | "completion-creation"
+      | "review-creation";
+    pendingCreationError?: Error;
+    pendingDeletionGate?: Promise<void>;
+    pendingDeletionError?: Error;
+    pendingDeletionErrorAttempts?: number;
+    pendingSubmissionRace?: boolean;
+    pendingSubmissionStarted?: () => void;
+    pendingSubmissionError?: Error;
+    pendingSubmissionUncertain?: boolean;
+    pendingReviewState?: Set<number>;
     reactionDeletionGate?: Promise<void>;
     reactionDeletionError?: Error;
     reactionDeletionErrorAttempts?: number;
@@ -139,6 +157,10 @@ function harness(
     options.workspaceCleanupError === undefined
       ? 0
       : (options.workspaceCleanupErrorAttempts ?? Number.POSITIVE_INFINITY);
+  let pendingDeletionFailures =
+    options.pendingDeletionError === undefined
+      ? 0
+      : (options.pendingDeletionErrorAttempts ?? Number.POSITIVE_INFINITY);
   const ownedReactions = new Set<ReviewReaction>();
   const session: GitHubReviewSession = {
     installationToken: "installation-secret",
@@ -170,6 +192,10 @@ function harness(
     },
     async removeOwnCompletionReaction() {
       events.push("remove-old-thumb");
+    },
+    async removeOwnPendingReview() {
+      events.push("remove-pending-review");
+      options.pendingReviewState?.clear();
     },
     async addReaction(_reference, reaction: ReviewReaction) {
       events.push(`add-${reaction}`);
@@ -214,6 +240,56 @@ function harness(
       if (id === 10 && options.mutateHeadDuring === "reaction-removal") {
         currentSha = "3".repeat(40);
       }
+    },
+    async createPendingReview() {
+      events.push("create-review");
+      if (options.pendingCreationError !== undefined) {
+        throw options.pendingCreationError;
+      }
+      if (options.mutateHeadDuring === "review-creation") {
+        currentSha = "3".repeat(40);
+      }
+      options.pendingReviewState?.add(20);
+      return {
+        id: 20,
+        async delete() {
+          events.push("delete-review-20");
+          await options.pendingDeletionGate;
+          if (options.pendingDeletionError !== undefined && pendingDeletionFailures > 0) {
+            pendingDeletionFailures -= 1;
+            throw options.pendingDeletionError;
+          }
+          options.pendingReviewState?.delete(20);
+        },
+        async submit(submitSignal, reconciliationSignal) {
+          events.push("submit-review-20");
+          options.pendingSubmissionStarted?.();
+          if (options.pendingSubmissionUncertain === true) {
+            if (!submitSignal.aborted) {
+              await new Promise<void>((resolve) => {
+                submitSignal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            }
+            throw new ReviewSubmissionUncertainError();
+          }
+          if (options.pendingSubmissionRace === true) {
+            if (!submitSignal.aborted) {
+              await new Promise<void>((resolve) => {
+                submitSignal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            }
+            if (reconciliationSignal === undefined || reconciliationSignal.aborted) {
+              throw submitSignal.reason;
+            }
+            options.pendingReviewState?.delete(20);
+            return;
+          }
+          if (options.pendingSubmissionError !== undefined) {
+            throw options.pendingSubmissionError;
+          }
+          options.pendingReviewState?.delete(20);
+        },
+      };
     },
   };
   const github: GitHubReviewGateway = {
@@ -271,6 +347,27 @@ function harness(
   };
 }
 
+function validatedFinding(): ReviewFindingV1 {
+  return {
+    version: 1,
+    fingerprint: "a".repeat(64),
+    priority: "P1",
+    path: "source.ts",
+    range: { start: 2, end: 2, side: "RIGHT" },
+    defectKind: "concurrency",
+    impactKind: "execution-stall",
+    fixAction: "propagate",
+    anchor: "signal",
+    attachment: {
+      kind: "inline",
+      path: "source.ts",
+      startLine: 2,
+      endLine: 2,
+      side: "RIGHT",
+    },
+  };
+}
+
 describe("clean review orchestrator", () => {
   it("runs the exact clean lifecycle after eligibility and cleans before completion", async () => {
     const { events, orchestrator } = harness();
@@ -289,15 +386,211 @@ describe("clean review orchestrator", () => {
       "cleanup",
       "delete-10",
       "get-head",
+      "remove-pending-review",
       "add-+1",
       "get-head",
     ]);
   });
 
+  it("publishes findings through one current non-blocking review and never adds a thumb", async () => {
+    const { events, orchestrator } = harness({
+      review: async () => ({
+        findings: [validatedFinding()],
+        diagnostics: [
+          {
+            index: 1,
+            code: "invalid" as const,
+            message: "findings[1].priority must be supported.",
+          },
+        ],
+      }),
+    });
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "findings",
+      reviewedSha: "2".repeat(40),
+      currentSha: "2".repeat(40),
+      publishedFindings: 1,
+      rejectedFindings: 1,
+      diagnostics: [
+        {
+          index: 1,
+          code: "invalid",
+          message: "findings[1].priority must be supported.",
+        },
+      ],
+    });
+    assert.deepEqual(events.slice(-6), [
+      "delete-10",
+      "get-head",
+      "remove-pending-review",
+      "create-review",
+      "get-head",
+      "submit-review-20",
+    ]);
+    assert.equal(events.filter((event) => event === "create-review").length, 1);
+    assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("deletes a pending findings review when the head changes before submission", async () => {
+    const { events, orchestrator } = harness({
+      mutateHeadDuring: "review-creation",
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "stale",
+      reviewedSha: "2".repeat(40),
+      currentSha: "3".repeat(40),
+    });
+    assert.deepEqual(events.slice(-3), ["create-review", "get-head", "delete-review-20"]);
+    assert.equal(events.includes("submit-review-20"), false);
+    assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("cleans pending review state after creation and submission failures", async () => {
+    const creation = harness({
+      pendingCreationError: new Error("draft failed"),
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    await assert.rejects(() => creation.orchestrator.review(reference), /draft failed/u);
+    assert.equal(creation.events.includes("delete-review-20"), false);
+    assert.equal(creation.events.includes("add-+1"), false);
+
+    const submission = harness({
+      pendingSubmissionError: new Error("submit failed"),
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    await assert.rejects(() => submission.orchestrator.review(reference), /submit failed/u);
+    assert.deepEqual(submission.events.slice(-3), [
+      "get-head",
+      "submit-review-20",
+      "delete-review-20",
+    ]);
+    assert.equal(submission.events.includes("add-+1"), false);
+  });
+
+  it("reconciles a remotely submitted review after cancellation and releases the process lock", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-submit-race-lock-"));
+    let allowSubmittedDeletion: (() => void) | undefined;
+    const submittedDeletionGate = new Promise<void>((resolve) => {
+      allowSubmittedDeletion = resolve;
+    });
+    let observeSubmission!: () => void;
+    const submissionStarted = new Promise<void>((resolve) => {
+      observeSubmission = resolve;
+    });
+    const first = harness({
+      reviewMs: 20,
+      lock: new FileReviewLock(stateDirectory),
+      pendingDeletionGate: submittedDeletionGate,
+      pendingSubmissionRace: true,
+      pendingSubmissionStarted: observeSubmission,
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+    const lockPath = join(stateDirectory, "manual-review.lock");
+
+    try {
+      const firstReview = assert.rejects(first.orchestrator.review(reference), ReviewTimeoutError);
+      await submissionStarted;
+      context.mock.timers.tick(20);
+      await firstReview;
+      await waitFor(
+        () => fileIsMissing(lockPath),
+        "submitted-review reconciliation did not release the process lock",
+      );
+
+      assert.equal(first.events.includes("delete-review-20"), false);
+      assert.equal((await second.orchestrator.review(reference)).status, "clean");
+    } finally {
+      allowSubmittedDeletion?.();
+      await waitFor(() => fileIsMissing(lockPath), "test cleanup did not release the process lock");
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles an ambiguously submitted pending review on a later clean run", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-submit-unknown-lock-"));
+    let allowPendingDeletion: (() => void) | undefined;
+    const pendingDeletionGate = new Promise<void>((resolve) => {
+      allowPendingDeletion = resolve;
+    });
+    let observeSubmission!: () => void;
+    const submissionStarted = new Promise<void>((resolve) => {
+      observeSubmission = resolve;
+    });
+    const pendingReviewState = new Set<number>();
+    const first = harness({
+      reviewMs: 20,
+      lock: new FileReviewLock(stateDirectory),
+      pendingDeletionGate,
+      pendingReviewState,
+      pendingSubmissionUncertain: true,
+      pendingSubmissionStarted: observeSubmission,
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    const second = harness({
+      lock: new FileReviewLock(stateDirectory),
+      pendingReviewState,
+    });
+    const lockPath = join(stateDirectory, "manual-review.lock");
+
+    try {
+      const firstReview = assert.rejects(first.orchestrator.review(reference), ReviewTimeoutError);
+      await submissionStarted;
+      context.mock.timers.tick(20);
+      await firstReview;
+      await waitFor(
+        () => fileIsMissing(lockPath),
+        "ambiguous review submission retained the process lock",
+      );
+
+      assert.equal(first.events.includes("delete-review-20"), false);
+      assert.deepEqual([...pendingReviewState], [20]);
+      assert.equal((await second.orchestrator.review(reference)).status, "clean");
+      assert.equal(second.events.includes("remove-pending-review"), true);
+      assert.equal(pendingReviewState.size, 0);
+    } finally {
+      allowPendingDeletion?.();
+      await waitFor(() => fileIsMissing(lockPath), "test cleanup did not release the process lock");
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("disarms uncertain exact-review cleanup and releases the lease for a second run", async (context) => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-pending-fence-lock-"));
+    context.after(async () => {
+      await rm(stateDirectory, { recursive: true, force: true });
+    });
+    const first = harness({
+      lock: new FileReviewLock(stateDirectory),
+      mutateHeadDuring: "review-creation",
+      pendingDeletionError: new PendingReviewUncertainError(),
+      pendingDeletionErrorAttempts: 1,
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+    const lockPath = join(stateDirectory, "manual-review.lock");
+
+    await assert.rejects(() => first.orchestrator.review(reference), PendingReviewUncertainError);
+    await waitFor(
+      () => fileIsMissing(lockPath),
+      "uncertain exact-review cleanup retained the process lock",
+    );
+    assert.equal(first.events.filter((event) => event === "delete-review-20").length, 1);
+    assert.equal((await second.orchestrator.review(reference)).status, "clean");
+  });
+
   it("removes the active reaction and publishes no completion for stale output", async () => {
     const { events, orchestrator } = harness({ currentSha: "3".repeat(40) });
     assert.equal((await orchestrator.review(reference)).status, "stale");
-    assert.deepEqual(events.slice(-3), ["cleanup", "delete-10", "get-head"]);
+    assert.deepEqual(events.slice(-4), [
+      "cleanup",
+      "delete-10",
+      "get-head",
+      "remove-pending-review",
+    ]);
     assert.equal(events.includes("add-+1"), false);
   });
 
@@ -310,7 +603,12 @@ describe("clean review orchestrator", () => {
           reviewedSha: "2".repeat(40),
           currentSha: "3".repeat(40),
         });
-        assert.deepEqual(events.slice(-3), ["cleanup", "delete-10", "get-head"]);
+        assert.deepEqual(events.slice(-4), [
+          "cleanup",
+          "delete-10",
+          "get-head",
+          "remove-pending-review",
+        ]);
         assert.equal(events.includes("add-+1"), false);
       }),
     );
@@ -332,7 +630,13 @@ describe("clean review orchestrator", () => {
 
     await assert.rejects(() => failed.orchestrator.review(reference), /postcheck failed/u);
 
-    assert.deepEqual(failed.events.slice(-4), ["get-head", "add-+1", "get-head", "delete-11"]);
+    assert.deepEqual(failed.events.slice(-5), [
+      "get-head",
+      "remove-pending-review",
+      "add-+1",
+      "get-head",
+      "delete-11",
+    ]);
     assert.equal(failed.events.includes("remove-own-+1"), false);
   });
 
@@ -383,10 +687,11 @@ describe("clean review orchestrator", () => {
       () => completionFailure.orchestrator.review(reference),
       /reaction failed/u,
     );
-    assert.deepEqual(completionFailure.events.slice(-5), [
+    assert.deepEqual(completionFailure.events.slice(-6), [
       "cleanup",
       "delete-10",
       "get-head",
+      "remove-pending-review",
       "add-+1",
       "remove-own-+1",
     ]);

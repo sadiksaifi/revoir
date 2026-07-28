@@ -25,9 +25,24 @@ export { SecretRedactor } from "./redaction.js";
 export {
   GitHubAppReviewGateway,
   createGitHubAppJwt,
+  type GitHubPendingReview,
   type GitHubReviewGateway,
   type GitHubReviewSession,
 } from "./review/github.js";
+export {
+  FINDING_CONTRACT_VERSION,
+  FindingContractError,
+  findingFingerprint,
+  validateModelReviewOutput,
+  type FindingAttachment,
+  type FindingDefectKind,
+  type FindingDiagnostic,
+  type FindingFixAction,
+  type FindingImpactKind,
+  type FindingPriority,
+  type ReviewFindingV1,
+  type ValidatedReviewOutput,
+} from "./review/findings.js";
 export {
   CleanReviewOrchestrator,
   createDefaultManualReviewService,
@@ -46,7 +61,16 @@ export {
   type PiSession,
   type PiSessionFactory,
   type ReviewEngine,
+  type ReviewEngineResult,
 } from "./review/pi.js";
+export {
+  createReviewPublication,
+  renderFileFinding,
+  renderInlineFinding,
+  type GitHubInlineReviewComment,
+  type GitHubReviewPayload,
+  type ReviewPublication,
+} from "./review/publication.js";
 export {
   assertPullRequestEligible,
   parsePullRequestUrl,

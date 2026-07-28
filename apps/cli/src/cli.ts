@@ -12,6 +12,7 @@ import {
   runDiagnostics,
 } from "./diagnostics.js";
 import { SecretRedactor } from "./redaction.js";
+import { FindingContractError } from "./review/findings.js";
 import {
   createDefaultManualReviewService,
   type ManualReviewService,
@@ -37,7 +38,7 @@ Usage:
 Commands:
   setup       Create the protected local configuration and validate the installation.
   diagnose    Non-interactively validate an existing installation.
-  review      Review one eligible pull request and publish a clean result.
+  review      Review one eligible pull request and publish validated findings or a clean result.
 
 Setup options:
   --non-interactive
@@ -307,6 +308,23 @@ export async function runCli(
       ).review(reference);
       if (result.status === "clean") {
         write(io.stdout, `Clean review completed for ${reference.url} at ${result.reviewedSha}.\n`);
+      } else if (result.status === "findings") {
+        write(
+          io.stdout,
+          `Published ${result.publishedFindings} finding${result.publishedFindings === 1 ? "" : "s"} for ${reference.url} at ${result.reviewedSha}.\n`,
+        );
+        if (result.rejectedFindings > 0) {
+          const reasons = result.diagnostics
+            .map(
+              (diagnostic) =>
+                `#${diagnostic.index < 0 ? "envelope" : diagnostic.index + 1}: ${diagnostic.message}`,
+            )
+            .join("; ");
+          write(
+            io.stderr,
+            `Warning: rejected ${result.rejectedFindings} invalid or duplicate model finding${result.rejectedFindings === 1 ? "" : "s"} (${redactor.text(reasons)}).\n`,
+          );
+        }
       } else {
         write(
           io.stdout,
@@ -316,6 +334,15 @@ export async function runCli(
       return 0;
     } catch (error) {
       write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
+      if (error instanceof FindingContractError && error.diagnostics.length > 0) {
+        const reasons = error.diagnostics
+          .map(
+            (diagnostic) =>
+              `- #${diagnostic.index < 0 ? "envelope" : diagnostic.index + 1}: ${diagnostic.message}`,
+          )
+          .join("\n");
+        write(io.stderr, `Rejected model findings:\n${redactor.text(reasons)}\n`);
+      }
       return error instanceof PullRequestEligibilityError || error instanceof PullRequestUrlError
         ? 2
         : 1;
