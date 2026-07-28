@@ -27,6 +27,18 @@ function requireLeaseId(value: unknown): string {
   return value;
 }
 
+function requireSettlement(result: unknown, operation: "acknowledged" | "retried"): void {
+  const expectedCount = operation === "acknowledged" ? "ackCount" : "retryCount";
+  const otherCount = operation === "acknowledged" ? "retryCount" : "ackCount";
+  const hasWarnings =
+    isRecord(result) &&
+    "warnings" in result &&
+    (!isRecord(result.warnings) || Object.keys(result.warnings).length > 0);
+  if (!isRecord(result) || result[expectedCount] !== 1 || result[otherCount] !== 0 || hasWarnings) {
+    throw new Error(`Cloudflare Queue did not confirm exactly one ${operation} lease.`);
+  }
+}
+
 function decodeBody(message: Record<string, unknown>): unknown {
   if (!isRecord(message.metadata) || message.metadata["CF-Content-Type"] !== "json") {
     return undefined;
@@ -88,7 +100,7 @@ export class CloudflareQueueClient {
   }
 
   async acknowledge(leaseId: string, signal?: AbortSignal): Promise<void> {
-    await this.#request(
+    const result = await this.#request(
       "ack",
       {
         acks: [{ lease_id: requireLeaseId(leaseId) }],
@@ -96,10 +108,11 @@ export class CloudflareQueueClient {
       },
       signal,
     );
+    requireSettlement(result, "acknowledged");
   }
 
   async retry(leaseId: string, signal?: AbortSignal): Promise<void> {
-    await this.#request(
+    const result = await this.#request(
       "ack",
       {
         acks: [],
@@ -107,6 +120,7 @@ export class CloudflareQueueClient {
       },
       signal,
     );
+    requireSettlement(result, "retried");
   }
 
   async #request(

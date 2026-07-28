@@ -57,7 +57,14 @@ describe("Cloudflare Queue pull client", () => {
           },
         }),
       ),
-      new Response(JSON.stringify({ success: true, errors: [], messages: [], result: {} })),
+      new Response(
+        JSON.stringify({
+          success: true,
+          errors: [],
+          messages: [],
+          result: { ackCount: 1, retryCount: 0, warnings: {} },
+        }),
+      ),
     ];
     const client = new CloudflareQueueClient(
       {
@@ -126,7 +133,7 @@ describe("Cloudflare Queue pull client", () => {
                       },
                     ],
                   }
-                : {},
+                : { ackCount: 0, retryCount: 1, warnings: {} },
           }),
         );
       },
@@ -141,6 +148,109 @@ describe("Cloudflare Queue pull client", () => {
       acks: [],
       retries: [{ lease_id: "lease-2" }],
     });
+  });
+
+  it("requires Cloudflare to confirm exactly one requested lease settlement", async (t) => {
+    const configuration = {
+      accountId: "account-id",
+      queueId: "queue-id",
+      apiToken: "queue-token",
+    };
+    const cases: {
+      name: string;
+      operation: "acknowledge" | "retry";
+      result: unknown;
+      error: RegExp;
+    }[] = [
+      {
+        name: "missing acknowledgement counts",
+        operation: "acknowledge",
+        result: {},
+        error: /did not confirm exactly one acknowledged lease/u,
+      },
+      {
+        name: "zero acknowledged leases",
+        operation: "acknowledge",
+        result: { ackCount: 0, retryCount: 0, warnings: {} },
+        error: /did not confirm exactly one acknowledged lease/u,
+      },
+      {
+        name: "acknowledgement warning",
+        operation: "acknowledge",
+        result: {
+          ackCount: 1,
+          retryCount: 0,
+          warnings: { "lease-1": "lease expired" },
+        },
+        error: /did not confirm exactly one acknowledged lease/u,
+      },
+      {
+        name: "mismatched acknowledgement result",
+        operation: "acknowledge",
+        result: { ackCount: 0, retryCount: 1, warnings: {} },
+        error: /did not confirm exactly one acknowledged lease/u,
+      },
+      {
+        name: "multiple acknowledged leases",
+        operation: "acknowledge",
+        result: { ackCount: 2, retryCount: 0, warnings: {} },
+        error: /did not confirm exactly one acknowledged lease/u,
+      },
+      {
+        name: "missing retry counts",
+        operation: "retry",
+        result: {},
+        error: /did not confirm exactly one retried lease/u,
+      },
+      {
+        name: "zero retried leases",
+        operation: "retry",
+        result: { ackCount: 0, retryCount: 0, warnings: {} },
+        error: /did not confirm exactly one retried lease/u,
+      },
+      {
+        name: "retry warning",
+        operation: "retry",
+        result: {
+          ackCount: 0,
+          retryCount: 1,
+          warnings: { "lease-1": "lease expired" },
+        },
+        error: /did not confirm exactly one retried lease/u,
+      },
+      {
+        name: "mismatched retry result",
+        operation: "retry",
+        result: { ackCount: 1, retryCount: 0, warnings: {} },
+        error: /did not confirm exactly one retried lease/u,
+      },
+      {
+        name: "multiple retried leases",
+        operation: "retry",
+        result: { ackCount: 0, retryCount: 2, warnings: {} },
+        error: /did not confirm exactly one retried lease/u,
+      },
+    ];
+
+    await Promise.all(
+      cases.map((testCase) =>
+        t.test(testCase.name, async () => {
+          const client = new CloudflareQueueClient(
+            configuration,
+            1_200_000,
+            async () =>
+              new Response(
+                JSON.stringify({
+                  success: true,
+                  result: testCase.result,
+                }),
+              ),
+          );
+
+          await assert.rejects(() => client[testCase.operation]("lease-1"), testCase.error);
+        }),
+      ),
+    );
   });
 
   it("rejects unsuccessful and structurally invalid Cloudflare responses", async () => {
