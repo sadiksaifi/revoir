@@ -48,6 +48,6 @@ export function planFindingReconciliation(
 
   return {
     netNewFindings: findings.filter(({ fingerprint }) => !activeFingerprints.has(fingerprint)),
-    obsoleteThreadIds: [...obsoleteThreadIds].sort(),
+    obsoleteThreadIds: [...obsoleteThreadIds].toSorted(),
   };
 }

@@ -539,12 +539,14 @@ class InstallationSession implements GitHubReviewSession {
       await yieldToEventLoop(signal);
     }
 
-    const sortedThreads = ownedOpenThreads.sort((left, right) => left.id.localeCompare(right.id));
+    const sortedThreads = ownedOpenThreads.toSorted((left, right) =>
+      left.id.localeCompare(right.id),
+    );
     this.#ownedOpenThreadIds = new Set(sortedThreads.map(({ id }) => id));
     return {
-      activeFingerprints: [...activeFingerprints].sort(),
+      activeFingerprints: [...activeFingerprints].toSorted(),
       ownedOpenThreads: sortedThreads,
-      runHeadShas: [...runHeadShas].sort(),
+      runHeadShas: [...runHeadShas].toSorted(),
     };
   }
 
@@ -553,7 +555,7 @@ class InstallationSession implements GitHubReviewSession {
     threadIds: readonly string[],
     signal: AbortSignal,
   ): Promise<void> {
-    const uniqueThreadIds = [...new Set(threadIds)].sort();
+    const uniqueThreadIds = [...new Set(threadIds)].toSorted();
     for (const threadId of uniqueThreadIds) {
       if (!this.#ownedOpenThreadIds.has(threadId)) {
         throw new Error("Refusing to resolve a review thread not owned by this GitHub App.");
