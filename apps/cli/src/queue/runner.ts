@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { parseReviewJob, ReviewJobSchemaError, type ReviewJobV1 } from "@revoir/contracts";
 
 import type { RevoirConfiguration } from "../config/schema.js";
@@ -18,6 +20,7 @@ import { PullRequestEligibilityError, type PullRequestReference } from "../revie
 import { CloudflareQueueClient, type QueueDelivery } from "./client.js";
 import {
   FileOperationalFailureStore,
+  type OperationalAttemptSlot,
   type OperationalFailureState,
   type OperationalFailureStore,
 } from "./failure-store.js";
@@ -92,6 +95,58 @@ function fallbackOperationalAttempt(transportAttempt: number): number {
   return Math.min(MAX_OPERATIONAL_ATTEMPTS, Math.max(transportAttempt, 1));
 }
 
+function effectiveAttempt(state: OperationalFailureState): number {
+  return state.reservation?.slot ?? state.committedFailures;
+}
+
+function committedState(
+  failures: OperationalAttemptSlot,
+  category: ReviewFailureCategory = "unknown",
+): OperationalFailureState {
+  return failures === MAX_OPERATIONAL_ATTEMPTS
+    ? { committedFailures: failures, terminalCategory: category }
+    : { committedFailures: failures };
+}
+
+function statesEqual(left: OperationalFailureState, right: OperationalFailureState): boolean {
+  return (
+    left.committedFailures === right.committedFailures &&
+    left.terminalCategory === right.terminalCategory &&
+    left.reservation?.slot === right.reservation?.slot &&
+    left.reservation?.ownerToken === right.reservation?.ownerToken &&
+    left.reservation?.transportAttempt === right.reservation?.transportAttempt
+  );
+}
+
+function moreConservativeState(
+  left: OperationalFailureState,
+  right: OperationalFailureState,
+): OperationalFailureState {
+  const leftAttempt = effectiveAttempt(left);
+  const rightAttempt = effectiveAttempt(right);
+  if (leftAttempt !== rightAttempt) {
+    return leftAttempt > rightAttempt ? left : right;
+  }
+  if (left.committedFailures !== right.committedFailures) {
+    return left.committedFailures > right.committedFailures ? left : right;
+  }
+  if (left.terminalCategory !== "unknown" && right.terminalCategory === "unknown") {
+    return left;
+  }
+  return right;
+}
+
+function consumeReservation(state: OperationalFailureState): OperationalFailureState {
+  if (state.reservation === undefined) {
+    return state;
+  }
+  return committedState(state.reservation.slot, state.terminalCategory);
+}
+
+function isExactCallerCancellation(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true && error === signal.reason;
+}
+
 class StoreOperationTimeoutError extends Error {
   constructor(operation: string) {
     super(`Operational review failure state ${operation} timed out.`);
@@ -142,10 +197,13 @@ function waitForStoreOperation<T>(
 export class QueueReviewRunner implements QueueRunService {
   readonly #configuration: RevoirConfiguration;
   readonly #failures: ReviewFailureReporter;
+  readonly #knownStates = new Map<string, OperationalFailureState>();
   readonly #operationalFailures: OperationalFailureStore;
+  readonly #ownerToken = randomUUID();
   readonly #pendingSaves = new Map<string, Promise<void>>();
   readonly #queue: QueueClient;
   readonly #reviews: ManualReviewService;
+  #serializedConsumption: Promise<void> = Promise.resolve();
 
   constructor(
     configuration: RevoirConfiguration,
@@ -163,7 +221,17 @@ export class QueueReviewRunner implements QueueRunService {
     this.#operationalFailures = operationalFailures;
   }
 
-  async consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
+  consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
+    const consumption = this.#serializedConsumption.then(() => this.#consumeOne(signal));
+    this.#serializedConsumption = consumption.then(
+      () => {},
+      () => {},
+    );
+    return consumption;
+  }
+
+  async #consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
+    throwIfCancelled(signal);
     const delivery = await this.#queue.pullOne(signal);
     if (delivery === undefined) {
       return "idle";
@@ -195,8 +263,38 @@ export class QueueReviewRunner implements QueueRunService {
       return this.#settleStoreFailure(delivery, job, error, signal);
     }
 
-    if (operationalState.failures === MAX_OPERATIONAL_ATTEMPTS) {
-      return this.#settleTerminalFailure(delivery, job, operationalState.terminalCategory, signal);
+    if (operationalState.committedFailures === MAX_OPERATIONAL_ATTEMPTS) {
+      return this.#settleTerminalFailure(
+        delivery,
+        job,
+        operationalState.terminalCategory ?? "unknown",
+        signal,
+      );
+    }
+
+    const slot = (operationalState.committedFailures + 1) as OperationalAttemptSlot;
+    const reservation = {
+      slot,
+      ownerToken: `${this.#ownerToken}:${randomUUID()}`,
+      transportAttempt: delivery.attempt,
+    };
+    const reservedState: OperationalFailureState = {
+      committedFailures: operationalState.committedFailures,
+      reservation,
+      ...(slot === MAX_OPERATIONAL_ATTEMPTS ? { terminalCategory: "unknown" as const } : {}),
+    };
+    try {
+      await this.#saveFailureState(job.deliveryId, reservedState, signal);
+      throwIfCancelled(signal);
+    } catch (error) {
+      if (isExactCallerCancellation(error, signal)) {
+        await this.#rollbackReservation(job.deliveryId, reservation);
+        throw error;
+      }
+      if (signal?.aborted === true) {
+        throw signal.reason instanceof Error ? signal.reason : error;
+      }
+      return this.#settleStoreFailure(delivery, job, error, signal);
     }
 
     try {
@@ -204,47 +302,54 @@ export class QueueReviewRunner implements QueueRunService {
         expectedHeadSha: job.pullRequest.headSha,
         ...(signal === undefined ? {} : { signal }),
       });
-      throwIfCancelled(signal);
-      await this.#queue.acknowledge(delivery.leaseId, signal);
-      await this.#clearFailureState(job.deliveryId);
     } catch (error) {
-      if (signal?.aborted === true) {
-        throw signal.reason instanceof Error ? signal.reason : error;
+      if (isExactCallerCancellation(error, signal)) {
+        await this.#rollbackReservation(job.deliveryId, reservation);
+        throw error;
       }
       if (error instanceof PullRequestEligibilityError) {
+        if (signal?.aborted === true) {
+          throw signal.reason instanceof Error ? signal.reason : error;
+        }
         await this.#queue.acknowledge(delivery.leaseId, signal);
         await this.#clearFailureState(job.deliveryId);
       } else {
-        const nextFailure = operationalState.failures + 1;
         const failure = classifyReviewFailure(error);
-        const nextState: OperationalFailureState =
-          nextFailure >= MAX_OPERATIONAL_ATTEMPTS
-            ? {
-                failures: MAX_OPERATIONAL_ATTEMPTS,
-                terminalCategory: failure.category,
-              }
-            : {
-                failures: nextFailure as 1 | 2,
-              };
+        const nextState = committedState(slot, failure.category);
         try {
-          await this.#saveFailureState(job.deliveryId, nextState, signal);
-          throwIfCancelled(signal);
+          await this.#saveFailureState(
+            job.deliveryId,
+            nextState,
+            signal?.aborted === true ? undefined : signal,
+          );
         } catch (stateError) {
-          throwIfCancelled(signal);
+          if (signal?.aborted === true) {
+            throw signal.reason instanceof Error ? signal.reason : stateError;
+          }
           return this.#settleStoreFailure(delivery, job, stateError, signal);
         }
-        if (nextFailure >= MAX_OPERATIONAL_ATTEMPTS) {
+        if (signal?.aborted === true) {
+          throw signal.reason instanceof Error ? signal.reason : error;
+        }
+        if (slot >= MAX_OPERATIONAL_ATTEMPTS) {
           return this.#settleTerminalFailure(delivery, job, failure.category, signal);
         }
-        await this.#reportFailure(referenceFor(job), failure, nextFailure, signal);
+        await this.#reportFailure(referenceFor(job), failure, slot, signal);
         throwIfCancelled(signal);
         await this.#queue.retry(
           delivery.leaseId,
-          OPERATIONAL_RETRY_DELAYS_SECONDS[nextFailure - 1]!,
+          OPERATIONAL_RETRY_DELAYS_SECONDS[slot - 1]!,
           signal,
         );
       }
+      return "settled";
     }
+
+    // The review completed. From this point onward even caller cancellation cannot
+    // safely prove that Pi did not run, so the reservation remains for redelivery.
+    throwIfCancelled(signal);
+    await this.#queue.acknowledge(delivery.leaseId, signal);
+    await this.#clearFailureState(job.deliveryId);
     return "settled";
   }
 
@@ -260,7 +365,16 @@ export class QueueReviewRunner implements QueueRunService {
       (storeSignal) => this.#operationalFailures.load(deliveryId, storeSignal),
       signal,
     );
-    return waitForStoreOperation(operation, "load", operationSignal, signal);
+    const loaded = await waitForStoreOperation(operation, "load", operationSignal, signal);
+    const known = this.#knownStates.get(deliveryId);
+    const conservative = consumeReservation(
+      known === undefined ? loaded : moreConservativeState(loaded, known),
+    );
+    this.#rememberState(deliveryId, conservative);
+    if (!statesEqual(loaded, conservative)) {
+      await this.#saveFailureState(deliveryId, conservative, signal);
+    }
+    return conservative;
   }
 
   async #saveFailureState(
@@ -268,10 +382,90 @@ export class QueueReviewRunner implements QueueRunService {
     state: OperationalFailureState,
     signal?: AbortSignal,
   ): Promise<void> {
+    this.#rememberState(deliveryId, state);
     const { operation, operationSignal } = this.#startStoreOperation(
       (storeSignal) => this.#operationalFailures.save(deliveryId, state, storeSignal),
       signal,
     );
+    this.#trackPendingSave(deliveryId, operation);
+    await waitForStoreOperation(operation, "save", operationSignal, signal);
+  }
+
+  #rememberState(deliveryId: string, state: OperationalFailureState): void {
+    const known = this.#knownStates.get(deliveryId);
+    if (known === undefined) {
+      this.#knownStates.set(deliveryId, state);
+      return;
+    }
+    this.#knownStates.set(deliveryId, moreConservativeState(known, state));
+  }
+
+  async #rollbackReservation(
+    deliveryId: string,
+    reservation: NonNullable<OperationalFailureState["reservation"]>,
+  ): Promise<boolean> {
+    try {
+      const pendingSave = this.#pendingSaves.get(deliveryId);
+      if (pendingSave !== undefined) {
+        try {
+          await this.#boundStoreOperation(pendingSave, "save");
+        } catch {
+          if (this.#pendingSaves.get(deliveryId) === pendingSave) {
+            return false;
+          }
+        }
+      }
+      const { operation: load, operationSignal: loadSignal } = this.#startStoreOperation(
+        (storeSignal) => this.#operationalFailures.load(deliveryId, storeSignal),
+      );
+      const loaded = await waitForStoreOperation(load, "load", loadSignal);
+      if (
+        loaded.reservation !== undefined &&
+        loaded.reservation.ownerToken !== reservation.ownerToken
+      ) {
+        this.#rememberState(deliveryId, consumeReservation(loaded));
+        return false;
+      }
+      if (
+        loaded.committedFailures >= reservation.slot ||
+        (loaded.reservation !== undefined && loaded.reservation.slot > reservation.slot)
+      ) {
+        this.#rememberState(deliveryId, consumeReservation(loaded));
+        return false;
+      }
+      if (
+        loaded.reservation !== undefined &&
+        loaded.reservation.ownerToken === reservation.ownerToken
+      ) {
+        const rolledBack: OperationalFailureState = {
+          committedFailures: loaded.committedFailures,
+        };
+        await this.#saveRollbackState(deliveryId, rolledBack);
+      }
+      const known = this.#knownStates.get(deliveryId);
+      if (
+        known?.reservation?.ownerToken === reservation.ownerToken &&
+        effectiveAttempt(known) === reservation.slot
+      ) {
+        this.#knownStates.set(deliveryId, {
+          committedFailures: known.committedFailures,
+        });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async #saveRollbackState(deliveryId: string, state: OperationalFailureState): Promise<void> {
+    const { operation, operationSignal } = this.#startStoreOperation((storeSignal) =>
+      this.#operationalFailures.save(deliveryId, state, storeSignal),
+    );
+    this.#trackPendingSave(deliveryId, operation);
+    await waitForStoreOperation(operation, "rollback", operationSignal);
+  }
+
+  #trackPendingSave(deliveryId: string, operation: Promise<void>): void {
     this.#pendingSaves.set(deliveryId, operation);
     void operation.then(
       () => {
@@ -285,7 +479,6 @@ export class QueueReviewRunner implements QueueRunService {
         }
       },
     );
-    await waitForStoreOperation(operation, "save", operationSignal, signal);
   }
 
   #startStoreOperation<T>(
@@ -318,6 +511,7 @@ export class QueueReviewRunner implements QueueRunService {
     // or loop a message that is no longer leased.
     const pendingSave = this.#pendingSaves.get(deliveryId);
     await this.#clearFailureStateNow(deliveryId);
+    this.#knownStates.delete(deliveryId);
     if (pendingSave !== undefined) {
       void pendingSave.then(
         () => this.#clearFailureStateNow(deliveryId),

@@ -27,12 +27,14 @@ const silentFailureReporter: ReviewFailureReporter = {
 
 function memoryFailureStore(
   states: Map<string, OperationalFailureState> = new Map(),
+  saves: OperationalFailureState[] = [],
 ): OperationalFailureStore {
   return {
     async load(deliveryId) {
-      return states.get(deliveryId) ?? { failures: 0 };
+      return states.get(deliveryId) ?? { committedFailures: 0 };
     },
     async save(deliveryId, state) {
+      saves.push(state);
       states.set(deliveryId, state);
     },
     async clear(deliveryId) {
@@ -317,12 +319,13 @@ describe("webhook-to-review pipeline", () => {
       },
     };
     const states = new Map<string, OperationalFailureState>();
+    const saves: OperationalFailureState[] = [];
     const runner = new QueueReviewRunner(
       configuration,
       queue,
       reviews,
       reporter,
-      memoryFailureStore(states),
+      memoryFailureStore(states, saves),
     );
 
     await runner.consumeOne();
@@ -336,6 +339,12 @@ describe("webhook-to-review pipeline", () => {
       { leaseId: "lease-2", delaySeconds: 120 },
     ]);
     assert.deepEqual(acknowledged, ["lease-3"]);
+    assert.deepEqual(
+      saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 2, 3],
+    );
     assert.equal(states.size, 0);
   });
 
@@ -382,12 +391,13 @@ describe("webhook-to-review pipeline", () => {
       },
     };
     const states = new Map<string, OperationalFailureState>();
+    const saves: OperationalFailureState[] = [];
     const runner = new QueueReviewRunner(
       configuration,
       queue,
       reviews,
       reporter,
-      memoryFailureStore(states),
+      memoryFailureStore(states, saves),
     );
 
     await runner.consumeOne();
@@ -408,6 +418,12 @@ describe("webhook-to-review pipeline", () => {
       { leaseId: "terminal-lease-2", delaySeconds: 120 },
     ]);
     assert.deepEqual(acknowledged, ["terminal-lease-3"]);
+    assert.deepEqual(
+      saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 2, 3],
+    );
     assert.equal(states.size, 0);
   });
 
@@ -472,7 +488,7 @@ describe("webhook-to-review pipeline", () => {
     await runner.consumeOne();
     await assert.rejects(runner.consumeOne(), /ACK response was lost/u);
     assert.deepEqual(states.get(job.deliveryId), {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "pi",
     });
     await runner.consumeOne();

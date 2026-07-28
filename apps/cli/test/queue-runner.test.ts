@@ -67,7 +67,7 @@ const silentFailureReporter: ReviewFailureReporter = {
 };
 
 function emptyFailureState(): OperationalFailureState {
-  return { failures: 0 };
+  return { committedFailures: 0 };
 }
 
 async function settleWithin<T>(promise: Promise<T>, message: string): Promise<T> {
@@ -83,16 +83,20 @@ class MemoryOperationalFailureStore implements OperationalFailureStore {
   readonly failures = new Map<string, OperationalFailureState>();
   readonly saves: OperationalFailureState[] = [];
 
-  async load(deliveryId: string): Promise<OperationalFailureState> {
+  async load(deliveryId: string, _signal?: AbortSignal): Promise<OperationalFailureState> {
     return this.failures.get(deliveryId) ?? emptyFailureState();
   }
 
-  async save(deliveryId: string, state: OperationalFailureState): Promise<void> {
+  async save(
+    deliveryId: string,
+    state: OperationalFailureState,
+    _signal?: AbortSignal,
+  ): Promise<void> {
     this.saves.push(state);
     this.failures.set(deliveryId, state);
   }
 
-  async clear(deliveryId: string): Promise<void> {
+  async clear(deliveryId: string, _signal?: AbortSignal): Promise<void> {
     this.failures.delete(deliveryId);
   }
 }
@@ -278,11 +282,21 @@ describe("automatic queue review runner", () => {
     ]);
     assert.deepEqual(acknowledgements, ["lease-3"]);
     assert.deepEqual(reportedAttempts, [1, 2, 3]);
-    assert.deepEqual(failures.saves, [
-      { failures: 1 },
-      { failures: 2 },
-      { failures: 3, terminalCategory: "pi" },
-    ]);
+    assert.deepEqual(
+      failures.saves.map((state) => ({
+        committedFailures: state.committedFailures,
+        reservedSlot: state.reservation?.slot,
+        terminalCategory: state.terminalCategory,
+      })),
+      [
+        { committedFailures: 0, reservedSlot: 1, terminalCategory: undefined },
+        { committedFailures: 1, reservedSlot: undefined, terminalCategory: undefined },
+        { committedFailures: 1, reservedSlot: 2, terminalCategory: undefined },
+        { committedFailures: 2, reservedSlot: undefined, terminalCategory: undefined },
+        { committedFailures: 2, reservedSlot: 3, terminalCategory: "unknown" },
+        { committedFailures: 3, reservedSlot: undefined, terminalCategory: "pi" },
+      ],
+    );
   });
 
   it("acknowledges a successful third attempt after two reported operational failures", async () => {
@@ -486,7 +500,9 @@ describe("automatic queue review runner", () => {
     );
 
     await assert.rejects(runner.consumeOne(controller.signal), cancellation);
-    assert.equal(failures.failures.size, 0);
+    assert.deepEqual(failures.failures.get(reviewJob().deliveryId), {
+      committedFailures: 0,
+    });
     assert.equal(await runner.consumeOne(), "settled");
 
     assert.equal(reviewAttempts, 2);
@@ -546,7 +562,7 @@ describe("automatic queue review runner", () => {
     await runner.consumeOne();
     await runner.consumeOne();
     await assert.rejects(runner.consumeOne(controller.signal), cancellation);
-    assert.equal(failures.failures.get(reviewJob().deliveryId)?.failures, 2);
+    assert.equal(failures.failures.get(reviewJob().deliveryId)?.committedFailures, 2);
     await runner.consumeOne();
 
     assert.deepEqual(reportedAttempts, [1, 2]);
@@ -584,7 +600,7 @@ describe("automatic queue review runner", () => {
     };
     const failures = new MemoryOperationalFailureStore();
     failures.failures.set(reviewJob().deliveryId, {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "pi",
     } as unknown as OperationalFailureState);
 
@@ -641,7 +657,7 @@ describe("automatic queue review runner", () => {
     await runner.consumeOne();
     await assert.rejects(() => runner.consumeOne(), /ack response was lost/u);
     assert.deepEqual(failures.failures.get(reviewJob().deliveryId), {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "unknown",
     });
     await runner.consumeOne();
@@ -684,7 +700,7 @@ describe("automatic queue review runner", () => {
     };
     const failures = new MemoryOperationalFailureStore();
     failures.failures.set(reviewJob().deliveryId, {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "pi",
     });
 
@@ -739,12 +755,12 @@ describe("automatic queue review runner", () => {
     };
     const failures = new MemoryOperationalFailureStore();
     failures.failures.set(reviewJob().deliveryId, {
-      failures: 2,
+      committedFailures: 2,
     });
     const save = failures.save.bind(failures);
     failures.save = async (deliveryId, state) => {
       await save(deliveryId, state);
-      if (state.failures === 3) {
+      if (state.committedFailures === 3) {
         controller.abort(cancellation);
       }
     };
@@ -752,7 +768,7 @@ describe("automatic queue review runner", () => {
 
     await assert.rejects(runner.consumeOne(controller.signal), cancellation);
     assert.deepEqual(failures.failures.get(reviewJob().deliveryId), {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "pi",
     });
     assert.deepEqual(acknowledgements, []);
@@ -803,10 +819,11 @@ describe("automatic queue review runner", () => {
     };
     const failures: OperationalFailureStore = {
       async load() {
-        return { failures: 2 };
+        return { committedFailures: 2 };
       },
       async save(_deliveryId, state, signal) {
-        assert.deepEqual(state, { failures: 3, terminalCategory: "pi" });
+        assert.equal(state.committedFailures, 2);
+        assert.equal(state.reservation?.slot, 3);
         assert.ok(signal);
         saveStarted?.();
         return new Promise<void>(() => {});
@@ -816,7 +833,7 @@ describe("automatic queue review runner", () => {
       },
     };
     const consumption = new QueueReviewRunner(
-      configuration(),
+      configuration({ shellCommandMs: 5 }),
       queue,
       reviews,
       reporter,
@@ -859,11 +876,11 @@ describe("automatic queue review runner", () => {
     };
     const failures = new MemoryOperationalFailureStore();
     failures.failures.set(reviewJob().deliveryId, {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "pi",
     });
     const consumption = new QueueReviewRunner(
-      configuration(),
+      configuration({ shellCommandMs: 5 }),
       queue,
       reviews,
       reporter,
@@ -874,7 +891,7 @@ describe("automatic queue review runner", () => {
 
     await assert.rejects(consumption, cancellation);
     assert.deepEqual(failures.failures.get(reviewJob().deliveryId), {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "pi",
     });
   });
@@ -905,7 +922,7 @@ describe("automatic queue review runner", () => {
     };
     const failures = new MemoryOperationalFailureStore();
     failures.failures.set(reviewJob().deliveryId, {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "pi",
     });
 
@@ -916,7 +933,7 @@ describe("automatic queue review runner", () => {
       cancellation,
     );
     assert.deepEqual(failures.failures.get(reviewJob().deliveryId), {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "pi",
     });
   });
@@ -949,7 +966,7 @@ describe("automatic queue review runner", () => {
       },
     };
     const failures = new MemoryOperationalFailureStore();
-    failures.failures.set(reviewJob().deliveryId, { failures: 2 });
+    failures.failures.set(reviewJob().deliveryId, { committedFailures: 2 });
     const runner = new QueueReviewRunner(configuration(), queue, reviews, reporter, failures);
 
     await runner.consumeOne();
@@ -958,7 +975,10 @@ describe("automatic queue review runner", () => {
     assert.deepEqual(retries, []);
     assert.deepEqual(acknowledgements, ["rejected-report"]);
     assert.equal(failures.failures.size, 0);
-    assert.deepEqual(failures.saves, [{ failures: 3, terminalCategory: "pi" }]);
+    assert.deepEqual(failures.saves.at(-1), {
+      committedFailures: 3,
+      terminalCategory: "pi",
+    });
   });
 
   it("bounds and acknowledges a freshly persisted third failure when reporting stalls", async () => {
@@ -993,7 +1013,7 @@ describe("automatic queue review runner", () => {
       },
     };
     const failures = new MemoryOperationalFailureStore();
-    failures.failures.set(reviewJob().deliveryId, { failures: 2 });
+    failures.failures.set(reviewJob().deliveryId, { committedFailures: 2 });
     const runner = new QueueReviewRunner(
       configuration({ shellCommandMs: 5 }),
       queue,
@@ -1011,7 +1031,10 @@ describe("automatic queue review runner", () => {
     assert.equal(reports, 1);
     assert.deepEqual(retries, []);
     assert.deepEqual(acknowledgements, ["timed-out-report"]);
-    assert.deepEqual(failures.saves, [{ failures: 3, terminalCategory: "pi" }]);
+    assert.deepEqual(failures.saves.at(-1), {
+      committedFailures: 3,
+      terminalCategory: "pi",
+    });
   });
 
   it("settles a loaded terminal failure exactly once per delivery", async () => {
@@ -1043,7 +1066,7 @@ describe("automatic queue review runner", () => {
     };
     const failures = new MemoryOperationalFailureStore();
     failures.failures.set(reviewJob().deliveryId, {
-      failures: 3,
+      committedFailures: 3,
       terminalCategory: "github",
     });
     const runner = new QueueReviewRunner(configuration(), queue, reviews, reporter, failures);
@@ -1130,7 +1153,7 @@ describe("automatic queue review runner", () => {
     assert.equal(reports, 2);
   });
 
-  it("bounds a non-settling state save and prevents an extra review on redelivery", async () => {
+  it("bounds a non-settling reservation save and never runs an unreserved review", async () => {
     const deliveries = [
       delivery("save-timeout", reviewJob(), 1),
       delivery("save-redelivery", reviewJob(), 3),
@@ -1185,7 +1208,7 @@ describe("automatic queue review runner", () => {
       "settled",
     );
 
-    assert.equal(reviews, 1);
+    assert.equal(reviews, 0);
     assert.equal(reports, 2);
     assert.deepEqual(retries, ["save-timeout"]);
     assert.deepEqual(acknowledgements, ["save-redelivery"]);
@@ -1230,7 +1253,7 @@ describe("automatic queue review runner", () => {
       },
     };
     const consumption = new QueueReviewRunner(
-      configuration(),
+      configuration({ shellCommandMs: 5 }),
       queue,
       reviews,
       reporter,
@@ -1296,7 +1319,7 @@ describe("automatic queue review runner", () => {
     assert.equal(clears, 2);
   });
 
-  it("bounds state cleanup after settlement and removes a late save mutation", async () => {
+  it("compensates a late commit save that resolves after terminal transport ACK", async () => {
     let releaseSave: (() => void) | undefined;
     const saveReleased = new Promise<void>((resolve) => {
       releaseSave = resolve;
@@ -1308,7 +1331,9 @@ describe("automatic queue review runner", () => {
         return states.get(deliveryId) ?? emptyFailureState();
       },
       async save(deliveryId, state) {
-        await saveReleased;
+        if (state.committedFailures > 0 && state.reservation === undefined) {
+          await saveReleased;
+        }
         states.set(deliveryId, state);
       },
       async clear(deliveryId) {
@@ -1328,8 +1353,10 @@ describe("automatic queue review runner", () => {
         assert.fail("A terminal transport fallback must ACK.");
       },
     };
+    let reviewAttempts = 0;
     const reviews: ManualReviewService = {
       async review() {
+        reviewAttempts += 1;
         throw new Error("temporary Pi failure");
       },
     };
@@ -1346,6 +1373,7 @@ describe("automatic queue review runner", () => {
       "settled",
     );
     assert.deepEqual(acknowledgements, ["late-save-terminal"]);
+    assert.equal(reviewAttempts, 1);
     assert.equal(states.size, 0);
 
     releaseSave?.();
@@ -1454,7 +1482,7 @@ describe("automatic queue review runner", () => {
     };
     const failures: OperationalFailureStore = {
       async load() {
-        return { failures: 2 };
+        return { committedFailures: 2 };
       },
       async save() {},
       async clear() {
@@ -1560,7 +1588,7 @@ describe("automatic queue review runner", () => {
     let clears = 0;
     const failures: OperationalFailureStore = {
       async load() {
-        return { failures: 0 };
+        return { committedFailures: 0 };
       },
       async save() {
         throw new Error("cannot persist failure count");
@@ -1578,5 +1606,699 @@ describe("automatic queue review runner", () => {
     assert.deepEqual(retries, [{ leaseId: "state-save-retry", delaySeconds: 30 }]);
     assert.deepEqual(acknowledgements, ["state-save-terminal"]);
     assert.equal(clears, 1);
+  });
+
+  it("recovers from an intermittent commit rejection without running more than three reviews", async () => {
+    const deliveries = [1, 2, 3].map((attempt) =>
+      delivery(`lease-${attempt}`, reviewJob(), attempt),
+    );
+    const retries: number[] = [];
+    const acknowledgements: string[] = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+      },
+      async retry(_leaseId, delaySeconds) {
+        retries.push(delaySeconds);
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        if (reviews < 3) {
+          throw new Error("intermittent Pi failure");
+        }
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const save = failures.save.bind(failures);
+    let rejectedCommit = false;
+    failures.save = async (deliveryId, state) => {
+      if (!rejectedCommit && state.committedFailures === 1 && state.reservation === undefined) {
+        rejectedCommit = true;
+        throw new Error("commit save unavailable");
+      }
+      await save(deliveryId, state);
+    };
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviewService,
+      silentFailureReporter,
+      failures,
+    );
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+    await runner.consumeOne();
+
+    assert.equal(reviews, 3);
+    assert.deepEqual(retries, [30, 120]);
+    assert.deepEqual(acknowledgements, ["lease-3"]);
+    assert.deepEqual(
+      failures.saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 2, 3],
+    );
+  });
+
+  it("fails closed while a timed-out commit is unresolved and recovers after its late rejection", async () => {
+    const deliveries = [
+      delivery("commit-timeout", reviewJob(), 1),
+      delivery("pending-redelivery", reviewJob(), 2),
+      delivery("recovered", reviewJob(), 99),
+    ];
+    const retries: string[] = [];
+    const acknowledgements: string[] = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+      },
+      async retry(leaseId) {
+        retries.push(leaseId);
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        if (reviews === 1) {
+          throw new Error("Pi failed");
+        }
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const save = failures.save.bind(failures);
+    let rejectCommit: ((error: Error) => void) | undefined;
+    let delayedCommit = true;
+    failures.save = async (deliveryId, state) => {
+      if (delayedCommit && state.committedFailures === 1 && state.reservation === undefined) {
+        delayedCommit = false;
+        return new Promise<void>((_resolve, reject) => {
+          rejectCommit = reject;
+        });
+      }
+      await save(deliveryId, state);
+    };
+    const runner = new QueueReviewRunner(
+      configuration({ shellCommandMs: 5 }),
+      queue,
+      reviewService,
+      silentFailureReporter,
+      failures,
+    );
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+    assert.equal(reviews, 1);
+    rejectCommit?.(new Error("late commit rejection"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await runner.consumeOne();
+
+    assert.equal(reviews, 2);
+    assert.deepEqual(retries, ["commit-timeout", "pending-redelivery"]);
+    assert.deepEqual(acknowledgements, ["recovered"]);
+    assert.ok(reviews <= 3);
+  });
+
+  it("recovers from a load outage and ignores a high transport attempt once state is healthy", async () => {
+    const deliveries = [
+      delivery("load-outage", reviewJob(), 1),
+      delivery("healthy", reviewJob(), 99),
+    ];
+    const retries: string[] = [];
+    const acknowledgements: string[] = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+      },
+      async retry(leaseId) {
+        retries.push(leaseId);
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const load = failures.load.bind(failures);
+    let loadFailed = false;
+    failures.load = async (deliveryId) => {
+      if (!loadFailed) {
+        loadFailed = true;
+        throw new Error("state load outage");
+      }
+      return load(deliveryId);
+    };
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviewService,
+      silentFailureReporter,
+      failures,
+    );
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+
+    assert.equal(reviews, 1);
+    assert.deepEqual(retries, ["load-outage"]);
+    assert.deepEqual(acknowledgements, ["healthy"]);
+    assert.equal(failures.saves[0]?.reservation?.slot, 1);
+  });
+
+  it("re-acknowledges a transport fallback after ACK loss without running Pi", async () => {
+    const deliveries = [delivery("lost-ack", reviewJob(), 3), delivery("re-ack", reviewJob(), 4)];
+    const acknowledgements: string[] = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+        if (leaseId === "lost-ack") {
+          throw new Error("ACK response lost");
+        }
+      },
+      async retry() {
+        assert.fail("Terminal transport fallback must ACK.");
+      },
+    };
+    let reviews = 0;
+    const failures: OperationalFailureStore = {
+      async load() {
+        throw new Error("state unavailable");
+      },
+      async save() {
+        assert.fail("Unknown state must not run a review.");
+      },
+      async clear() {},
+    };
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      {
+        async review() {
+          reviews += 1;
+          throw new Error("must not run");
+        },
+      },
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(), /ACK response lost/u);
+    await runner.consumeOne();
+
+    assert.equal(reviews, 0);
+    assert.deepEqual(acknowledgements, ["lost-ack", "re-ack"]);
+  });
+
+  it("rolls back an exact cancellation before reservation confirmation and reuses slot one", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("stop before reservation");
+    const deliveries = [delivery("cancelled", reviewJob(), 8), delivery("reused", reviewJob(), 9)];
+    const acknowledgements: string[] = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+      },
+      async retry() {
+        assert.fail("Graceful cancellation must not settle the lease.");
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const save = failures.save.bind(failures);
+    const reservedSlots: number[] = [];
+    let firstReservation = true;
+    let reservationStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      reservationStarted = resolve;
+    });
+    failures.save = async (deliveryId, state, signal) => {
+      if (state.reservation !== undefined) {
+        reservedSlots.push(state.reservation.slot);
+      }
+      if (firstReservation && state.reservation !== undefined) {
+        firstReservation = false;
+        reservationStarted?.();
+        return new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      await save(deliveryId, state);
+    };
+    let reviews = 0;
+    const runner = new QueueReviewRunner(
+      configuration({ shellCommandMs: 10 }),
+      queue,
+      {
+        async review() {
+          reviews += 1;
+          return {
+            status: "clean",
+            reviewedSha: "2".repeat(40),
+            currentSha: "2".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      failures,
+    );
+
+    const cancelled = runner.consumeOne(controller.signal);
+    await started;
+    controller.abort(cancellation);
+    await assert.rejects(cancelled, cancellation);
+    await runner.consumeOne();
+
+    assert.equal(reviews, 1);
+    assert.deepEqual(reservedSlots, [1, 1]);
+    assert.deepEqual(acknowledgements, ["reused"]);
+  });
+
+  it("rolls back exact review cancellation and reuses its owned slot", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("stop active review");
+    const deliveries = [delivery("cancelled", reviewJob(), 7), delivery("reused", reviewJob(), 8)];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge() {},
+      async retry() {
+        assert.fail("Graceful cancellation must not retry.");
+      },
+    };
+    let reviews = 0;
+    let reviewStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      reviewStarted = resolve;
+    });
+    const reviewService: ManualReviewService = {
+      async review(_reference, options) {
+        reviews += 1;
+        if (reviews === 1) {
+          reviewStarted?.();
+          return new Promise((_resolve, reject) => {
+            options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+              once: true,
+            });
+          });
+        }
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviewService,
+      silentFailureReporter,
+      failures,
+    );
+
+    const cancelled = runner.consumeOne(controller.signal);
+    await started;
+    controller.abort(cancellation);
+    await assert.rejects(cancelled, cancellation);
+    await runner.consumeOne();
+
+    assert.deepEqual(
+      failures.saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 1],
+    );
+  });
+
+  it("consumes a slot after failed cancellation rollback before allowing another review", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("stop active review");
+    const deliveries = [delivery("cancelled", reviewJob()), delivery("redelivery", reviewJob())];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge() {},
+      async retry() {
+        assert.fail("Cancellation must not retry.");
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review(_reference, options) {
+        reviews += 1;
+        if (reviews === 1) {
+          controller.abort(cancellation);
+          throw options?.signal?.reason;
+        }
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const save = failures.save.bind(failures);
+    failures.save = async (deliveryId, state) => {
+      if (state.committedFailures === 0 && state.reservation === undefined) {
+        throw new Error("rollback unavailable");
+      }
+      await save(deliveryId, state);
+    };
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviewService,
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(controller.signal), cancellation);
+    await runner.consumeOne();
+
+    assert.deepEqual(
+      failures.saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 2],
+    );
+  });
+
+  it("folds seeded unresolved reservations across runner restarts, including terminal slot three", async () => {
+    const deliveryId = reviewJob().deliveryId;
+    const failures = new MemoryOperationalFailureStore();
+    failures.failures.set(deliveryId, {
+      committedFailures: 0,
+      reservation: { slot: 1, ownerToken: "dead-runner:one", transportAttempt: 1 },
+    });
+    const deliveries = [delivery("fold-slot-one", reviewJob())];
+    let reviews = 0;
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge() {},
+      async retry() {},
+    };
+    await new QueueReviewRunner(
+      configuration(),
+      queue,
+      {
+        async review() {
+          reviews += 1;
+          return {
+            status: "clean",
+            reviewedSha: "2".repeat(40),
+            currentSha: "2".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      failures,
+    ).consumeOne();
+    assert.equal(reviews, 1);
+    assert.deepEqual(
+      failures.saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [2],
+    );
+
+    failures.failures.set(deliveryId, {
+      committedFailures: 2,
+      reservation: { slot: 3, ownerToken: "dead-runner:three", transportAttempt: 3 },
+      terminalCategory: "unknown",
+    });
+    const terminalQueue: QueueClient = {
+      async pullOne() {
+        return delivery("fold-slot-three", reviewJob(), 4);
+      },
+      async acknowledge() {},
+      async retry() {
+        assert.fail("Folded terminal state must ACK.");
+      },
+    };
+    await new QueueReviewRunner(
+      configuration(),
+      terminalQueue,
+      {
+        async review() {
+          assert.fail("An unresolved slot-three reservation must never rerun Pi.");
+        },
+      },
+      silentFailureReporter,
+      failures,
+    ).consumeOne();
+  });
+
+  it("commits an ambiguous abort/error race instead of rolling back the slot", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("daemon stopping");
+    const deliveries = [delivery("ambiguous", reviewJob()), delivery("redelivery", reviewJob())];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge() {},
+      async retry() {
+        assert.fail("Ambiguous cancellation leaves the active lease unsettled.");
+      },
+    };
+    let reviews = 0;
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      {
+        async review() {
+          reviews += 1;
+          if (reviews === 1) {
+            controller.abort(cancellation);
+            throw new Error("provider failed while cancellation raced");
+          }
+          return {
+            status: "clean",
+            reviewedSha: "2".repeat(40),
+            currentSha: "2".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(controller.signal), cancellation);
+    await runner.consumeOne();
+
+    assert.deepEqual(
+      failures.saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 2],
+    );
+  });
+
+  it("retains committed safety across retry loss and success ACK loss", async () => {
+    const deliveries = [
+      delivery("retry-loss", reviewJob()),
+      delivery("ack-loss", reviewJob()),
+      delivery("final", reviewJob()),
+    ];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        if (leaseId === "ack-loss") {
+          throw new Error("success ACK lost");
+        }
+      },
+      async retry(leaseId) {
+        if (leaseId === "retry-loss") {
+          throw new Error("retry response lost");
+        }
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        if (reviews === 1) {
+          throw new Error("Pi failed");
+        }
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviewService,
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(), /retry response lost/u);
+    await assert.rejects(runner.consumeOne(), /success ACK lost/u);
+    await runner.consumeOne();
+
+    assert.equal(reviews, 3);
+    assert.deepEqual(
+      failures.saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 2, 3],
+    );
+  });
+
+  it("does not let a late rollback lower the same-process reservation floor", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("stop active review");
+    const deliveries = [delivery("cancelled", reviewJob()), delivery("redelivery", reviewJob())];
+    const states = new Map<string, OperationalFailureState>();
+    let releaseRollback: (() => void) | undefined;
+    const failures: OperationalFailureStore = {
+      async load(deliveryId) {
+        return states.get(deliveryId) ?? emptyFailureState();
+      },
+      async save(deliveryId, state) {
+        if (state.committedFailures === 0 && state.reservation === undefined) {
+          return new Promise<void>((resolve) => {
+            releaseRollback = () => {
+              states.set(deliveryId, state);
+              resolve();
+            };
+          });
+        }
+        states.set(deliveryId, state);
+      },
+      async clear(deliveryId) {
+        states.delete(deliveryId);
+      },
+    };
+    const reservedSlots: number[] = [];
+    const save = failures.save.bind(failures);
+    failures.save = async (deliveryId, state, signal) => {
+      if (state.reservation !== undefined) {
+        reservedSlots.push(state.reservation.slot);
+      }
+      await save(deliveryId, state, signal);
+    };
+    let reviews = 0;
+    const runner = new QueueReviewRunner(
+      configuration({ shellCommandMs: 5 }),
+      {
+        async pullOne() {
+          return deliveries.shift();
+        },
+        async acknowledge() {},
+        async retry() {
+          assert.fail("Cancellation must not retry.");
+        },
+      },
+      {
+        async review(_reference, options) {
+          reviews += 1;
+          if (reviews === 1) {
+            controller.abort(cancellation);
+            throw options?.signal?.reason;
+          }
+          return {
+            status: "clean",
+            reviewedSha: "2".repeat(40),
+            currentSha: "2".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(controller.signal), cancellation);
+    releaseRollback?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await runner.consumeOne();
+
+    assert.deepEqual(reservedSlots, [1, 2]);
+  });
+
+  it("serializes direct consumers that share one runner state scope", async () => {
+    const deliveries = [
+      delivery("one", reviewJob({ deliveryId: "d195259f-14a4-4865-b369-a5066088e971" })),
+      delivery("two", reviewJob({ deliveryId: "90dff678-d0e5-4a1b-a890-9fcc3f0712c8" })),
+    ];
+    let active = 0;
+    let maximumActive = 0;
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return deliveries.shift();
+        },
+        async acknowledge() {},
+        async retry() {},
+      },
+      {
+        async review() {
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          active -= 1;
+          return {
+            status: "clean",
+            reviewedSha: "2".repeat(40),
+            currentSha: "2".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      new MemoryOperationalFailureStore(),
+    );
+
+    await Promise.all([runner.consumeOne(), runner.consumeOne()]);
+
+    assert.equal(maximumActive, 1);
   });
 });
