@@ -1,0 +1,24 @@
+{
+  "name": "revoir",
+  "version": "0.0.0",
+  "private": true,
+  "description": "",
+  "keywords": [],
+  "license": "MIT",
+  "author": "",
+  "scripts": {
+    "build": "pnpm --recursive --if-present run build",
+    "check": "pnpm run lint && pnpm run format:check && pnpm run typecheck",
+    "dev": "pnpm --filter cli run dev",
+    "format": "oxfmt --disable-nested-config",
+    "format:check": "oxfmt --check --disable-nested-config",
+    "lint": "oxlint --config .oxlintrc.json",
+    "lint:fix": "oxlint --config .oxlintrc.json --fix",
+    "typecheck": "pnpm --recursive --if-present run typecheck"
+  },
+  "devDependencies": {
+    "oxfmt": "0.60.0",
+    "oxlint": "1.75.0"
+  },
+  "packageManager": "pnpm@10.33.2"
+}
