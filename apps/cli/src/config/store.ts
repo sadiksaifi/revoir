@@ -21,7 +21,7 @@ function formatMode(mode: number): string {
 async function assertOwnedByCurrentUser(
   path: string,
   ownerId: number,
-  kind: "Configuration directory" | "Configuration file",
+  kind: "Configuration directory" | "Configuration file" | "Protected application directory",
 ): Promise<void> {
   if (typeof process.getuid === "function" && ownerId !== process.getuid()) {
     throw new ConfigurationFileError(`${kind} "${path}" must be owned by the current user.`);
@@ -79,15 +79,27 @@ export async function loadConfiguration(configFile: string): Promise<RevoirConfi
   return validateConfiguration(parsed);
 }
 
-async function ensurePrivateDirectory(path: string): Promise<void> {
-  await mkdir(path, { recursive: true, mode: DIRECTORY_MODE });
+async function ensurePrivateDirectory(
+  path: string,
+  kind: "Configuration directory" | "Protected application directory",
+): Promise<void> {
+  const created = await mkdir(path, { recursive: true, mode: DIRECTORY_MODE });
   const directoryStats = await lstat(path);
   if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) {
     throw new ConfigurationFileError(
-      `Protected application directory "${path}" must be a real directory, not a symbolic link.`,
+      `${kind} "${path}" must be a real directory, not a symbolic link.`,
     );
   }
-  await chmod(path, DIRECTORY_MODE);
+  await assertOwnedByCurrentUser(path, directoryStats.uid, kind);
+  if (created !== undefined) {
+    await chmod(path, DIRECTORY_MODE);
+    return;
+  }
+  if ((directoryStats.mode & 0o777) !== DIRECTORY_MODE) {
+    throw new ConfigurationFileError(
+      `${kind} "${path}" has unsafe mode ${formatMode(directoryStats.mode)}. Revoir will not change permissions on an existing directory; choose a dedicated private directory or set its mode to 0700 only when it contains no unrelated files.`,
+    );
+  }
 }
 
 export async function writeConfiguration(
@@ -96,11 +108,11 @@ export async function writeConfiguration(
 ): Promise<void> {
   const validated = validateConfiguration(configuration);
   const configDir = dirname(configFile);
-  await ensurePrivateDirectory(configDir);
+  await ensurePrivateDirectory(configDir, "Configuration directory");
   await Promise.all([
-    ensurePrivateDirectory(validated.paths.cacheDir),
-    ensurePrivateDirectory(validated.paths.stateDir),
-    ensurePrivateDirectory(validated.paths.dataDir),
+    ensurePrivateDirectory(validated.paths.cacheDir, "Protected application directory"),
+    ensurePrivateDirectory(validated.paths.stateDir, "Protected application directory"),
+    ensurePrivateDirectory(validated.paths.dataDir, "Protected application directory"),
   ]);
 
   try {

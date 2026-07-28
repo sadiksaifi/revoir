@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -152,6 +152,26 @@ describe("CLI", () => {
     };
     assert.equal(report.ok, true);
     assert.equal(report.checks.length, 6);
+  });
+
+  it("refuses an unsafe existing configuration parent without changing its mode", async () => {
+    const { root, io, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    const configDirectory = join(root, "shared-config");
+    const configFile = join(configDirectory, "revoir.json");
+    await mkdir(configDirectory);
+    await chmod(configDirectory, 0o755);
+
+    assert.equal(
+      await runCli([...setupArguments(privateKeyFile, tokenFile), "--config", configFile], {
+        io,
+        gateway: passingGateway(),
+      }),
+      2,
+    );
+    assert.match(stderr.output, /Configuration directory .* has unsafe mode 0755/u);
+    assert.match(stderr.output, /choose a dedicated private directory/u);
+    assert.equal((await lstat(configDirectory)).mode & 0o777, 0o755);
   });
 
   it("supports interactive setup through the same validation path", async () => {

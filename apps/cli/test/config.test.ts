@@ -173,6 +173,24 @@ describe("configuration file", () => {
     assert.doesNotMatch(await readFile(paths.configFile, "utf8"), /\[REDACTED\]/u);
   });
 
+  it("writes into an existing private configuration directory", async () => {
+    const root = await temporaryDirectory();
+    const configDir = join(root, "private-config");
+    const configFile = join(configDir, "revoir.json");
+    await mkdir(configDir);
+    await chmod(configDir, 0o700);
+    const configuration = createTestConfiguration({
+      cacheDir: join(root, "cache", "revoir"),
+      stateDir: join(root, "state", "revoir"),
+      dataDir: join(root, "data", "revoir"),
+    });
+
+    await writeConfiguration(configFile, configuration);
+
+    assert.equal((await lstat(configDir)).mode & 0o777, 0o700);
+    assert.equal((await lstat(configFile)).mode & 0o777, 0o600);
+  });
+
   it("refuses unsafe file and directory permissions with actionable errors", async () => {
     const root = await temporaryDirectory();
     const paths = resolveApplicationPaths({ XDG_CONFIG_HOME: join(root, "config") }, root);
