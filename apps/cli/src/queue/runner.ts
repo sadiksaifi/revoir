@@ -11,6 +11,9 @@ import {
 } from "../review/orchestrator.js";
 import { PullRequestEligibilityError, type PullRequestReference } from "../review/pull-request.js";
 import { CloudflareQueueClient, type QueueDelivery } from "./client.js";
+import { FileOperationalFailureStore, type OperationalFailureStore } from "./failure-store.js";
+
+export type { OperationalFailureStore } from "./failure-store.js";
 
 const IDLE_POLL_DELAY_MS = 1_000;
 const MAX_OPERATIONAL_ATTEMPTS = 3;
@@ -76,6 +79,10 @@ function throwIfCancelled(signal?: AbortSignal): void {
   }
 }
 
+function fallbackOperationalAttempt(transportAttempt: number, minimumAttempt = 1): number {
+  return Math.min(MAX_OPERATIONAL_ATTEMPTS, Math.max(transportAttempt, minimumAttempt));
+}
+
 async function waitForFailureReport(report: Promise<void>, signal: AbortSignal): Promise<void> {
   if (signal.aborted) {
     return;
@@ -93,6 +100,7 @@ async function waitForFailureReport(report: Promise<void>, signal: AbortSignal):
 export class QueueReviewRunner implements QueueRunService {
   readonly #configuration: RevoirConfiguration;
   readonly #failures: ReviewFailureReporter;
+  readonly #operationalFailures: OperationalFailureStore;
   readonly #queue: QueueClient;
   readonly #reviews: ManualReviewService;
 
@@ -101,11 +109,15 @@ export class QueueReviewRunner implements QueueRunService {
     queue: QueueClient,
     reviews: ManualReviewService,
     failures: ReviewFailureReporter = new GitHubReviewFailureReporter(configuration.github),
+    operationalFailures: OperationalFailureStore = new FileOperationalFailureStore(
+      configuration.paths.stateDir,
+    ),
   ) {
     this.#configuration = configuration;
     this.#queue = queue;
     this.#reviews = reviews;
     this.#failures = failures;
+    this.#operationalFailures = operationalFailures;
   }
 
   async consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
@@ -127,12 +139,35 @@ export class QueueReviewRunner implements QueueRunService {
 
     if (!locallyEligible(job, this.#configuration.github)) {
       await this.#queue.acknowledge(delivery.leaseId, signal);
+      await this.#clearFailureState(job.deliveryId);
       return "settled";
     }
 
-    if (delivery.attempt > MAX_OPERATIONAL_ATTEMPTS) {
+    let operationalFailures: number;
+    try {
+      operationalFailures = await this.#operationalFailures.load(job.deliveryId);
       throwIfCancelled(signal);
+    } catch (error) {
+      throwIfCancelled(signal);
+      const fallbackAttempt = fallbackOperationalAttempt(delivery.attempt);
+      await this.#reportFailure(referenceFor(job), error, fallbackAttempt, signal);
+      throwIfCancelled(signal);
+      if (fallbackAttempt >= MAX_OPERATIONAL_ATTEMPTS) {
+        await this.#queue.acknowledge(delivery.leaseId, signal);
+        await this.#clearFailureState(job.deliveryId);
+      } else {
+        await this.#queue.retry(
+          delivery.leaseId,
+          OPERATIONAL_RETRY_DELAYS_SECONDS[fallbackAttempt - 1]!,
+          signal,
+        );
+      }
+      return "settled";
+    }
+
+    if (operationalFailures >= MAX_OPERATIONAL_ATTEMPTS) {
       await this.#queue.acknowledge(delivery.leaseId, signal);
+      await this.#clearFailureState(job.deliveryId);
       return "settled";
     }
 
@@ -143,41 +178,73 @@ export class QueueReviewRunner implements QueueRunService {
       });
       throwIfCancelled(signal);
       await this.#queue.acknowledge(delivery.leaseId, signal);
+      await this.#clearFailureState(job.deliveryId);
     } catch (error) {
       if (signal?.aborted === true) {
         throw signal.reason instanceof Error ? signal.reason : error;
       }
       if (error instanceof PullRequestEligibilityError) {
         await this.#queue.acknowledge(delivery.leaseId, signal);
+        await this.#clearFailureState(job.deliveryId);
       } else {
-        const timeoutSignal = AbortSignal.timeout(this.#configuration.timeouts.shellCommandMs);
-        const reportingSignal =
-          signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
-        const report = Promise.resolve().then(() =>
-          this.#failures.report(
-            referenceFor(job),
-            error,
-            delivery.attempt,
-            MAX_OPERATIONAL_ATTEMPTS,
-            reportingSignal,
-          ),
-        );
-        // The report promise is joined when the provider cooperates and safely observed if it
-        // ignores cancellation. Queue settlement cannot be held indefinitely by that provider.
-        await waitForFailureReport(report, reportingSignal);
+        const nextFailure = operationalFailures + 1;
+        try {
+          await this.#operationalFailures.save(job.deliveryId, nextFailure);
+        } catch (stateError) {
+          throwIfCancelled(signal);
+          const fallbackAttempt = fallbackOperationalAttempt(delivery.attempt, nextFailure);
+          await this.#reportFailure(referenceFor(job), stateError, fallbackAttempt, signal);
+          throwIfCancelled(signal);
+          if (fallbackAttempt >= MAX_OPERATIONAL_ATTEMPTS) {
+            await this.#queue.acknowledge(delivery.leaseId, signal);
+            await this.#clearFailureState(job.deliveryId);
+          } else {
+            await this.#queue.retry(
+              delivery.leaseId,
+              OPERATIONAL_RETRY_DELAYS_SECONDS[fallbackAttempt - 1]!,
+              signal,
+            );
+          }
+          return "settled";
+        }
+        await this.#reportFailure(referenceFor(job), error, nextFailure, signal);
         throwIfCancelled(signal);
-        if (delivery.attempt >= MAX_OPERATIONAL_ATTEMPTS) {
+        if (nextFailure >= MAX_OPERATIONAL_ATTEMPTS) {
           await this.#queue.acknowledge(delivery.leaseId, signal);
+          await this.#clearFailureState(job.deliveryId);
         } else {
           await this.#queue.retry(
             delivery.leaseId,
-            OPERATIONAL_RETRY_DELAYS_SECONDS[delivery.attempt - 1]!,
+            OPERATIONAL_RETRY_DELAYS_SECONDS[nextFailure - 1]!,
             signal,
           );
         }
       }
     }
     return "settled";
+  }
+
+  async #clearFailureState(deliveryId: string): Promise<void> {
+    // Queue settlement has already been confirmed. A stale local file must not resurrect
+    // or loop a message that is no longer leased.
+    await this.#operationalFailures.clear(deliveryId).catch(() => {});
+  }
+
+  async #reportFailure(
+    reference: PullRequestReference,
+    error: unknown,
+    attempt: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const timeoutSignal = AbortSignal.timeout(this.#configuration.timeouts.shellCommandMs);
+    const reportingSignal =
+      signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
+    const report = Promise.resolve().then(() =>
+      this.#failures.report(reference, error, attempt, MAX_OPERATIONAL_ATTEMPTS, reportingSignal),
+    );
+    // The report promise is joined when the provider cooperates and safely observed if it
+    // ignores cancellation. Queue settlement cannot be held indefinitely by that provider.
+    await waitForFailureReport(report, reportingSignal);
   }
 
   async run(signal?: AbortSignal): Promise<void> {
@@ -201,5 +268,7 @@ export function createDefaultQueueRunService(configuration: RevoirConfiguration)
     configuration,
     new CloudflareQueueClient(configuration.cloudflare, configuration.timeouts.reviewMs),
     createDefaultManualReviewService(configuration),
+    new GitHubReviewFailureReporter(configuration.github),
+    new FileOperationalFailureStore(configuration.paths.stateDir),
   );
 }
