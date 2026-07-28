@@ -118,8 +118,83 @@ const DENIED_REVIEW_COMMANDS = [
   /(?:^|[\s;&|()'"`])(?:[^\s;&|()'"`]+\/)*gh(?=[\s;&|()'"`]|$)/u,
 ];
 
+// Match the command text after the shell removes literal quoting and escapes.
+// Runtime expansion is denied because its executable cannot be proven safely.
+function literalShellCommand(command: string): string | undefined {
+  let result = "";
+  let quote: "'" | '"' | undefined;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (quote === "'") {
+      if (character === "'") {
+        quote = undefined;
+      } else {
+        result += character;
+      }
+      continue;
+    }
+    if (quote === '"') {
+      if (character === '"') {
+        quote = undefined;
+        continue;
+      }
+      if (character === "$" || character === "`") {
+        return undefined;
+      }
+      if (character === "\\") {
+        const escaped = command[index + 1];
+        if (escaped === undefined) {
+          return undefined;
+        }
+        if (escaped === "\n") {
+          index += 1;
+          continue;
+        }
+        if (escaped === "$" || escaped === "`" || escaped === '"' || escaped === "\\") {
+          result += escaped;
+          index += 1;
+          continue;
+        }
+      }
+      result += character;
+      continue;
+    }
+
+    if (character === "'") {
+      quote = "'";
+      continue;
+    }
+    if (character === '"') {
+      quote = '"';
+      continue;
+    }
+    if (character === "$" || character === "`") {
+      return undefined;
+    }
+    if (character === "\\") {
+      const escaped = command[index + 1];
+      if (escaped === undefined) {
+        return undefined;
+      }
+      if (escaped !== "\n") {
+        result += escaped;
+      }
+      index += 1;
+      continue;
+    }
+    result += character;
+  }
+
+  return quote === undefined ? result : undefined;
+}
+
 function reviewCommandAllowed(command: string): boolean {
-  return DENIED_REVIEW_COMMANDS.every((pattern) => !pattern.test(command));
+  const literalCommand = literalShellCommand(command);
+  return (
+    literalCommand !== undefined &&
+    DENIED_REVIEW_COMMANDS.every((pattern) => !pattern.test(literalCommand))
+  );
 }
 
 function reviewCommandEnvironment(environment: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {

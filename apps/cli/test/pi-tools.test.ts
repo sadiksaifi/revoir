@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import { createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
 
 import {
   createReviewBashOperations,
@@ -120,5 +120,49 @@ describe("Pi review isolation", () => {
       );
     }
     assert.deepEqual(executed, []);
+  });
+
+  it("denies package managers constructed by real shell expansion", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "revoir-shell-policy-"));
+    const bin = join(checkout, "bin");
+    const marker = join(checkout, "invocations");
+    try {
+      await mkdir(bin);
+      const fakePnpm = join(bin, "pnpm");
+      await writeFile(fakePnpm, `#!/bin/sh\nprintf "%s\\n" "$*" >> "${marker}"\n`);
+      await chmod(fakePnpm, 0o755);
+
+      const denied = [
+        "p'n'p'm' install",
+        String.raw`p\npm install`,
+        "p\\\nnpm install",
+        "PM=pnpm; $PM install",
+      ];
+      const delegate = createLocalBashOperations();
+      const options = {
+        onData() {},
+        env: { PATH: bin },
+      };
+
+      for (const command of denied) {
+        // eslint-disable-next-line no-await-in-loop
+        const result = await delegate.exec(command, checkout, options);
+        assert.equal(result.exitCode, 0, command);
+      }
+      assert.equal((await readFile(marker, "utf8")).trim().split("\n").length, denied.length);
+
+      const operations = createReviewBashOperations(checkout, 2_000, delegate);
+      for (const command of denied) {
+        // Denied commands must fail before reaching the real shell boundary.
+        // eslint-disable-next-line no-await-in-loop
+        await assert.rejects(
+          () => operations.exec(command, checkout, options),
+          /review policy denies/u,
+        );
+      }
+      assert.equal((await readFile(marker, "utf8")).trim().split("\n").length, denied.length);
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
   });
 });
