@@ -41,7 +41,63 @@ export interface PiSessionOptions {
 }
 
 export interface PiSessionFactory {
-  create(options: PiSessionOptions): Promise<PiSession>;
+  create(options: PiSessionOptions, signal: AbortSignal): Promise<PiSession>;
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled.");
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw abortReason(signal);
+  }
+}
+
+function waitForSessionCreation(
+  creation: Promise<PiSession>,
+  signal: AbortSignal,
+): Promise<PiSession> {
+  return new Promise((resolve, reject) => {
+    let state: "pending" | "resolved" | "aborted" = "pending";
+    const abort = () => {
+      if (state !== "pending") {
+        return;
+      }
+      state = "aborted";
+      signal.removeEventListener("abort", abort);
+      reject(abortReason(signal));
+    };
+
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) {
+      abort();
+    }
+
+    void creation.then(
+      (session) => {
+        if (state === "aborted") {
+          try {
+            session.dispose();
+          } catch {
+            // The review has already failed; best-effort disposal prevents a late session leak.
+          }
+          return;
+        }
+        state = "resolved";
+        signal.removeEventListener("abort", abort);
+        resolve(session);
+      },
+      (error: unknown) => {
+        if (state !== "pending") {
+          return;
+        }
+        state = "resolved";
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function emptyResourceLoader(systemPrompt: string): ResourceLoader {
@@ -91,7 +147,8 @@ export class SdkPiSessionFactory implements PiSessionFactory {
     this.#modelRuntime = modelRuntime;
   }
 
-  async create(options: PiSessionOptions): Promise<PiSession> {
+  async create(options: PiSessionOptions, signal: AbortSignal): Promise<PiSession> {
+    throwIfAborted(signal);
     const separator = options.model.indexOf("/");
     if (separator <= 0 || separator === options.model.length - 1) {
       throw new Error(`Configured model "${options.model}" is invalid.`);
@@ -99,6 +156,7 @@ export class SdkPiSessionFactory implements PiSessionFactory {
     const provider = options.model.slice(0, separator);
     const modelId = options.model.slice(separator + 1);
     const modelRuntime = await this.#modelRuntime;
+    throwIfAborted(signal);
     const model = modelRuntime.getModel(provider, modelId);
     if (model === undefined) {
       throw new Error(`Configured Pi model "${options.model}" is unavailable.`);
@@ -122,12 +180,18 @@ export class SdkPiSessionFactory implements PiSessionFactory {
         prompts: [],
       }),
     });
+    if (signal.aborted) {
+      session.dispose();
+      throw abortReason(signal);
+    }
 
     return {
-      async run(prompt, signal) {
-        if (signal.aborted) {
+      async run(prompt, runSignal) {
+        if (runSignal.aborted) {
           await session.abort();
-          throw signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled.");
+          throw runSignal.reason instanceof Error
+            ? runSignal.reason
+            : new Error("Review was cancelled.");
         }
         let finalText: string | undefined;
         const unsubscribe = session.subscribe((event) => {
@@ -138,12 +202,12 @@ export class SdkPiSessionFactory implements PiSessionFactory {
         const abort = () => {
           void session.abort();
         };
-        signal.addEventListener("abort", abort, { once: true });
+        runSignal.addEventListener("abort", abort, { once: true });
         try {
           await session.prompt(prompt);
-          if (signal.aborted) {
-            throw signal.reason instanceof Error
-              ? signal.reason
+          if (runSignal.aborted) {
+            throw runSignal.reason instanceof Error
+              ? runSignal.reason
               : new Error("Review was cancelled.");
           }
           if (finalText === undefined) {
@@ -151,7 +215,7 @@ export class SdkPiSessionFactory implements PiSessionFactory {
           }
           return finalText;
         } finally {
-          signal.removeEventListener("abort", abort);
+          runSignal.removeEventListener("abort", abort);
           unsubscribe();
         }
       },
@@ -205,12 +269,19 @@ export class PiReviewEngine implements ReviewEngine {
   }
 
   async review(input: ReviewEngineInput, signal: AbortSignal): Promise<void> {
-    const session = await this.#sessionFactory.create({
-      cwd: input.workspace.checkout,
-      model: this.#model.id,
-      reasoning: this.#model.reasoning,
-      systemPrompt: REVIEW_SYSTEM_PROMPT,
-    });
+    throwIfAborted(signal);
+    const session = await waitForSessionCreation(
+      this.#sessionFactory.create(
+        {
+          cwd: input.workspace.checkout,
+          model: this.#model.id,
+          reasoning: this.#model.reasoning,
+          systemPrompt: REVIEW_SYSTEM_PROMPT,
+        },
+        signal,
+      ),
+      signal,
+    );
     try {
       validateCleanResult(await session.run(reviewPrompt(input), signal));
     } finally {

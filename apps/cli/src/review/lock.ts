@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const LOCK_FILE = "manual-review.lock";
@@ -75,6 +75,10 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function sameOwner(left: LockOwner, right: LockOwner): boolean {
+  return left.pid === right.pid && left.owner === right.owner;
+}
+
 export class FileReviewLock implements ReviewLock {
   readonly #lockPath: string;
 
@@ -122,11 +126,7 @@ export class FileReviewLock implements ReviewLock {
         }
         released = true;
         const current = await readLockState(this.#lockPath);
-        if (
-          current.kind === "owned" &&
-          current.owner.pid === owner.pid &&
-          current.owner.owner === owner.owner
-        ) {
+        if (current.kind === "owned" && sameOwner(current.owner, owner)) {
           await unlink(this.#lockPath).catch((error: unknown) => {
             if (!isFileSystemError(error, "ENOENT")) {
               throw error;
@@ -145,25 +145,60 @@ export class FileReviewLock implements ReviewLock {
     if (observed.kind === "invalid" || isProcessAlive(observed.owner.pid)) {
       return false;
     }
-    const confirmed = await readLockState(this.#lockPath);
-    if (confirmed.kind === "missing") {
-      return true;
-    }
-    if (
-      confirmed.kind !== "owned" ||
-      confirmed.owner.pid !== observed.owner.pid ||
-      confirmed.owner.owner !== observed.owner.owner
-    ) {
-      return false;
-    }
+
+    const ownerKey = createHash("sha256")
+      .update(`${observed.owner.pid}\0${observed.owner.owner}`)
+      .digest("hex");
+    const quarantinePath = `${this.#lockPath}.${ownerKey}.stale`;
     try {
-      await unlink(this.#lockPath);
-      return true;
+      await link(this.#lockPath, quarantinePath);
     } catch (error) {
       if (isFileSystemError(error, "ENOENT")) {
         return true;
       }
+      if (isFileSystemError(error, "EEXIST")) {
+        return false;
+      }
       throw error;
+    }
+
+    try {
+      const quarantined = await readLockState(quarantinePath);
+      if (quarantined.kind !== "owned" || !sameOwner(quarantined.owner, observed.owner)) {
+        return false;
+      }
+
+      const current = await readLockState(this.#lockPath);
+      if (current.kind === "missing") {
+        return true;
+      }
+      if (current.kind !== "owned" || !sameOwner(current.owner, observed.owner)) {
+        return false;
+      }
+
+      const [quarantinedStats, currentStats] = await Promise.all([
+        stat(quarantinePath),
+        stat(this.#lockPath),
+      ]);
+      if (quarantinedStats.dev !== currentStats.dev || quarantinedStats.ino !== currentStats.ino) {
+        return false;
+      }
+
+      try {
+        await unlink(this.#lockPath);
+        return true;
+      } catch (error) {
+        if (isFileSystemError(error, "ENOENT")) {
+          return true;
+        }
+        throw error;
+      }
+    } finally {
+      await unlink(quarantinePath).catch((error: unknown) => {
+        if (!isFileSystemError(error, "ENOENT")) {
+          throw error;
+        }
+      });
     }
   }
 }

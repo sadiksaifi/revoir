@@ -9,7 +9,12 @@ import type {
 } from "../src/review/github.js";
 import type { ReviewLock } from "../src/review/lock.js";
 import { CleanReviewOrchestrator, ReviewTimeoutError } from "../src/review/orchestrator.js";
-import type { ReviewEngine } from "../src/review/pi.js";
+import {
+  PiReviewEngine,
+  type PiSession,
+  type PiSessionFactory,
+  type ReviewEngine,
+} from "../src/review/pi.js";
 import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pull-request.js";
 import type { PreparedWorkspace, WorkspacePreparer } from "../src/review/workspace.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
@@ -284,6 +289,64 @@ describe("clean review orchestrator", () => {
     });
     await assert.rejects(() => timedOut.orchestrator.review(reference), ReviewTimeoutError);
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
+  });
+
+  it("times out non-settling session creation, cleans artifacts, and disposes a late session", async () => {
+    let finishCreatingSession: ((session: PiSession) => void) | undefined;
+    let creationSignal: AbortSignal | undefined;
+    let disposed = 0;
+    let releases = 0;
+    const sessions: PiSessionFactory = {
+      create: async (_options, signal) =>
+        new Promise<PiSession>((resolve) => {
+          creationSignal = signal;
+          finishCreatingSession = resolve;
+        }),
+    };
+    const engine = new PiReviewEngine(
+      { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      sessions,
+    );
+    const timedOut = harness({
+      reviewMs: 5,
+      review: (input, signal) => engine.review(input, signal),
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+
+    await assert.rejects(
+      Promise.race([
+        timedOut.orchestrator.review(reference),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("review did not cancel")), 100);
+        }),
+      ]),
+      ReviewTimeoutError,
+    );
+    assert.equal(creationSignal?.aborted, true);
+    assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
+    assert.equal(releases, 1);
+
+    assert.ok(finishCreatingSession);
+    finishCreatingSession({
+      async run() {
+        throw new Error("late session must not run");
+      },
+      dispose() {
+        disposed += 1;
+      },
+    });
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(disposed, 1);
   });
 
   it("aborts a non-settling head request and still cleans every artifact", async () => {
