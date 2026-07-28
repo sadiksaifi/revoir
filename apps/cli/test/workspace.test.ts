@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { devNull, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -603,6 +603,44 @@ describe("Git review workspace", () => {
       await assert.rejects(() => lstat(capturedRoot), { code: "ENOENT" });
       await preparationError.cleanup();
       assert.equal(removalAttempts, 2);
+    } finally {
+      await cleanupTemporaryDirectories();
+    }
+  });
+
+  it("terminates an active Git process when review cancellation arrives", async () => {
+    try {
+      const root = await temporaryDirectory("revoir-git-cancellation-");
+      const executable = join(root, "git");
+      const pidFile = join(root, "pid");
+      await writeFile(
+        executable,
+        `#!/bin/sh
+printf '%s' "$$" > "${pidFile}"
+exec sleep 60
+`,
+        { mode: 0o700 },
+      );
+      await chmod(executable, 0o700);
+      const controller = new AbortController();
+      const operation = new SystemCommandRunner().run(executable, [], {
+        signal: controller.signal,
+        timeoutMs: 120_000,
+      });
+      let pid: number | undefined;
+      while (pid === undefined) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          pid = Number.parseInt(await readFile(pidFile, "utf8"), 10);
+        } catch {
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
+
+      controller.abort(new Error("review cancelled"));
+      await assert.rejects(operation);
+      assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
     } finally {
       await cleanupTemporaryDirectories();
     }

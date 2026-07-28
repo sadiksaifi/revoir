@@ -222,7 +222,6 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     let lease: Awaited<ReturnType<ReviewLock["acquire"]>>;
     try {
       lease = await deadline.wait(acquisition);
-      throwIfAborted(deadline.signal);
     } catch (error) {
       if (error === deadline.error) {
         this.#retainFinalization(
@@ -302,6 +301,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     let failure: unknown;
 
     try {
+      throwIfAborted(signal);
       const github = await this.#github.authenticate(this.#configuration.github, reference, signal);
       throwIfAborted(signal);
       const pullRequest = await github.getPullRequest(reference, signal);
@@ -524,6 +524,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
             }
           }
         }
+      }
+      if (result?.status === "clean" || result?.status === "findings") {
+        await github.removeOwnFailureComment(reference, signal);
+        throwIfAborted(signal);
       }
     } catch (error) {
       failure = error;

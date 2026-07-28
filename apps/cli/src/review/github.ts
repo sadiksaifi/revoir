@@ -3,6 +3,7 @@ import { createSign } from "node:crypto";
 import type { RevoirConfiguration } from "../config/schema.js";
 import { SecretRedactor } from "../redaction.js";
 import type { CompletedCheckEvidence, GitHubReviewEvidence } from "./evidence.js";
+import { REVIEW_FAILURE_MARKER } from "./failure-marker.js";
 import type { GitHubReviewPayload, ReviewPublication } from "./publication.js";
 import { PullRequestEligibilityError } from "./pull-request.js";
 import type {
@@ -43,6 +44,12 @@ export interface GitHubReviewSession {
   ): Promise<GitHubReviewEvidence>;
   getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string>;
   removeOwnCompletionReaction(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
+  upsertFailureComment(
+    reference: PullRequestReference,
+    body: string,
+    signal: AbortSignal,
+  ): Promise<void>;
+  removeOwnFailureComment(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
   removeOwnPendingReview(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
   getPriorReviewState(
     reference: PullRequestReference,
@@ -123,6 +130,12 @@ interface GitHubReviewResponse {
   body: string;
   id: number;
   state: string;
+  userLogin: string;
+}
+
+interface GitHubIssueCommentResponse {
+  body: string;
+  id: number;
   userLogin: string;
 }
 
@@ -543,6 +556,16 @@ function parseReview(value: unknown): GitHubReviewResponse {
   };
 }
 
+function parseIssueComment(value: unknown): GitHubIssueCommentResponse {
+  const comment = record(value, "issue comment");
+  const user = record(comment.user, "issue comment user");
+  return {
+    body: string(comment.body, "issue comment body"),
+    id: positiveInteger(comment.id, "issue comment id"),
+    userLogin: string(user.login, "issue comment user login"),
+  };
+}
+
 class InstallationSession implements GitHubReviewSession {
   readonly installationToken: string;
   readonly #apiBase: string;
@@ -709,6 +732,110 @@ class InstallationSession implements GitHubReviewSession {
       "GitHub completion reaction reconciliation failed.",
     );
     this.#priorRunWasClean = removed[0]!;
+  }
+
+  async #getOwnFailureComments(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<GitHubIssueCommentResponse[]> {
+    const owned: GitHubIssueCommentResponse[] = [];
+    let page = 1;
+    for (;;) {
+      throwIfAborted(signal);
+      // Comment pages form one authoritative snapshot and must remain ordered.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await this.#request(
+        `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/comments?per_page=100&page=${page}`,
+        signal,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      const value = await responseJson(response, "failure comment lookup", signal);
+      if (!Array.isArray(value)) {
+        throw new Error("GitHub failure comment lookup returned an invalid response.");
+      }
+      const comments = value.map((item) => parseIssueComment(item));
+      owned.push(
+        ...comments.filter(
+          (comment) =>
+            comment.userLogin.toLowerCase() === this.#botLogin &&
+            comment.body.includes(REVIEW_FAILURE_MARKER),
+        ),
+      );
+      if (comments.length < 100) {
+        return owned;
+      }
+      page += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
+  }
+
+  async #deleteIssueComment(
+    reference: PullRequestReference,
+    commentId: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const response = await this.#request(
+      `/repos/${reference.owner}/${reference.repository}/issues/comments/${commentId}`,
+      signal,
+      { method: "DELETE" },
+    );
+    if (response.status !== 204 && response.status !== 404) {
+      throw new Error(`GitHub failure comment removal failed with HTTP ${response.status}.`);
+    }
+  }
+
+  async upsertFailureComment(
+    reference: PullRequestReference,
+    body: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!body.startsWith(REVIEW_FAILURE_MARKER)) {
+      throw new Error("Revoir failure comments must include the ownership marker.");
+    }
+    const [current, ...duplicates] = await this.#getOwnFailureComments(reference, signal);
+    if (current === undefined) {
+      const response = await this.#request(
+        `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/comments`,
+        signal,
+        {
+          method: "POST",
+          body: JSON.stringify({ body }),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+      parseIssueComment(await responseJson(response, "failure comment creation", signal));
+      return;
+    }
+    const response = await this.#request(
+      `/repos/${reference.owner}/${reference.repository}/issues/comments/${current.id}`,
+      signal,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ body }),
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+    parseIssueComment(await responseJson(response, "failure comment update", signal));
+    settledValues(
+      await Promise.allSettled(
+        duplicates.map((comment) => this.#deleteIssueComment(reference, comment.id, signal)),
+      ),
+      "GitHub duplicate failure comment cleanup failed.",
+    );
+  }
+
+  async removeOwnFailureComment(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const comments = await this.#getOwnFailureComments(reference, signal);
+    settledValues(
+      await Promise.allSettled(
+        comments.map((comment) => this.#deleteIssueComment(reference, comment.id, signal)),
+      ),
+      "GitHub failure comment cleanup failed.",
+    );
   }
 
   async #graphql(

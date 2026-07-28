@@ -26,6 +26,8 @@ export { CloudflareQueueClient, type QueueDelivery } from "./queue/client.js";
 export {
   createDefaultQueueRunService,
   QueueReviewRunner,
+  type OperationalFailureState,
+  type OperationalFailureStore,
   type QueueClient,
   type QueueConsumption,
   type QueueRunService,
@@ -52,8 +54,22 @@ export {
   type ValidatedReviewOutput,
 } from "./review/findings.js";
 export {
+  classifyReviewFailure,
+  renderReviewFailureComment,
+  REVIEW_FAILURE_MARKER,
+  type ReviewFailure,
+  type ReviewFailureCategory,
+} from "./review/failure.js";
+export {
+  GitHubReviewFailureReporter,
+  type ReviewFailureGateway,
+  type ReviewFailureReporter,
+  type ReviewFailureSession,
+} from "./review/failure-reporter.js";
+export {
   CleanReviewOrchestrator,
   createDefaultManualReviewService,
+  ReviewTimeoutError,
   type ManualReviewOptions,
   type ManualReviewResult,
   type ManualReviewService,

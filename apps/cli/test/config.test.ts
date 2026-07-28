@@ -104,6 +104,44 @@ describe("configuration schema", () => {
     assert.equal(configuration.timeouts.shellCommandMs, 120_000);
   });
 
+  it("accepts positive timeout overrides and rejects invalid durations", () => {
+    const input = {
+      github: {
+        userId: 42,
+        appId: 7,
+        installationId: 8,
+        privateKey: TEST_PRIVATE_KEY,
+        repositories: [{ id: 99, owner: "owner", name: "repo" }],
+      },
+      cloudflare: {
+        accountId: "account",
+        queueId: "queue",
+        apiToken: "token",
+      },
+      paths: {
+        cacheDir: "/cache",
+        stateDir: "/state",
+        dataDir: "/data",
+      },
+    };
+
+    assert.deepEqual(
+      createConfiguration({
+        ...input,
+        timeouts: { reviewMs: 60_000, shellCommandMs: 5_000 },
+      }).timeouts,
+      { reviewMs: 60_000, shellCommandMs: 5_000 },
+    );
+    assert.throws(
+      () =>
+        createConfiguration({
+          ...input,
+          timeouts: { reviewMs: 0, shellCommandMs: 1.5 },
+        }),
+      /timeouts\.reviewMs must be a positive integer[\s\S]+timeouts\.shellCommandMs must be a positive integer/u,
+    );
+  });
+
   it("rejects malformed fields, unsupported providers, reasoning, and versions", () => {
     const base = createTestConfiguration({
       cacheDir: "/cache",
