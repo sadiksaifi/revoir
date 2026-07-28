@@ -224,15 +224,19 @@ export function findingFingerprint(
     ModelFindingV1,
     "path" | "range" | "defectKind" | "impactKind" | "fixAction" | "anchor"
   >,
+  anchorOccurrence?: number,
 ): string {
-  const identity = JSON.stringify([
+  const identityParts: unknown[] = [
     FINDING_CONTRACT_VERSION,
     finding.path,
     finding.defectKind,
     finding.impactKind,
     finding.anchor,
-  ]);
-  return createHash("sha256").update(identity).digest("hex");
+  ];
+  if (anchorOccurrence !== undefined) {
+    identityParts.push(anchorOccurrence);
+  }
+  return createHash("sha256").update(JSON.stringify(identityParts)).digest("hex");
 }
 
 export function prerequisiteFindingFingerprint(
@@ -253,6 +257,28 @@ export function prerequisiteFindingFingerprint(
     finding.anchor,
   ]);
   return createHash("sha256").update(identity).digest("hex");
+}
+
+function anchorOccurrence(file: DiffFile, finding: ModelFindingV1): number | undefined {
+  if (finding.range === null) {
+    return undefined;
+  }
+  const matchingLines = [...file.changedLineText.entries()]
+    .flatMap(([key, text]) => {
+      const [side, lineText] = key.split(":");
+      const line = Number(lineText);
+      return side === finding.range!.side && text.includes(finding.anchor) && Number.isInteger(line)
+        ? [line]
+        : [];
+    })
+    .toSorted((left, right) => left - right);
+  if (matchingLines.length <= 1) {
+    return undefined;
+  }
+  const occurrence = matchingLines.findIndex(
+    (line) => line >= finding.range!.start && line <= finding.range!.end,
+  );
+  return occurrence < 0 ? undefined : occurrence;
 }
 
 function attachment(file: DiffFile, finding: ModelFindingV1): FindingAttachment {
@@ -303,7 +329,7 @@ export async function validateModelReviewOutput(
         throw new Error("range is not a contiguous changed-line range in the reviewed diff.");
       }
       validateTechnicalAnchor(modelFinding, file);
-      const fingerprint = findingFingerprint(modelFinding);
+      const fingerprint = findingFingerprint(modelFinding, anchorOccurrence(file, modelFinding));
       if (fingerprints.has(fingerprint)) {
         diagnostics.push({
           index,

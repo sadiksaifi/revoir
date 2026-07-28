@@ -561,6 +561,36 @@ describe("finding validation", () => {
     assert.equal(result.diagnostics[0]?.code, "duplicate");
   });
 
+  it("keeps distinct same-anchor occurrences publishable across separate changed ranges", async () => {
+    const diff = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,4 @@
+ const retained = true;
++throwIfAborted(signal);
++const between = true;
++throwIfAborted(signal);
+`;
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          range: { start: 2, end: 2, side: "RIGHT" },
+          anchor: "throwIfAborted(signal);",
+        }),
+        finding({
+          range: { start: 4, end: 4, side: "RIGHT" },
+          anchor: "throwIfAborted(signal);",
+        }),
+      ]),
+      { checkout, diff },
+    );
+
+    assert.equal(result.findings.length, 2);
+    assert.equal(result.diagnostics.length, 0);
+    assert.notEqual(result.findings[0]?.fingerprint, result.findings[1]?.fingerprint);
+  });
+
   it("keeps Unicode case-fold lookalikes as distinct exact anchors", async () => {
     const diff = `diff --git a/source.ts b/source.ts
 index 1111111..2222222 100644
