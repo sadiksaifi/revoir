@@ -114,7 +114,10 @@ describe("findings-only review publication", () => {
       assert.match(text, /- Evidence: /u);
       assert.match(text, /- Fix direction: /u);
       assert.match(text, /<!-- revoir:finding:v1:[0-9a-f]{64} -->/u);
-      assert.doesNotMatch(text, /\b(?:great work|looks good|summary|merge this|P1 means)\b/iu);
+      assert.doesNotMatch(
+        text,
+        /\b(?:could|do not merge|great work|likely|looks good|may|merge this|must not merge|P1 means|summary)\b/iu,
+      );
     }
     assert.doesNotMatch(inline, /- Location:/u);
     assert.match(file, /- Location: ``src\/name`with-tick\.ts:10-12 \(RIGHT\)``/u);

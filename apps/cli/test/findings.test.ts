@@ -256,6 +256,59 @@ describe("finding validation", () => {
     }
   });
 
+  it("rejects common speculative and merge-instruction prose before publication", async () => {
+    const cases: readonly [Record<string, unknown>, RegExp][] = [
+      [{ title: "Cancellation could be dropped" }, /speculative language/u],
+      [{ issue: "The added branch may drop the cancellation signal." }, /speculative language/u],
+      [
+        { evidence: "The changed call likely omits the required cancellation signal." },
+        /speculative language/u,
+      ],
+      [
+        { fixDirection: "Guard the call because it could run after cancellation." },
+        /speculative language/u,
+      ],
+      [{ title: "Must not merge with dropped cancellation" }, /merge or severity boilerplate/u],
+      [
+        {
+          fixDirection:
+            "Reject the change; it must not merge until the cancellation signal is forwarded.",
+        },
+        /merge or severity boilerplate/u,
+      ],
+    ];
+
+    for (const [candidate, reason] of cases) {
+      // Keep each prohibited phrase isolated for exact field and reason attribution.
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(
+        () =>
+          validateModelReviewOutput(output([finding(candidate)]), {
+            checkout,
+            diff: DIFF,
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof FindingContractError);
+          assert.match(error.diagnostics[0]?.message ?? "", reason);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("allows concrete impact phrasing that describes a possible consequence", async () => {
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          impact: "A retry could publish the same finding twice after the first request succeeds.",
+        }),
+      ]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.equal(result.findings.length, 1);
+  });
+
   it("publishes valid candidates from mixed output and reports safe diagnostics", async () => {
     const secretSource = "PRIVATE_SOURCE_TOKEN";
     const result = await validateModelReviewOutput(

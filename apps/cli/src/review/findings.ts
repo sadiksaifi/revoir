@@ -44,9 +44,9 @@ export interface ValidatedReviewOutput {
 }
 
 const SPECULATIVE =
-  /\b(?:apparently|appears?|guess|maybe|might|perhaps|possibly|potentially|seems?)\b/iu;
+  /\b(?:apparently|appears?|could|guess|likely|may|maybe|might|perhaps|possibly|potentially|seems?)\b/iu;
 const MERGE_OR_SEVERITY_BOILERPLATE =
-  /\b(?:blocks? merge|do not merge|merge (?:instruction|this)|p[0-3]\s+means|severity\s+(?:is|means))\b/iu;
+  /\b(?:blocks? merge|do not merge|merge (?:instruction|this)|must not merge|p[0-3]\s+means|severity\s+(?:is|means))\b/iu;
 const ACTION_VERB =
   /^(?:add|await|bound|call|cancel|check|clone|close|compare|compute|convert|create|decode|defer|delete|derive|discard|encode|ensure|escape|expose|filter|forward|guard|handle|include|initialize|limit|map|move|parse|pass|preserve|propagate|publish|read|reconcile|record|refactor|reject|release|remove|rename|replace|resolve|restore|retry|return|sanitize|serialize|set|skip|sort|stop|submit|throw|update|use|validate|verify|wrap|write)\b/iu;
 
@@ -66,7 +66,11 @@ export class FindingContractError extends Error {
 
 function validateFindingProse(finding: ModelFindingV1, index: number): ModelFindingV1 {
   const path = `findings[${index}]`;
-  if (SPECULATIVE.test(finding.issue) || SPECULATIVE.test(finding.evidence)) {
+  if (
+    [finding.title, finding.issue, finding.evidence, finding.fixDirection].some((text) =>
+      SPECULATIVE.test(text),
+    )
+  ) {
     throw new Error(`${path} uses speculative language instead of observed evidence.`);
   }
   if (/^(?:n\/?a|none|not provided|unknown)$/iu.test(finding.evidence)) {
