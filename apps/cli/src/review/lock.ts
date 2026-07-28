@@ -2,12 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { inspectProcess, type ProcessIdentity } from "./process-identity.js";
+
 const LOCK_FILE = "manual-review.lock";
 const LOCK_MODE = 0o600;
 
 interface LockOwner {
   pid: number;
   owner: string;
+  processBirth?: string;
 }
 
 interface StaleClaim {
@@ -16,8 +19,9 @@ interface StaleClaim {
   claimant: LockOwner;
 }
 
-interface FileReviewLockHooks {
+export interface FileReviewLockHooks {
   afterStaleClaim?(): Promise<void>;
+  inspectProcess?(pid: number): Promise<ProcessIdentity>;
 }
 
 type LockState = { kind: "missing" } | { kind: "invalid" } | { kind: "owned"; owner: LockOwner };
@@ -57,11 +61,17 @@ function toLockOwner(value: unknown): LockOwner | undefined {
     (value.pid as number) <= 0 ||
     !("owner" in value) ||
     typeof value.owner !== "string" ||
-    value.owner.length === 0
+    value.owner.length === 0 ||
+    ("processBirth" in value &&
+      (typeof value.processBirth !== "string" || value.processBirth.length === 0))
   ) {
     return undefined;
   }
-  return { pid: value.pid as number, owner: value.owner };
+  return {
+    pid: value.pid as number,
+    owner: value.owner,
+    ...("processBirth" in value ? { processBirth: value.processBirth as string } : {}),
+  };
 }
 
 function parseLockOwner(value: string): LockOwner | undefined {
@@ -129,26 +139,21 @@ async function readLockSnapshot(path: string): Promise<LockSnapshot> {
   }
 }
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return !isFileSystemError(error, "ESRCH");
-  }
-}
-
 function sameOwner(left: LockOwner, right: LockOwner): boolean {
-  return left.pid === right.pid && left.owner === right.owner;
+  return (
+    left.pid === right.pid && left.owner === right.owner && left.processBirth === right.processBirth
+  );
 }
 
 export class FileReviewLock implements ReviewLock {
   readonly #lockPath: string;
   readonly #hooks: FileReviewLockHooks;
+  readonly #inspectProcess: (pid: number) => Promise<ProcessIdentity>;
 
   constructor(stateDirectory: string, hooks: FileReviewLockHooks = {}) {
     this.#lockPath = join(stateDirectory, LOCK_FILE);
     this.#hooks = hooks;
+    this.#inspectProcess = hooks.inspectProcess ?? inspectProcess;
   }
 
   async acquire(): Promise<ReviewLockLease> {
@@ -157,7 +162,14 @@ export class FileReviewLock implements ReviewLock {
   }
 
   async #tryAcquire(attemptsRemaining: number): Promise<ReviewLockLease> {
-    const owner: LockOwner = { pid: process.pid, owner: randomUUID() };
+    const identity = await this.#inspectProcess(process.pid);
+    const owner: LockOwner = {
+      pid: process.pid,
+      owner: randomUUID(),
+      ...(identity.kind === "alive" && identity.processBirth !== undefined
+        ? { processBirth: identity.processBirth }
+        : {}),
+    };
     const candidatePath = `${this.#lockPath}.${owner.pid}.${owner.owner}.tmp`;
     try {
       const handle = await open(candidatePath, "wx", LOCK_MODE);
@@ -207,7 +219,7 @@ export class FileReviewLock implements ReviewLock {
     if (observed.kind === "missing") {
       return true;
     }
-    if (observed.kind === "invalid" || isProcessAlive(observed.owner.pid)) {
+    if (observed.kind === "invalid" || (await this.#isOwnerAlive(observed.owner))) {
       return false;
     }
 
@@ -307,10 +319,16 @@ export class FileReviewLock implements ReviewLock {
         }
 
         const existing = parseStaleClaim(value);
+        let existingClaimantAlive = false;
+        if (existing !== undefined && sameOwner(existing.target, target)) {
+          // Claim generations must be inspected in order.
+          // eslint-disable-next-line no-await-in-loop
+          existingClaimantAlive = await this.#isOwnerAlive(existing.claimant);
+        }
         if (
           existing === undefined ||
           !sameOwner(existing.target, target) ||
-          isProcessAlive(existing.claimant.pid)
+          existingClaimantAlive
         ) {
           return undefined;
         }
@@ -320,5 +338,17 @@ export class FileReviewLock implements ReviewLock {
     } finally {
       await unlink(candidatePath).catch(() => {});
     }
+  }
+
+  async #isOwnerAlive(owner: LockOwner): Promise<boolean> {
+    const identity = await this.#inspectProcess(owner.pid);
+    if (identity.kind === "missing") {
+      return false;
+    }
+    return (
+      owner.processBirth === undefined ||
+      identity.processBirth === undefined ||
+      owner.processBirth === identity.processBirth
+    );
   }
 }
