@@ -1,6 +1,8 @@
 import { createSign } from "node:crypto";
 
 import type { RevoirConfiguration } from "../config/schema.js";
+import { SecretRedactor } from "../redaction.js";
+import type { CompletedCheckEvidence, GitHubReviewEvidence } from "./evidence.js";
 import type { GitHubReviewPayload, ReviewPublication } from "./publication.js";
 import { PullRequestEligibilityError } from "./pull-request.js";
 import type {
@@ -34,6 +36,11 @@ export interface GitHubReviewSession {
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<PullRequestSnapshot>;
+  getReviewEvidence(
+    reference: PullRequestReference,
+    headSha: string,
+    signal: AbortSignal,
+  ): Promise<GitHubReviewEvidence>;
   getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string>;
   removeOwnCompletionReaction(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
   removeOwnPendingReview(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
@@ -269,6 +276,16 @@ function string(value: unknown, path: string): string {
   return value;
 }
 
+function optionalString(value: unknown, path: string): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`GitHub returned an invalid ${path}.`);
+  }
+  return value;
+}
+
 function repository(value: unknown, path: string): PullRequestRepository {
   const repositoryValue = record(value, path);
   return {
@@ -285,6 +302,7 @@ function parsePullRequest(value: unknown): PullRequestSnapshot {
   const head = record(pullRequest.head, "pull request head");
   return {
     number: positiveInteger(pullRequest.number, "pull request number"),
+    description: optionalString(pullRequest.body, "pull request description") ?? "",
     state: string(pullRequest.state, "pull request state"),
     draft:
       typeof pullRequest.draft === "boolean"
@@ -297,6 +315,193 @@ function parsePullRequest(value: unknown): PullRequestSnapshot {
     headSha: string(head.sha, "pull request head SHA"),
     baseRepository: repository(base.repo, "pull request base repository"),
     headRepository: repository(head.repo, "pull request head repository"),
+  };
+}
+
+const FAILED_ACTIONS_CONCLUSIONS = new Set([
+  "action_required",
+  "failure",
+  "startup_failure",
+  "timed_out",
+]);
+const MAX_ACTIONS_LOG_BYTES = 64 * 1024;
+const MAX_ACTIONS_LOG_TOTAL_BYTES = 256 * 1024;
+const MAX_ACTIONS_LOG_ENTRIES = MAX_ACTIONS_LOG_TOTAL_BYTES / MAX_ACTIONS_LOG_BYTES;
+const ACTIONS_LOG_TRUNCATION_MARKER = "\n...[Revoir truncated GitHub Actions log]...\n";
+const ACTIONS_LOG_ENTRY_LIMIT_DIAGNOSTIC =
+  "GitHub Actions job log omitted (evidence entry limit reached).";
+const ACTIONS_LOG_AGGREGATE_LIMIT_DIAGNOSTIC =
+  "GitHub Actions job log omitted (aggregate byte limit reached).";
+
+interface ParsedCompletedCheck {
+  evidence: CompletedCheckEvidence;
+  actionsJobId?: number;
+}
+
+class ActionsJobLogHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`GitHub Actions job log lookup failed with HTTP ${status}.`);
+    this.name = "ActionsJobLogHttpError";
+    this.status = status;
+  }
+}
+
+function actionsJobLogUnavailableDiagnostic(error: unknown): string {
+  return error instanceof ActionsJobLogHttpError
+    ? `GitHub Actions job log unavailable (HTTP ${error.status}).`
+    : "GitHub Actions job log unavailable (request failed).";
+}
+
+function asciiCaseInsensitiveEqual(left: string, right: string): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftCode = left.charCodeAt(index);
+    const rightCode = right.charCodeAt(index);
+    const normalizedLeft = leftCode >= 65 && leftCode <= 90 ? leftCode + 32 : leftCode;
+    const normalizedRight = rightCode >= 65 && rightCode <= 90 ? rightCode + 32 : rightCode;
+    if (normalizedLeft !== normalizedRight) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function truncateActionsLogText(value: string, maximumBytes: number): string {
+  const bytes = Buffer.from(value);
+  if (bytes.length <= maximumBytes) {
+    return value;
+  }
+  const markerBytes = Buffer.byteLength(ACTIONS_LOG_TRUNCATION_MARKER);
+  const payloadBytes = maximumBytes - markerBytes - 6;
+  if (payloadBytes <= 0) {
+    return ACTIONS_LOG_TRUNCATION_MARKER.trim().slice(0, maximumBytes);
+  }
+  const headBytes = Math.ceil(payloadBytes / 2);
+  const tailBytes = payloadBytes - headBytes;
+  return `${bytes.subarray(0, headBytes).toString("utf8")}${ACTIONS_LOG_TRUNCATION_MARKER}${bytes
+    .subarray(bytes.length - tailBytes)
+    .toString("utf8")}`;
+}
+
+async function readBoundedActionsLog(
+  response: Response,
+  signal: AbortSignal,
+  maximumBytes: number,
+): Promise<string> {
+  if (response.body === null) {
+    throwIfAborted(signal);
+    return "";
+  }
+  const markerBytes = Buffer.byteLength(ACTIONS_LOG_TRUNCATION_MARKER);
+  const payloadBytes = maximumBytes - markerBytes - 6;
+  const headMaximum = Math.ceil(payloadBytes / 2);
+  const tailMaximum = payloadBytes - headMaximum;
+  const completeChunks: Buffer[] = [];
+  let complete = true;
+  let totalBytes = 0;
+  let head = Buffer.alloc(0);
+  let tail = Buffer.alloc(0);
+  const reader = response.body.getReader();
+  try {
+    for (;;) {
+      throwIfAborted(signal);
+      // eslint-disable-next-line no-await-in-loop
+      const { done, value } = await settleEffect(reader.read(), signal);
+      if (done) {
+        break;
+      }
+      const chunk = Buffer.from(value);
+      totalBytes += chunk.length;
+      if (head.length < headMaximum) {
+        const missing = headMaximum - head.length;
+        head = Buffer.concat([head, chunk.subarray(0, missing)]);
+      }
+      if (tailMaximum > 0) {
+        const combined =
+          chunk.length >= tailMaximum
+            ? chunk.subarray(chunk.length - tailMaximum)
+            : Buffer.concat([tail, chunk]);
+        tail =
+          combined.length <= tailMaximum
+            ? Buffer.from(combined)
+            : Buffer.from(combined.subarray(combined.length - tailMaximum));
+      }
+      if (complete && totalBytes <= maximumBytes) {
+        completeChunks.push(chunk);
+      } else if (complete) {
+        completeChunks.length = 0;
+        complete = false;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  throwIfAborted(signal);
+  if (complete) {
+    return Buffer.concat(completeChunks, totalBytes).toString("utf8");
+  }
+  return `${head.toString("utf8")}${ACTIONS_LOG_TRUNCATION_MARKER}${tail.toString("utf8")}`;
+}
+
+function actionsJobId(detailsUrl: string, reference: PullRequestReference): number | undefined {
+  let url: URL;
+  try {
+    url = new URL(detailsUrl);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port !== "") {
+    return undefined;
+  }
+  const match = /^\/([^/]+)\/([^/]+)\/actions\/runs\/([1-9][0-9]*)\/job\/([1-9][0-9]*)$/u.exec(
+    url.pathname,
+  );
+  if (
+    match === null ||
+    !asciiCaseInsensitiveEqual(match[1]!, reference.owner) ||
+    !asciiCaseInsensitiveEqual(match[2]!, reference.repository)
+  ) {
+    return undefined;
+  }
+  const jobId = Number(match[4]);
+  return Number.isSafeInteger(jobId) ? jobId : undefined;
+}
+
+function parseCompletedCheck(
+  value: unknown,
+  reference: PullRequestReference,
+): ParsedCompletedCheck | undefined {
+  const check = record(value, "check run");
+  const status = string(check.status, "check run status");
+  if (status !== "completed") {
+    return undefined;
+  }
+  const conclusion = string(check.conclusion, "completed check run conclusion");
+  const detailsUrl = optionalString(check.details_url, "check run details URL");
+  const output =
+    check.output === undefined || check.output === null
+      ? undefined
+      : record(check.output, "check output");
+  const title = optionalString(output?.title, "check output title");
+  const summary = optionalString(output?.summary, "check output summary");
+  const evidence: CompletedCheckEvidence = {
+    name: string(check.name, "check run name"),
+    conclusion,
+    ...(detailsUrl === undefined ? {} : { detailsUrl }),
+    ...(title === undefined ? {} : { title }),
+    ...(summary === undefined ? {} : { summary }),
+  };
+  const jobId =
+    detailsUrl !== undefined && FAILED_ACTIONS_CONCLUSIONS.has(conclusion)
+      ? actionsJobId(detailsUrl, reference)
+      : undefined;
+  return {
+    evidence,
+    ...(jobId === undefined ? {} : { actionsJobId: jobId }),
   };
 }
 
@@ -344,6 +549,7 @@ class InstallationSession implements GitHubReviewSession {
   readonly #botLogin: string;
   readonly #fetch: FetchLike;
   readonly #pendingFenceAttemptMs: number;
+  readonly #redactor: SecretRedactor;
   #ownedOpenThreadIds = new Set<string>();
   #priorRunWasClean = false;
 
@@ -353,12 +559,14 @@ class InstallationSession implements GitHubReviewSession {
     fetchImplementation: FetchLike,
     apiBase: string,
     pendingFenceAttemptMs: number,
+    redactor: SecretRedactor,
   ) {
     this.installationToken = installationToken;
     this.#apiBase = apiBase;
     this.#botLogin = `${appSlug}[bot]`.toLowerCase();
     this.#fetch = fetchImplementation;
     this.#pendingFenceAttemptMs = pendingFenceAttemptMs;
+    this.#redactor = redactor;
   }
 
   async #request(path: string, signal: AbortSignal, init: RequestInit = {}): Promise<Response> {
@@ -392,6 +600,101 @@ class InstallationSession implements GitHubReviewSession {
 
   async getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string> {
     return (await this.getPullRequest(reference, signal)).headSha;
+  }
+
+  async getReviewEvidence(
+    reference: PullRequestReference,
+    headSha: string,
+    signal: AbortSignal,
+  ): Promise<GitHubReviewEvidence> {
+    const checks: ParsedCompletedCheck[] = [];
+    let page = 1;
+    for (;;) {
+      throwIfAborted(signal);
+      // Check pages are consumed as they exist now; pending checks are deliberately ignored.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await this.#request(
+        `/repos/${reference.owner}/${reference.repository}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
+        signal,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      const responseValue = await responseJson(response, "check run lookup", signal);
+      const value = record(responseValue, "check run lookup");
+      if (!Array.isArray(value.check_runs)) {
+        throw new Error("GitHub check run lookup returned an invalid response.");
+      }
+      for (const check of value.check_runs) {
+        const parsed = parseCompletedCheck(check, reference);
+        if (parsed !== undefined) {
+          checks.push(parsed);
+        }
+      }
+      if (value.check_runs.length < 100) {
+        break;
+      }
+      page += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
+
+    const selectedLogIndices = new Set<number>();
+    const selectedJobIds = new Set<number>();
+    for (const [index, check] of checks.entries()) {
+      if (check.actionsJobId !== undefined && selectedLogIndices.size < MAX_ACTIONS_LOG_ENTRIES) {
+        selectedLogIndices.add(index);
+        selectedJobIds.add(check.actionsJobId);
+      }
+    }
+    const jobIds = [...selectedJobIds];
+    const settledLogs = await Promise.allSettled(
+      jobIds.map((jobId) => this.#getActionsJobLog(reference, jobId, signal)),
+    );
+    throwIfAborted(signal);
+    const logsByJobId = new Map(
+      jobIds.map((jobId, index) => [jobId, settledLogs[index]!] as const),
+    );
+    let aggregateLogBytes = 0;
+    const completedChecks = checks.map((check, index): CompletedCheckEvidence => {
+      if (check.actionsJobId === undefined) {
+        return check.evidence;
+      }
+      if (!selectedLogIndices.has(index)) {
+        return Object.assign({}, check.evidence, {
+          failedActionsLogUnavailable: ACTIONS_LOG_ENTRY_LIMIT_DIAGNOSTIC,
+        });
+      }
+      const result = logsByJobId.get(check.actionsJobId)!;
+      if (result.status === "rejected") {
+        return Object.assign({}, check.evidence, {
+          failedActionsLogUnavailable: actionsJobLogUnavailableDiagnostic(result.reason),
+        });
+      }
+      const logBytes = Buffer.byteLength(result.value);
+      if (aggregateLogBytes + logBytes > MAX_ACTIONS_LOG_TOTAL_BYTES) {
+        return Object.assign({}, check.evidence, {
+          failedActionsLogUnavailable: ACTIONS_LOG_AGGREGATE_LIMIT_DIAGNOSTIC,
+        });
+      }
+      aggregateLogBytes += logBytes;
+      return Object.assign({}, check.evidence, { failedActionsLog: result.value });
+    });
+    return { completedChecks };
+  }
+
+  async #getActionsJobLog(
+    reference: PullRequestReference,
+    jobId: number,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const response = await this.#request(
+      `/repos/${reference.owner}/${reference.repository}/actions/jobs/${jobId}/logs`,
+      signal,
+    );
+    if (!response.ok) {
+      throw new ActionsJobLogHttpError(response.status);
+    }
+    const log = await readBoundedActionsLog(response, signal, MAX_ACTIONS_LOG_BYTES);
+    return truncateActionsLogText(this.#redactor.text(log), MAX_ACTIONS_LOG_BYTES);
   }
 
   async removeOwnCompletionReaction(
@@ -1041,6 +1344,10 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
       this.#fetch,
       this.#apiBase,
       this.#pendingFenceAttemptMs,
+      new SecretRedactor({
+        configuration,
+        installationToken: installation.token,
+      }),
     );
   }
 }

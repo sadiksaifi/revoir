@@ -61,6 +61,18 @@ new file mode 100644
 diff --git a/mode.sh b/mode.sh
 old mode 100644
 new mode 100755
+diff --git a/dist/app.min.js b/dist/app.min.js
+new file mode 100644
+--- /dev/null
++++ b/dist/app.min.js
+@@ -0,0 +1 @@
++minified
+diff --git a/packages.lock.json b/packages.lock.json
+new file mode 100644
+--- /dev/null
++++ b/packages.lock.json
+@@ -0,0 +1 @@
++{"version":1}
 `;
 
 const GIT_TREE_DIFF = `${DIFF}diff --git a/symlink.ts b/symlink.ts
@@ -135,10 +147,14 @@ describe("finding validation", () => {
       writeFile(join(checkout, "logo.png"), Buffer.from([0, 1, 2])),
       writeFile(join(checkout, "mode.sh"), "#!/bin/sh\n"),
       writeFile(join(checkout, "outside.ts"), "unchanged\n"),
+      writeFile(join(checkout, "packages.lock.json"), '{"version":1}\n'),
       writeFile(join(checkout, "literal[1].ts"), "literal\n"),
       writeFile(join(checkout, NFD_PATH), "decomposed\n"),
       writeFile(join(checkout, LITERAL_SPACE_PATH), "literal space\n"),
       writeFile(join(checkout, BACKSLASH_PATH), "const backslash = true;\n"),
+      mkdir(join(checkout, "dist")).then(() =>
+        writeFile(join(checkout, "dist", "app.min.js"), "minified\n"),
+      ),
       mkdir(join(checkout, "directory")).then(() =>
         writeFile(join(checkout, "directory", "nested.ts"), "nested\n"),
       ),
@@ -315,6 +331,54 @@ describe("finding validation", () => {
     }
   });
 
+  it("rejects findings located in files excluded from detailed review", async () => {
+    await assert.rejects(
+      () =>
+        validateModelReviewOutput(
+          output([
+            finding({
+              path: "dist/app.min.js",
+              range: { start: 1, end: 1, side: "RIGHT" },
+              anchor: "minified",
+            }),
+          ]),
+          { checkout, diff: DIFF },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof FindingContractError);
+        assert.match(error.diagnostics[0]?.message ?? "", /excluded from detailed review/u);
+        return true;
+      },
+    );
+  });
+
+  it("rejects findings against lockfiles recognized by semantic basename rules", async () => {
+    await assert.rejects(
+      () =>
+        validateModelReviewOutput(
+          output([
+            finding({
+              path: "packages.lock.json",
+              range: { start: 1, end: 1, side: "RIGHT" },
+              anchor: "version",
+            }),
+          ]),
+          { checkout, diff: DIFF },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof FindingContractError);
+        assert.deepEqual(error.diagnostics, [
+          {
+            index: 0,
+            code: "invalid",
+            message: "path is excluded from detailed review by the fixed file policy.",
+          },
+        ]);
+        return true;
+      },
+    );
+  });
+
   it("preserves a literal backslash through diff, tree, fingerprint, and payload paths", async () => {
     const repository = await mkdtemp(join(tmpdir(), "revoir-backslash-path-"));
     try {
@@ -360,7 +424,7 @@ describe("finding validation", () => {
     }
   });
 
-  it("validates exact reviewed-head Git tree entry types including an uninitialized gitlink", async () => {
+  it("validates exact tree types while excluding a vendored gitlink", async () => {
     const result = await validateModelReviewOutput(
       output([
         finding({
@@ -395,7 +459,7 @@ describe("finding validation", () => {
       { checkout, diff: GIT_TREE_DIFF },
     );
 
-    assert.equal(result.findings.length, 5, JSON.stringify(result.diagnostics));
+    assert.equal(result.findings.length, 4, JSON.stringify(result.diagnostics));
     assert.deepEqual(
       result.findings.map(({ path, attachment: findingAttachment }) => ({
         path,
@@ -404,7 +468,6 @@ describe("finding validation", () => {
       [
         { path: "source.ts", attachment: { kind: "file", path: "source.ts" } },
         { path: "symlink.ts", attachment: { kind: "file", path: "symlink.ts" } },
-        { path: "vendor", attachment: { kind: "file", path: "vendor" } },
         { path: "literal[1].ts", attachment: { kind: "file", path: "literal[1].ts" } },
         { path: "deleted.ts", attachment: { kind: "file", path: "deleted.ts" } },
       ],
@@ -412,6 +475,7 @@ describe("finding validation", () => {
     assert.deepEqual(
       result.diagnostics.map(({ index, message }) => ({ index, message })),
       [
+        { index: 2, message: "path is excluded from detailed review by the fixed file policy." },
         { index: 4, message: "path does not identify a file in the reviewed head." },
         { index: 5, message: "path does not exist in the reviewed head." },
       ],

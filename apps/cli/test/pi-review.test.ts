@@ -20,6 +20,7 @@ const execFileAsync = promisify(execFile);
 
 const pullRequest: PullRequestSnapshot = {
   number: 17,
+  description: "Preserve the public API while changing the implementation.",
   state: "open",
   draft: false,
   authorId: 42,
@@ -90,6 +91,15 @@ describe("Pi clean review adapter", () => {
         reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
         pullRequest,
         workspace,
+        evidence: {
+          completedChecks: [
+            {
+              name: "unit",
+              conclusion: "failure",
+              failedActionsLog: "FAIL api contract changed",
+            },
+          ],
+        },
       },
       new AbortController().signal,
     );
@@ -98,6 +108,7 @@ describe("Pi clean review adapter", () => {
     assert.equal(sessions.options[0]?.cwd, workspace.checkout);
     assert.equal(sessions.options[0]?.model, "openai-codex/gpt-5.6-sol");
     assert.equal(sessions.options[0]?.reasoning, "high");
+    assert.equal(sessions.options[0]?.shellCommandMs, 120_000);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /read-only/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not modify files/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /"version":1/u);
@@ -109,6 +120,9 @@ describe("Pi clean review adapter", () => {
     assert.equal(sessions.prompts.length, 1);
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.baseSha, "u"));
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.headSha, "u"));
+    assert.match(sessions.prompts[0] ?? "", /Preserve the public API/u);
+    assert.match(sessions.prompts[0] ?? "", /FAIL api contract changed/u);
+    assert.match(sessions.prompts[0] ?? "", /Files eligible for detailed line review/u);
     assert.match(sessions.prompts[0] ?? "", /\+const current = true/u);
     assert.equal(sessions.disposed, 1);
   });
