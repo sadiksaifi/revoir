@@ -66,4 +66,17 @@ describe("launchctl process adapter", () => {
       ],
     ]);
   });
+
+  it("rejects a successful print response that cannot establish service health", async () => {
+    const runner: ProcessRunner = {
+      async run() {
+        return { exitCode: 0, stdout: "unexpected launchctl output\n", stderr: "" };
+      },
+    };
+
+    await assert.rejects(
+      new LaunchctlProcessAdapter(runner).inspect("gui/501/io.github.sadiksaifi.revoir"),
+      /launchctl print returned unrecognized output/u,
+    );
+  });
 });

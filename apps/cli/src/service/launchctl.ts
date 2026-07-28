@@ -108,7 +108,17 @@ export class LaunchctlProcessAdapter implements LaunchctlGateway {
   async inspect(target: string): Promise<LaunchctlInspection | undefined> {
     const result = await this.#run(["print", target], "print");
     if (result.exitCode === 0) {
-      return parseInspection(result.stdout);
+      const inspection = parseInspection(result.stdout);
+      if (
+        inspection.state === undefined &&
+        inspection.pid === undefined &&
+        inspection.lastExitCode === undefined
+      ) {
+        throw new Error(
+          "launchctl print returned unrecognized output; service health could not be established.",
+        );
+      }
+      return inspection;
     }
     if (isMissingService(result)) {
       return undefined;
