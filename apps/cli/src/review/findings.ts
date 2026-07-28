@@ -9,6 +9,9 @@ import {
   type FindingV1,
   type ModelFindingV1,
 } from "@revoir/contracts";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { gfm } from "micromark-extension-gfm";
 
 import { isAttachableRange, parseGitDiff, type DiffFile, type DiffSide } from "./diff.js";
 
@@ -49,13 +52,52 @@ const MERGE_OR_SEVERITY_BOILERPLATE =
   /\b(?:blocks? merge|do not merge|merge (?:instruction|this)|must not merge|p[0-3]\s+means|severity\s+(?:is|means))\b/iu;
 const PRAISE_OR_SUMMARY =
   /(?:\b(?:excellent|good|great|nice|solid)\s+(?:approach|change|implementation|job|work)\b|\blooks?\s+good\b|\bwell[ -]done\b|\bthe rest of (?:the )?(?:change|code|implementation)\b|^(?:(?:general|overall)\s+)?(?:overview|summary)\b|\boverall(?:,|\s+(?:the|this|change|code|implementation)))/iu;
-const MARKDOWN =
-  /(?:`|\[[^\]\r\n]+\]\([^)\r\n]+\)|\*\*|__|^(?:\s{0,3}#{1,6}|\s{0,3}>|\s*(?:[-+*]|\d+\.))\s)/u;
 const PLACEHOLDER =
   /^(?:n\/?a|none|not (?:applicable|available|provided)|pending|placeholder|tbc|tbd|todo|to be (?:added|completed|confirmed|decided|defined|determined|provided)|unknown)[.!?]?$/iu;
 const ACTION_VERB =
   /^(?:add|await|bound|call|cancel|check|clone|close|compare|compute|convert|create|decode|defer|delete|derive|discard|encode|ensure|escape|expose|filter|forward|guard|handle|include|initialize|limit|map|move|parse|pass|preserve|propagate|publish|read|reconcile|record|refactor|reject|release|remove|rename|replace|resolve|restore|retry|return|sanitize|serialize|set|skip|sort|stop|submit|throw|update|use|validate|verify|wrap|write)\b/iu;
 const NON_ACTIONABLE_DETAIL = /^(?:a|an|it|one|ones|something|that|the|these|this|those)$/iu;
+
+type ProseField = keyof Pick<
+  ModelFindingV1,
+  "title" | "issue" | "impact" | "evidence" | "fixDirection"
+>;
+
+interface ProsePolicy {
+  minimumWords: number;
+  substantiveMessage: string;
+  requiresAction: boolean;
+}
+
+const PROSE_POLICIES: Record<ProseField, ProsePolicy> = {
+  title: {
+    minimumWords: 1,
+    substantiveMessage: "must state a substantive title",
+    requiresAction: false,
+  },
+  issue: {
+    minimumWords: 2,
+    substantiveMessage: "must describe an observed issue",
+    requiresAction: false,
+  },
+  impact: {
+    minimumWords: 2,
+    substantiveMessage: "must describe a concrete impact",
+    requiresAction: false,
+  },
+  evidence: {
+    minimumWords: 2,
+    substantiveMessage: "must describe supporting evidence",
+    requiresAction: false,
+  },
+  fixDirection: {
+    minimumWords: 2,
+    substantiveMessage: "must state a concrete action",
+    requiresAction: true,
+  },
+};
+
+const PROSE_FIELDS = Object.keys(PROSE_POLICIES) as readonly ProseField[];
 
 export class FindingContractError extends Error {
   readonly diagnostics: readonly FindingDiagnostic[];
@@ -73,56 +115,55 @@ export class FindingContractError extends Error {
 
 function validateFindingProse(finding: ModelFindingV1, index: number): ModelFindingV1 {
   const path = `findings[${index}]`;
-  if (
-    [finding.title, finding.issue, finding.evidence, finding.fixDirection].some((text) =>
-      SPECULATIVE.test(text),
-    )
-  ) {
-    throw new Error(`${path} uses speculative language instead of observed evidence.`);
-  }
-  const substantiveFields = [
-    ["title", finding.title, 1, "must state a substantive title"],
-    ["issue", finding.issue, 2, "must describe an observed issue"],
-    ["impact", finding.impact, 2, "must describe a concrete impact"],
-    ["evidence", finding.evidence, 2, "must describe supporting evidence"],
-  ] as const;
-  for (const [field, value, minimumWords, reason] of substantiveFields) {
-    if (PLACEHOLDER.test(value) || proseTokens(value).length < minimumWords) {
-      throw new Error(`${path}.${field} ${reason}.`);
+  for (const field of PROSE_FIELDS) {
+    const value = finding[field];
+    const policy = PROSE_POLICIES[field];
+    if (SPECULATIVE.test(value)) {
+      throw new Error(`${path}.${field} uses speculative language instead of observed evidence.`);
+    }
+    if (MERGE_OR_SEVERITY_BOILERPLATE.test(value)) {
+      throw new Error(`${path}.${field} contains merge or severity boilerplate.`);
+    }
+    if (PRAISE_OR_SUMMARY.test(value)) {
+      throw new Error(`${path}.${field} contains praise or general-summary prose.`);
+    }
+    if (!isPlainGfmText(value)) {
+      throw new Error(`${path}.${field} contains Markdown instead of concise finding prose.`);
+    }
+    if (PLACEHOLDER.test(value) || proseTokens(value).length < policy.minimumWords) {
+      throw new Error(`${path}.${field} ${policy.substantiveMessage}.`);
+    }
+    if (policy.requiresAction) {
+      validateFixDirection(value, path);
     }
   }
-  const actionDetails = proseTokens(finding.fixDirection)
-    .slice(1)
-    .filter((token) => !NON_ACTIONABLE_DETAIL.test(token));
-  if (
-    !ACTION_VERB.test(finding.fixDirection) ||
-    actionDetails.length === 0 ||
-    /^(?:consider|fix this|investigate|look into|review)\b/iu.test(finding.fixDirection)
-  ) {
+  return finding;
+}
+
+function validateFixDirection(value: string, path: string): void {
+  const action = ACTION_VERB.exec(value);
+  if (action === null || /^(?:consider|fix this|investigate|look into|review)\b/iu.test(value)) {
     throw new Error(`${path}.fixDirection must state a concrete action.`);
   }
-  if (
-    [finding.title, finding.issue, finding.impact, finding.evidence, finding.fixDirection].some(
-      (text) => MERGE_OR_SEVERITY_BOILERPLATE.test(text),
-    )
-  ) {
-    throw new Error(`${path} contains merge or severity boilerplate.`);
+  const target = value.slice(action[0].length).trim();
+  const targetDetails = proseTokens(target).filter((token) => !NON_ACTIONABLE_DETAIL.test(token));
+  if (PLACEHOLDER.test(target) || targetDetails.length === 0) {
+    throw new Error(`${path}.fixDirection must state a concrete action.`);
   }
-  if (
-    [finding.title, finding.issue, finding.impact, finding.evidence, finding.fixDirection].some(
-      (text) => PRAISE_OR_SUMMARY.test(text),
-    )
-  ) {
-    throw new Error(`${path} contains praise or general-summary prose.`);
+}
+
+function isPlainGfmText(value: string): boolean {
+  const tree = fromMarkdown(value, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  });
+  if (tree.children.length !== 1 || tree.children[0]?.type !== "paragraph") {
+    return false;
   }
-  if (
-    [finding.title, finding.issue, finding.impact, finding.evidence, finding.fixDirection].some(
-      (text) => MARKDOWN.test(text),
-    )
-  ) {
-    throw new Error(`${path} contains Markdown instead of concise finding prose.`);
-  }
-  return finding;
+  return (
+    tree.children[0].children.length > 0 &&
+    tree.children[0].children.every((child) => child.type === "text")
+  );
 }
 
 function proseTokens(value: string): readonly string[] {

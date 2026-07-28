@@ -399,16 +399,23 @@ describe("finding validation", () => {
   });
 
   it("allows concrete impact phrasing that describes a possible consequence", async () => {
-    const result = await validateModelReviewOutput(
-      output([
-        finding({
-          impact: "A retry could publish the same finding twice after the first request succeeds.",
-        }),
-      ]),
-      { checkout, diff: DIFF },
+    await assert.rejects(
+      () =>
+        validateModelReviewOutput(
+          output([
+            finding({
+              impact:
+                "A retry could publish the same finding twice after the first request succeeds.",
+            }),
+          ]),
+          { checkout, diff: DIFF },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof FindingContractError);
+        assert.match(error.diagnostics[0]?.message ?? "", /speculative language/u);
+        return true;
+      },
     );
-
-    assert.equal(result.findings.length, 1);
   });
 
   it("keeps praise, summaries, and Markdown out of publication", async () => {
@@ -452,6 +459,100 @@ describe("finding validation", () => {
           .includes(modelControlledText),
         false,
       );
+    }
+  });
+
+  it("applies every global prose policy to all five published fields", async () => {
+    const fields = ["title", "issue", "impact", "evidence", "fixDirection"] as const;
+    const policies = [
+      {
+        reason: /speculative language/u,
+        value: "Perhaps the changed branch drops the active signal.",
+      },
+      {
+        reason: /merge or severity boilerplate/u,
+        value: "Do not merge because the changed branch drops the active signal.",
+      },
+      {
+        reason: /praise or general-summary prose/u,
+        value: "Great implementation despite the changed branch dropping the active signal.",
+      },
+      {
+        reason: /Markdown instead of concise finding prose/u,
+        value: "The _changed branch_ drops the active signal.",
+      },
+      {
+        reason: /Markdown instead of concise finding prose/u,
+        value: "<!-- hidden --> The changed branch drops the active signal.",
+      },
+    ] as const;
+
+    for (const field of fields) {
+      for (const [policyIndex, policy] of policies.entries()) {
+        const overrides =
+          field === "fixDirection"
+            ? { [field]: `Add a guard because ${policy.value}` }
+            : { [field]: policy.value };
+        const candidate = finding({
+          issue: `The changed ${field} candidate ${policyIndex + 1} omits the active signal.`,
+          ...overrides,
+        });
+        // This matrix keeps every model-controlled publication field under every global policy.
+        // eslint-disable-next-line no-await-in-loop
+        const result = await validateModelReviewOutput(output([finding(), candidate]), {
+          checkout,
+          diff: DIFF,
+        });
+        assert.equal(result.findings.length, 1);
+        assert.match(result.diagnostics[0]?.message ?? "", policy.reason);
+        assert.equal(result.diagnostics[0]?.message.includes(policy.value), false);
+        assert.equal(
+          JSON.stringify(createReviewPublication("1".repeat(40), result.findings)).includes(
+            policy.value,
+          ),
+          false,
+        );
+      }
+    }
+  });
+
+  it("rejects GFM nodes and placeholder action targets before publication", async () => {
+    const prohibited = [
+      { issue: "The `validation` accepts an unsupported state." },
+      { impact: "The <strong>worker</strong> stalls after the invalid transition." },
+      { evidence: "The https://example.test/private branch omits the required guard." },
+      { fixDirection: "Add TBD." },
+      { fixDirection: "Replace unknown." },
+    ];
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          title: "HTTP_server stalls",
+          issue: "state_machine reenters.",
+          impact: "Worker stalls.",
+          evidence: "callback_queue reacquires lock.",
+          fixDirection: "Defer callback_queue.",
+        }),
+        ...prohibited.map((overrides, index) =>
+          finding({
+            ...overrides,
+            issue:
+              "issue" in overrides
+                ? overrides.issue
+                : `The changed branch ${index + 1} omits the required review guard.`,
+          }),
+        ),
+      ]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.equal(result.findings.length, 1);
+    assert.equal(result.findings[0]?.title, "HTTP_server stalls");
+    assert.equal(result.diagnostics.length, prohibited.length);
+    const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
+    for (const candidate of prohibited) {
+      const modelText = Object.values(candidate)[0];
+      assert.equal(typeof modelText === "string" && publication.includes(modelText), false);
     }
   });
 
