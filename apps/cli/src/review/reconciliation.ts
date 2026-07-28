@@ -1,7 +1,7 @@
 import { prerequisiteFindingFingerprint, type ReviewFindingV1 } from "./findings.js";
 
-const FINDING_MARKER = /<!-- revoir:finding:v1:([0-9a-f]{64}) -->/gu;
-const RUN_MARKER = /<!-- revoir:run:v1:([0-9a-f]{40,64}) -->/gu;
+const FINDING_MARKER = /^<!-- revoir:finding:v1:([0-9a-f]{64}) -->\r?$/gmu;
+const RUN_MARKER = /^<!-- revoir:run:v1:([0-9a-f]{40,64}) -->\r?$/gmu;
 
 export interface OwnedFindingThread {
   readonly id: string;

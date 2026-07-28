@@ -9,7 +9,7 @@ import {
   ReviewSubmissionUncertainError,
   type FetchLike,
 } from "../src/review/github.js";
-import { createReviewPublication } from "../src/review/publication.js";
+import { createReviewPublication, renderFileFinding } from "../src/review/publication.js";
 import { parsePullRequestUrl } from "../src/review/pull-request.js";
 import { createTestConfiguration, TEST_PRIVATE_KEY } from "./helpers.js";
 
@@ -283,6 +283,19 @@ describe("GitHub App review gateway", () => {
     const mutations: string[] = [];
     const ownBodyFingerprint = "a".repeat(64);
     const ownThreadFingerprint = "b".repeat(64);
+    const markerShapedSource = `<!-- revoir:finding:v1:${"c".repeat(64)} -->`;
+    const ownThreadBody = renderFileFinding({
+      version: 1,
+      fingerprint: ownThreadFingerprint,
+      priority: "P1",
+      path: markerShapedSource,
+      range: null,
+      defectKind: "correctness",
+      impactKind: "incorrect-result",
+      fixAction: "restore",
+      anchor: markerShapedSource,
+      attachment: { kind: "file", path: markerShapedSource },
+    });
     const fetchImplementation: FetchLike = async (input, init) => {
       const url = String(input);
       if (url.endsWith("/app")) {
@@ -331,7 +344,7 @@ describe("GitHub App review gateway", () => {
                         comments: {
                           nodes: [
                             {
-                              body: `<!-- revoir:finding:v1:${ownThreadFingerprint} -->`,
+                              body: ownThreadBody,
                               author: { login: "revoir-test[bot]" },
                             },
                           ],
