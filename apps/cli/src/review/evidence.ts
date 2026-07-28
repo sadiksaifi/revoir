@@ -5,6 +5,7 @@ export interface CompletedCheckEvidence {
   title?: string;
   summary?: string;
   failedActionsLog?: string;
+  failedActionsLogUnavailable?: string;
 }
 
 export interface GitHubReviewEvidence {

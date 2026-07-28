@@ -307,6 +307,22 @@ interface ParsedCompletedCheck {
   actionsJobId?: number;
 }
 
+class ActionsJobLogHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`GitHub Actions job log lookup failed with HTTP ${status}.`);
+    this.name = "ActionsJobLogHttpError";
+    this.status = status;
+  }
+}
+
+function actionsJobLogUnavailableDiagnostic(error: unknown): string {
+  return error instanceof ActionsJobLogHttpError
+    ? `GitHub Actions job log unavailable (HTTP ${error.status}).`
+    : "GitHub Actions job log unavailable (request failed).";
+}
+
 function actionsJobId(detailsUrl: string, reference: PullRequestReference): number | undefined {
   let url: URL;
   try {
@@ -493,7 +509,14 @@ class InstallationSession implements GitHubReviewSession {
           request = this.#getActionsJobLog(reference, check.actionsJobId, signal);
           logRequests.set(check.actionsJobId, request);
         }
-        return Object.assign({}, check.evidence, { failedActionsLog: await request });
+        try {
+          return Object.assign({}, check.evidence, { failedActionsLog: await request });
+        } catch (error) {
+          throwIfAborted(signal);
+          return Object.assign({}, check.evidence, {
+            failedActionsLogUnavailable: actionsJobLogUnavailableDiagnostic(error),
+          });
+        }
       }),
     );
     return { completedChecks };
@@ -509,7 +532,7 @@ class InstallationSession implements GitHubReviewSession {
       signal,
     );
     if (!response.ok) {
-      throw new Error(`GitHub Actions job log lookup failed with HTTP ${response.status}.`);
+      throw new ActionsJobLogHttpError(response.status);
     }
     return settleEffect(response.text(), signal);
   }
