@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { createConfiguration } from "../src/config/schema.js";
+import type { ReviewFindingV1 } from "../src/review/findings.js";
 import type {
   GitHubReviewGateway,
   GitHubReviewSession,
@@ -114,7 +115,14 @@ function harness(
     headError?: Error;
     postcheckError?: Error;
     headNeverSettles?: boolean;
-    mutateHeadDuring?: "workspace-cleanup" | "reaction-removal" | "completion-creation";
+    mutateHeadDuring?:
+      | "workspace-cleanup"
+      | "reaction-removal"
+      | "completion-creation"
+      | "review-creation";
+    pendingCreationError?: Error;
+    pendingDeletionError?: Error;
+    pendingSubmissionError?: Error;
     reactionDeletionGate?: Promise<void>;
     reactionDeletionError?: Error;
     reactionDeletionErrorAttempts?: number;
@@ -171,6 +179,9 @@ function harness(
     async removeOwnCompletionReaction() {
       events.push("remove-old-thumb");
     },
+    async removeOwnPendingReview() {
+      events.push("remove-pending-review");
+    },
     async addReaction(_reference, reaction: ReviewReaction) {
       events.push(`add-${reaction}`);
       ownedReactions.add(reaction);
@@ -214,6 +225,30 @@ function harness(
       if (id === 10 && options.mutateHeadDuring === "reaction-removal") {
         currentSha = "3".repeat(40);
       }
+    },
+    async createPendingReview() {
+      events.push("create-review");
+      if (options.pendingCreationError !== undefined) {
+        throw options.pendingCreationError;
+      }
+      if (options.mutateHeadDuring === "review-creation") {
+        currentSha = "3".repeat(40);
+      }
+      return {
+        id: 20,
+        async delete() {
+          events.push("delete-review-20");
+          if (options.pendingDeletionError !== undefined) {
+            throw options.pendingDeletionError;
+          }
+        },
+        async submit() {
+          events.push("submit-review-20");
+          if (options.pendingSubmissionError !== undefined) {
+            throw options.pendingSubmissionError;
+          }
+        },
+      };
     },
   };
   const github: GitHubReviewGateway = {
@@ -271,6 +306,28 @@ function harness(
   };
 }
 
+function validatedFinding(): ReviewFindingV1 {
+  return {
+    version: 1,
+    fingerprint: "a".repeat(64),
+    priority: "P1",
+    title: "Cancellation is dropped",
+    path: "source.ts",
+    range: { start: 2, end: 2, side: "RIGHT" },
+    issue: "The added operation does not receive cancellation.",
+    impact: "Timed-out work continues consuming resources.",
+    evidence: "The added call has no signal argument.",
+    fixDirection: "Pass the active signal to the call.",
+    attachment: {
+      kind: "inline",
+      path: "source.ts",
+      startLine: 2,
+      endLine: 2,
+      side: "RIGHT",
+    },
+  };
+}
+
 describe("clean review orchestrator", () => {
   it("runs the exact clean lifecycle after eligibility and cleans before completion", async () => {
     const { events, orchestrator } = harness();
@@ -292,6 +349,82 @@ describe("clean review orchestrator", () => {
       "add-+1",
       "get-head",
     ]);
+  });
+
+  it("publishes findings through one current non-blocking review and never adds a thumb", async () => {
+    const { events, orchestrator } = harness({
+      review: async () => ({
+        findings: [validatedFinding()],
+        diagnostics: [
+          {
+            index: 1,
+            code: "invalid" as const,
+            message: "findings[1].priority must be supported.",
+          },
+        ],
+      }),
+    });
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "findings",
+      reviewedSha: "2".repeat(40),
+      currentSha: "2".repeat(40),
+      publishedFindings: 1,
+      rejectedFindings: 1,
+      diagnostics: [
+        {
+          index: 1,
+          code: "invalid",
+          message: "findings[1].priority must be supported.",
+        },
+      ],
+    });
+    assert.deepEqual(events.slice(-6), [
+      "delete-10",
+      "get-head",
+      "remove-pending-review",
+      "create-review",
+      "get-head",
+      "submit-review-20",
+    ]);
+    assert.equal(events.filter((event) => event === "create-review").length, 1);
+    assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("deletes a pending findings review when the head changes before submission", async () => {
+    const { events, orchestrator } = harness({
+      mutateHeadDuring: "review-creation",
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "stale",
+      reviewedSha: "2".repeat(40),
+      currentSha: "3".repeat(40),
+    });
+    assert.deepEqual(events.slice(-3), ["create-review", "get-head", "delete-review-20"]);
+    assert.equal(events.includes("submit-review-20"), false);
+    assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("cleans pending review state after creation and submission failures", async () => {
+    const creation = harness({
+      pendingCreationError: new Error("draft failed"),
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    await assert.rejects(() => creation.orchestrator.review(reference), /draft failed/u);
+    assert.equal(creation.events.includes("delete-review-20"), false);
+    assert.equal(creation.events.includes("add-+1"), false);
+
+    const submission = harness({
+      pendingSubmissionError: new Error("submit failed"),
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    await assert.rejects(() => submission.orchestrator.review(reference), /submit failed/u);
+    assert.deepEqual(submission.events.slice(-3), [
+      "get-head",
+      "submit-review-20",
+      "delete-review-20",
+    ]);
+    assert.equal(submission.events.includes("add-+1"), false);
   });
 
   it("removes the active reaction and publishes no completion for stale output", async () => {

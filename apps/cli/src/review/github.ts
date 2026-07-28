@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 
 import type { RevoirConfiguration } from "../config/schema.js";
+import type { GitHubReviewPayload, ReviewPublication } from "./publication.js";
 import { PullRequestEligibilityError } from "./pull-request.js";
 import type {
   PullRequestReference,
@@ -10,6 +11,12 @@ import type {
 
 export type ReviewReaction = "eyes" | "+1";
 
+export interface GitHubPendingReview {
+  readonly id: number;
+  delete(signal: AbortSignal): Promise<void>;
+  submit(signal: AbortSignal): Promise<void>;
+}
+
 export interface GitHubReviewSession {
   readonly installationToken: string;
   getPullRequest(
@@ -18,6 +25,7 @@ export interface GitHubReviewSession {
   ): Promise<PullRequestSnapshot>;
   getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string>;
   removeOwnCompletionReaction(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
+  removeOwnPendingReview(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
   removeOwnReaction(
     reference: PullRequestReference,
     reaction: ReviewReaction,
@@ -33,6 +41,11 @@ export interface GitHubReviewSession {
     reactionId: number,
     signal: AbortSignal,
   ): Promise<void>;
+  createPendingReview(
+    reference: PullRequestReference,
+    publication: ReviewPublication,
+    signal: AbortSignal,
+  ): Promise<GitHubPendingReview>;
 }
 
 export interface GitHubReviewGateway {
@@ -62,6 +75,12 @@ interface GitHubReactionResponse {
   user: {
     login: string;
   };
+}
+
+interface GitHubReviewResponse {
+  id: number;
+  state: string;
+  userLogin: string;
 }
 
 function base64Url(value: string | Buffer): string {
@@ -239,6 +258,16 @@ function parseReaction(value: unknown): GitHubReactionResponse {
   };
 }
 
+function parseReview(value: unknown): GitHubReviewResponse {
+  const review = record(value, "review");
+  const user = record(review.user, "review user");
+  return {
+    id: positiveInteger(review.id, "review id"),
+    state: string(review.state, "review state"),
+    userLogin: string(user.login, "review user login"),
+  };
+}
+
 class InstallationSession implements GitHubReviewSession {
   readonly installationToken: string;
   readonly #apiBase: string;
@@ -295,6 +324,51 @@ class InstallationSession implements GitHubReviewSession {
     signal: AbortSignal,
   ): Promise<void> {
     await this.removeOwnReaction(reference, "+1", signal);
+  }
+
+  async removeOwnPendingReview(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const ownedReviewIds = new Set<number>();
+    let page = 1;
+    for (;;) {
+      throwIfAborted(signal);
+      // Review pages must be requested and validated in order.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await this.#request(
+        `/repos/${reference.owner}/${reference.repository}/pulls/${reference.number}/reviews?per_page=100&page=${page}`,
+        signal,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      const value = await responseJson(response, "pending review lookup", signal);
+      if (!Array.isArray(value)) {
+        throw new Error("GitHub pending review lookup returned an invalid response.");
+      }
+      const reviews = value.map((item) => parseReview(item));
+      for (const review of reviews) {
+        if (
+          review.state.toUpperCase() === "PENDING" &&
+          review.userLogin.toLowerCase() === this.#botLogin
+        ) {
+          ownedReviewIds.add(review.id);
+        }
+      }
+      if (reviews.length < 100) {
+        break;
+      }
+      page += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
+    settledValues(
+      await Promise.allSettled(
+        [...ownedReviewIds].map((reviewId) =>
+          this.#deletePendingReview(reference, reviewId, signal),
+        ),
+      ),
+      "GitHub pending review reconciliation failed.",
+    );
   }
 
   async removeOwnReaction(
@@ -372,6 +446,112 @@ class InstallationSession implements GitHubReviewSession {
     if (response.status !== 204 && response.status !== 404) {
       throw new Error(`GitHub reaction removal failed with HTTP ${response.status}.`);
     }
+  }
+
+  async #createReview(
+    reference: PullRequestReference,
+    payload: GitHubReviewPayload,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    return this.#request(
+      `/repos/${reference.owner}/${reference.repository}/pulls/${reference.number}/reviews`,
+      signal,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+
+  async #deletePendingReview(
+    reference: PullRequestReference,
+    reviewId: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const response = await this.#request(
+      `/repos/${reference.owner}/${reference.repository}/pulls/${reference.number}/reviews/${reviewId}`,
+      signal,
+      { method: "DELETE" },
+    );
+    if (response.status !== 204 && response.status !== 404) {
+      throw new Error(`GitHub pending review removal failed with HTTP ${response.status}.`);
+    }
+    throwIfAborted(signal);
+  }
+
+  async #getReview(
+    reference: PullRequestReference,
+    reviewId: number,
+    signal: AbortSignal,
+  ): Promise<GitHubReviewResponse> {
+    const response = await this.#request(
+      `/repos/${reference.owner}/${reference.repository}/pulls/${reference.number}/reviews/${reviewId}`,
+      signal,
+    );
+    return parseReview(await responseJson(response, "review lookup", signal));
+  }
+
+  async createPendingReview(
+    reference: PullRequestReference,
+    publication: ReviewPublication,
+    signal: AbortSignal,
+  ): Promise<GitHubPendingReview> {
+    const response = await this.#createReview(reference, publication.payload, signal);
+    let reviewResponse = response;
+    if (
+      !response.ok &&
+      response.status === 422 &&
+      publication.payload.comments !== undefined &&
+      publication.payload.comments.length > 0
+    ) {
+      reviewResponse = await this.#createReview(reference, publication.fallbackPayload, signal);
+    }
+    if (!reviewResponse.ok) {
+      throw new Error(`GitHub pending review creation failed with HTTP ${reviewResponse.status}.`);
+    }
+    const created = record(
+      await responseJson(reviewResponse, "pending review creation", signal),
+      "pending review",
+    );
+    const id = positiveInteger(created.id, "pending review id");
+    return {
+      id,
+      delete: (deleteSignal) => this.#deletePendingReview(reference, id, deleteSignal),
+      submit: async (submitSignal) => {
+        let failure: unknown;
+        try {
+          const submitResponse = await this.#request(
+            `/repos/${reference.owner}/${reference.repository}/pulls/${reference.number}/reviews/${id}/events`,
+            submitSignal,
+            {
+              method: "POST",
+              body: JSON.stringify({ event: "COMMENT" }),
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+          if (submitResponse.ok) {
+            throwIfAborted(submitSignal);
+            return;
+          }
+          failure =
+            submitResponse.status === 422
+              ? new Error("GitHub rejected the non-blocking review submission.")
+              : new Error(`GitHub review submission failed with HTTP ${submitResponse.status}.`);
+        } catch (error) {
+          failure = error;
+        }
+
+        const liveReview = await this.#getReview(reference, id, submitSignal);
+        if (
+          liveReview.state.toUpperCase() !== "PENDING" &&
+          liveReview.userLogin.toLowerCase() === this.#botLogin
+        ) {
+          return;
+        }
+        throw failure;
+      },
+    };
   }
 }
 

@@ -1,7 +1,9 @@
 import type { RevoirConfiguration } from "../config/schema.js";
+import type { FindingDiagnostic } from "./findings.js";
 import { GitHubAppReviewGateway, type GitHubReviewGateway } from "./github.js";
 import { FileReviewLock, type ReviewLock } from "./lock.js";
 import { PiReviewEngine, type ReviewEngine } from "./pi.js";
+import { createReviewPublication } from "./publication.js";
 import { assertPullRequestEligible, type PullRequestReference } from "./pull-request.js";
 import { createTerminalHandle, type TerminalHandle } from "./terminal-handle.js";
 import {
@@ -10,11 +12,20 @@ import {
   type WorkspacePreparer,
 } from "./workspace.js";
 
-export interface ManualReviewResult {
-  status: "clean" | "stale";
-  reviewedSha: string;
-  currentSha: string;
-}
+export type ManualReviewResult =
+  | {
+      status: "clean" | "stale";
+      reviewedSha: string;
+      currentSha: string;
+    }
+  | {
+      status: "findings";
+      reviewedSha: string;
+      currentSha: string;
+      publishedFindings: number;
+      rejectedFindings: number;
+      diagnostics: readonly FindingDiagnostic[];
+    };
 
 export interface ManualReviewService {
   review(reference: PullRequestReference): Promise<ManualReviewResult>;
@@ -230,6 +241,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     const terminalSignal = new AbortController().signal;
     let workspaceCleanup: TerminalHandle | undefined;
     let activeReaction: TerminalHandle | undefined;
+    let pendingReviewCleanup: TerminalHandle | undefined;
     let result: ManualReviewResult | undefined;
     let failure: unknown;
 
@@ -267,7 +279,13 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       }
       workspaceCleanup = createTerminalHandle(workspace.cleanup);
       throwIfAborted(signal);
-      await this.#reviewEngine.review({ reference, pullRequest, workspace }, signal);
+      const engineResult = (await this.#reviewEngine.review(
+        { reference, pullRequest, workspace },
+        signal,
+      )) ?? {
+        findings: [],
+        diagnostics: [],
+      };
       throwIfAborted(signal);
 
       const workspaceFailures = await completeTerminal(workspaceCleanup);
@@ -284,37 +302,77 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       const currentSha = await github.getHeadSha(reference, signal);
       throwIfAborted(signal);
       if (currentSha === pullRequest.headSha) {
-        activeReaction = createTerminalHandle(() =>
-          github.removeOwnReaction(reference, "+1", terminalSignal),
-        );
-        const completionReactionId = await github.addReaction(reference, "+1", signal);
-        activeReaction = createTerminalHandle(() =>
-          github.deleteReaction(reference, completionReactionId, terminalSignal),
-        );
-        throwIfAborted(signal);
-        const postCompletionSha = await github.getHeadSha(reference, signal);
-        throwIfAborted(signal);
-        if (postCompletionSha === pullRequest.headSha) {
-          activeReaction = undefined;
-          result = {
-            status: "clean",
-            reviewedSha: pullRequest.headSha,
-            currentSha: postCompletionSha,
-          };
-        } else {
-          const completionCleanupFailures = await completeTerminal(activeReaction);
-          activeReaction = undefined;
-          if (completionCleanupFailures.length > 0) {
-            throw new AggregateError(
-              completionCleanupFailures,
-              "Completion reaction cleanup required retries.",
-            );
+        if (engineResult.findings.length > 0) {
+          const publication = createReviewPublication(pullRequest.headSha, engineResult.findings);
+          await github.removeOwnPendingReview(reference, signal);
+          throwIfAborted(signal);
+          pendingReviewCleanup = createTerminalHandle(() =>
+            github.removeOwnPendingReview(reference, terminalSignal),
+          );
+          const pendingReview = await github.createPendingReview(reference, publication, signal);
+          pendingReviewCleanup = createTerminalHandle(() => pendingReview.delete(terminalSignal));
+          throwIfAborted(signal);
+          const postDraftSha = await github.getHeadSha(reference, signal);
+          throwIfAborted(signal);
+          if (postDraftSha === pullRequest.headSha) {
+            await pendingReview.submit(signal);
+            pendingReviewCleanup = undefined;
+            result = {
+              status: "findings",
+              reviewedSha: pullRequest.headSha,
+              currentSha: postDraftSha,
+              publishedFindings: engineResult.findings.length,
+              rejectedFindings: engineResult.diagnostics.length,
+              diagnostics: engineResult.diagnostics,
+            };
+          } else {
+            const pendingReviewFailures = await completeTerminal(pendingReviewCleanup);
+            pendingReviewCleanup = undefined;
+            if (pendingReviewFailures.length > 0) {
+              throw new AggregateError(
+                pendingReviewFailures,
+                "Pending review cleanup required retries.",
+              );
+            }
+            result = {
+              status: "stale",
+              reviewedSha: pullRequest.headSha,
+              currentSha: postDraftSha,
+            };
           }
-          result = {
-            status: "stale",
-            reviewedSha: pullRequest.headSha,
-            currentSha: postCompletionSha,
-          };
+        } else {
+          activeReaction = createTerminalHandle(() =>
+            github.removeOwnReaction(reference, "+1", terminalSignal),
+          );
+          const completionReactionId = await github.addReaction(reference, "+1", signal);
+          activeReaction = createTerminalHandle(() =>
+            github.deleteReaction(reference, completionReactionId, terminalSignal),
+          );
+          throwIfAborted(signal);
+          const postCompletionSha = await github.getHeadSha(reference, signal);
+          throwIfAborted(signal);
+          if (postCompletionSha === pullRequest.headSha) {
+            activeReaction = undefined;
+            result = {
+              status: "clean",
+              reviewedSha: pullRequest.headSha,
+              currentSha: postCompletionSha,
+            };
+          } else {
+            const completionCleanupFailures = await completeTerminal(activeReaction);
+            activeReaction = undefined;
+            if (completionCleanupFailures.length > 0) {
+              throw new AggregateError(
+                completionCleanupFailures,
+                "Completion reaction cleanup required retries.",
+              );
+            }
+            result = {
+              status: "stale",
+              reviewedSha: pullRequest.headSha,
+              currentSha: postCompletionSha,
+            };
+          }
         }
       } else {
         result = {
@@ -331,6 +389,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     if (workspaceCleanup !== undefined) {
       cleanupFailures.push(...(await completeTerminal(workspaceCleanup)));
       workspaceCleanup = undefined;
+    }
+    if (pendingReviewCleanup !== undefined) {
+      cleanupFailures.push(...(await completeTerminal(pendingReviewCleanup)));
+      pendingReviewCleanup = undefined;
     }
     if (activeReaction !== undefined) {
       cleanupFailures.push(...(await completeTerminal(activeReaction)));

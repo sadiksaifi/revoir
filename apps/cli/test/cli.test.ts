@@ -356,6 +356,38 @@ describe("CLI", () => {
     assert.match(stdout.output, /Clean review completed/u);
 
     stdout.output = "";
+    stderr.output = "";
+    const findingsService: ManualReviewService = {
+      async review() {
+        return {
+          status: "findings",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+          publishedFindings: 2,
+          rejectedFindings: 1,
+          diagnostics: [
+            {
+              index: 2,
+              code: "invalid",
+              message: "findings[2].priority must be supported.",
+            },
+          ],
+        };
+      },
+    };
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: findingsService,
+      }),
+      0,
+    );
+    assert.match(stdout.output, /Published 2 findings/u);
+    assert.match(stderr.output, /rejected 1 invalid or duplicate model finding/u);
+    assert.match(stderr.output, /priority must be supported/u);
+
+    stdout.output = "";
+    stderr.output = "";
     const staleService: ManualReviewService = {
       async review() {
         return {
