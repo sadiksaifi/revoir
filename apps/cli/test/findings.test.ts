@@ -730,6 +730,74 @@ index 1111111..3333333 100644
     );
   });
 
+  it("publishes and retires a same-count occurrence replacement while retaining its peer", async () => {
+    const firstDiff = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,7 @@
+ const retained = true;
++guardOne();
++targetAnchor();
++tailOne();
++guardRemoved();
++targetAnchor();
++tailRemoved();
+`;
+    const secondDiff = `diff --git a/source.ts b/source.ts
+index 1111111..3333333 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,8 @@
+ const retained = true;
++guardOne();
++targetAnchor();
++tailOne();
++const middle = true;
++guardAdded();
++targetAnchor();
++tailAdded();
+`;
+    const retained = finding({
+      range: { start: 3, end: 3, side: "RIGHT" },
+      anchor: "targetAnchor();",
+    });
+    const removed = finding({
+      range: { start: 6, end: 6, side: "RIGHT" },
+      anchor: "targetAnchor();",
+    });
+    const added = finding({
+      range: { start: 7, end: 7, side: "RIGHT" },
+      anchor: "targetAnchor();",
+    });
+    const firstRun = await validateModelReviewOutput(output([retained, removed]), {
+      checkout,
+      diff: firstDiff,
+    });
+    const secondRun = await validateModelReviewOutput(output([added, retained]), {
+      checkout,
+      diff: secondDiff,
+    });
+
+    assert.deepEqual(
+      planFindingReconciliation(secondRun.findings, {
+        activeFingerprints: firstRun.findings.map(({ fingerprint }) => fingerprint),
+        ownedOpenThreads: firstRun.findings.map(({ fingerprint, fingerprintAliases }, index) => ({
+          id: index === 0 ? "THREAD_RETAINED" : "THREAD_REMOVED",
+          fingerprint,
+          aliases: fingerprintAliases!,
+        })),
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [secondRun.findings[0]],
+        obsoleteThreadIds: ["THREAD_REMOVED"],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
+      },
+    );
+  });
+
   it("keeps occurrence identity stable when unrelated changed text is inserted beside it", async () => {
     const beforeEdit = `diff --git a/source.ts b/source.ts
 index 1111111..2222222 100644

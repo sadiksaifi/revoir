@@ -93,15 +93,21 @@ function identityFingerprints(identity: PriorFindingIdentity): Set<string> {
   return new Set([identity.fingerprint, ...(identity.aliases ?? [])]);
 }
 
-function currentFindingIdentity(finding: ReviewFindingV1): PriorFindingIdentity {
+interface CurrentFindingIdentity extends PriorFindingIdentity {
+  readonly semanticFingerprint: string;
+}
+
+function currentFindingIdentity(finding: ReviewFindingV1): CurrentFindingIdentity {
+  const semanticFingerprint = findingFingerprint(finding);
   const aliases = new Set([
     ...(finding.fingerprintAliases ?? []),
-    findingFingerprint(finding),
+    semanticFingerprint,
     prerequisiteFindingFingerprint(finding),
   ]);
   aliases.delete(finding.fingerprint);
   return {
     fingerprint: finding.fingerprint,
+    semanticFingerprint,
     ...(aliases.size === 0 ? {} : { aliases: [...aliases].toSorted() }),
   };
 }
@@ -152,76 +158,260 @@ function priorFindingIdentities(prior: PriorReviewState): MatchablePriorIdentity
   return identities;
 }
 
-function intersectionSize(left: PriorFindingIdentity, right: PriorFindingIdentity): number {
+interface IndexedIdentity<T extends PriorFindingIdentity> {
+  readonly index: number;
+  readonly identity: T;
+}
+
+function identitiesIntersect(left: PriorFindingIdentity, right: PriorFindingIdentity): boolean {
   const rightFingerprints = identityFingerprints(right);
-  let count = 0;
-  for (const fingerprint of identityFingerprints(left)) {
-    if (rightFingerprints.has(fingerprint)) {
-      count += 1;
+  return [...identityFingerprints(left)].some((fingerprint) => rightFingerprints.has(fingerprint));
+}
+
+function compareCurrentIdentity(
+  left: IndexedIdentity<CurrentFindingIdentity>,
+  right: IndexedIdentity<CurrentFindingIdentity>,
+): number {
+  return (
+    left.identity.fingerprint.localeCompare(right.identity.fingerprint) || left.index - right.index
+  );
+}
+
+function comparePriorIdentity(
+  left: IndexedIdentity<MatchablePriorIdentity>,
+  right: IndexedIdentity<MatchablePriorIdentity>,
+): number {
+  return (
+    left.identity.fingerprint.localeCompare(right.identity.fingerprint) ||
+    (left.identity.threadId ?? "").localeCompare(right.identity.threadId ?? "") ||
+    left.identity.source.localeCompare(right.identity.source) ||
+    left.index - right.index
+  );
+}
+
+function tokenCounts<T extends PriorFindingIdentity>(
+  identities: readonly IndexedIdentity<T>[],
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const { identity } of identities) {
+    for (const token of identityFingerprints(identity)) {
+      counts.set(token, (counts.get(token) ?? 0) + 1);
     }
   }
-  return count;
+  return counts;
+}
+
+function discriminativeScore(
+  current: CurrentFindingIdentity,
+  prior: MatchablePriorIdentity,
+  semanticFingerprint: string,
+  currentTokenCounts: ReadonlyMap<string, number>,
+  priorTokenCounts: ReadonlyMap<string, number>,
+): number {
+  const priorTokens = identityFingerprints(prior);
+  let score = 0;
+  for (const token of identityFingerprints(current)) {
+    if (
+      token === semanticFingerprint ||
+      !priorTokens.has(token) ||
+      currentTokenCounts.get(token) !== 1 ||
+      priorTokenCounts.get(token) !== 1
+    ) {
+      continue;
+    }
+    score +=
+      1 + Number(token === current.fingerprint) * 2 + Number(token === prior.fingerprint) * 2;
+  }
+  return score;
+}
+
+function maximumWeightPairs(weights: readonly (readonly number[])[]): readonly [number, number][] {
+  const rowCount = weights.length;
+  const columnCount = weights[0]?.length ?? 0;
+  if (rowCount === 0 || columnCount === 0) {
+    return [];
+  }
+  const size = Math.max(rowCount, columnCount);
+  let maximumWeight = 0;
+  for (const row of weights) {
+    for (const weight of row) {
+      maximumWeight = Math.max(maximumWeight, weight);
+    }
+  }
+  if (maximumWeight === 0) {
+    return [];
+  }
+  // Hungarian assignment keeps the strongest total evidence without depending on API ordering.
+  const rowPotential = Array.from({ length: size + 1 }, () => 0);
+  const columnPotential = Array.from({ length: size + 1 }, () => 0);
+  const matchedRowByColumn = Array.from({ length: size + 1 }, () => 0);
+  const previousColumn = Array.from({ length: size + 1 }, () => 0);
+
+  for (let row = 1; row <= size; row += 1) {
+    matchedRowByColumn[0] = row;
+    let column = 0;
+    const minimum = Array.from({ length: size + 1 }, () => Number.POSITIVE_INFINITY);
+    const used = Array.from({ length: size + 1 }, () => false);
+    do {
+      used[column] = true;
+      const matchedRow = matchedRowByColumn[column]!;
+      let delta = Number.POSITIVE_INFINITY;
+      let nextColumn = 0;
+      for (let candidateColumn = 1; candidateColumn <= size; candidateColumn += 1) {
+        if (used[candidateColumn]) {
+          continue;
+        }
+        const weight =
+          matchedRow <= rowCount && candidateColumn <= columnCount
+            ? weights[matchedRow - 1]![candidateColumn - 1]!
+            : 0;
+        const cost =
+          maximumWeight - weight - rowPotential[matchedRow]! - columnPotential[candidateColumn]!;
+        if (cost < minimum[candidateColumn]!) {
+          minimum[candidateColumn] = cost;
+          previousColumn[candidateColumn] = column;
+        }
+        if (minimum[candidateColumn]! < delta) {
+          delta = minimum[candidateColumn]!;
+          nextColumn = candidateColumn;
+        }
+      }
+      for (let candidateColumn = 0; candidateColumn <= size; candidateColumn += 1) {
+        if (used[candidateColumn]) {
+          const usedRow = matchedRowByColumn[candidateColumn]!;
+          rowPotential[usedRow] = rowPotential[usedRow]! + delta;
+          columnPotential[candidateColumn]! -= delta;
+        } else {
+          minimum[candidateColumn]! -= delta;
+        }
+      }
+      column = nextColumn;
+    } while (matchedRowByColumn[column] !== 0);
+
+    do {
+      const priorColumn = previousColumn[column]!;
+      matchedRowByColumn[column] = matchedRowByColumn[priorColumn]!;
+      column = priorColumn;
+    } while (column !== 0);
+  }
+
+  const pairs: Array<[number, number]> = [];
+  for (let column = 1; column <= columnCount; column += 1) {
+    const row = matchedRowByColumn[column]! - 1;
+    if (row >= 0 && row < rowCount && weights[row]![column - 1]! > 0) {
+      pairs.push([row, column - 1]);
+    }
+  }
+  return pairs;
 }
 
 function matchFindingIdentities(
-  current: readonly PriorFindingIdentity[],
+  current: readonly CurrentFindingIdentity[],
   prior: readonly MatchablePriorIdentity[],
 ): {
   readonly currentMatches: ReadonlySet<number>;
   readonly priorMatches: ReadonlySet<number>;
   readonly priorByCurrent: ReadonlyMap<number, number>;
 } {
-  const candidates = current.map((identity) =>
-    prior
-      .map((priorIdentity, index) => ({
-        index,
-        intersection: intersectionSize(identity, priorIdentity),
-        exact: identity.fingerprint === priorIdentity.fingerprint,
-      }))
-      .filter(({ intersection }) => intersection > 0)
-      .toSorted(
-        (left, right) =>
-          Number(right.exact) - Number(left.exact) ||
-          right.intersection - left.intersection ||
-          prior[left.index]!.fingerprint.localeCompare(prior[right.index]!.fingerprint) ||
-          (prior[left.index]!.threadId ?? "").localeCompare(prior[right.index]!.threadId ?? ""),
-      ),
-  );
-  const matchedCurrentByPrior = new Map<number, number>();
-  const assign = (currentIndex: number, visited: Set<number>): boolean => {
-    for (const { index: priorIndex } of candidates[currentIndex]!) {
-      if (visited.has(priorIndex)) {
-        continue;
-      }
-      visited.add(priorIndex);
-      const displaced = matchedCurrentByPrior.get(priorIndex);
-      if (displaced === undefined || assign(displaced, visited)) {
-        matchedCurrentByPrior.set(priorIndex, currentIndex);
-        return true;
+  const currentMatches = new Set<number>();
+  const priorMatches = new Set<number>();
+  const priorByCurrent = new Map<number, number>();
+  const recordMatch = (currentIndex: number, priorIndex: number): void => {
+    currentMatches.add(currentIndex);
+    priorMatches.add(priorIndex);
+    priorByCurrent.set(currentIndex, priorIndex);
+  };
+  const currentGroups = new Map<string, Array<IndexedIdentity<CurrentFindingIdentity>>>();
+  for (const [index, identity] of current.entries()) {
+    const group = currentGroups.get(identity.semanticFingerprint) ?? [];
+    group.push({ index, identity });
+    currentGroups.set(identity.semanticFingerprint, group);
+  }
+  const priorGroups = new Map<string, Array<IndexedIdentity<MatchablePriorIdentity>>>();
+  const semanticFingerprints = [...currentGroups.keys()].toSorted();
+  for (const [index, identity] of prior.entries()) {
+    const tokens = identityFingerprints(identity);
+    // A prior identity may participate only when its persisted aliases identify one semantic
+    // group. Legacy records without that alias can still migrate through one unique token overlap.
+    let possibleGroups = semanticFingerprints.filter((fingerprint) => tokens.has(fingerprint));
+    if (possibleGroups.length === 0) {
+      possibleGroups = semanticFingerprints.filter((fingerprint) =>
+        currentGroups
+          .get(fingerprint)!
+          .some(({ identity: currentIdentity }) => identitiesIntersect(currentIdentity, identity)),
+      );
+    }
+    if (possibleGroups.length !== 1) {
+      continue;
+    }
+    const semanticFingerprint = possibleGroups[0]!;
+    const group = priorGroups.get(semanticFingerprint) ?? [];
+    group.push({ index, identity });
+    priorGroups.set(semanticFingerprint, group);
+  }
+
+  for (const semanticFingerprint of semanticFingerprints) {
+    const currentGroup = currentGroups.get(semanticFingerprint)!.toSorted(compareCurrentIdentity);
+    const priorGroup = (priorGroups.get(semanticFingerprint) ?? []).toSorted(comparePriorIdentity);
+    const remainingCurrent = new Set(currentGroup.map(({ index }) => index));
+    const remainingPrior = new Set(priorGroup.map(({ index }) => index));
+
+    // Primary equality is authoritative and cannot be displaced by weaker aliases.
+    for (const currentEntry of currentGroup) {
+      const exact = priorGroup.find(
+        (priorEntry) =>
+          remainingPrior.has(priorEntry.index) &&
+          currentEntry.identity.fingerprint === priorEntry.identity.fingerprint,
+      );
+      if (exact !== undefined) {
+        recordMatch(currentEntry.index, exact.index);
+        remainingCurrent.delete(currentEntry.index);
+        remainingPrior.delete(exact.index);
       }
     }
-    return false;
-  };
-  const currentOrder = current
-    .map((_identity, index) => index)
-    .toSorted(
-      (left, right) =>
-        Number(candidates[right]![0]?.exact ?? false) -
-          Number(candidates[left]![0]?.exact ?? false) ||
-        (candidates[right]![0]?.intersection ?? 0) - (candidates[left]![0]?.intersection ?? 0) ||
-        candidates[left]!.length - candidates[right]!.length ||
-        current[left]!.fingerprint.localeCompare(current[right]!.fingerprint),
+
+    const discriminativeCurrent = currentGroup.filter(({ index }) => remainingCurrent.has(index));
+    const discriminativePrior = priorGroup.filter(({ index }) => remainingPrior.has(index));
+    const currentTokenCounts = tokenCounts(discriminativeCurrent);
+    const priorTokenCounts = tokenCounts(discriminativePrior);
+    const cardinalityScale = Math.max(discriminativeCurrent.length, discriminativePrior.length) + 1;
+    const weights = discriminativeCurrent.map(({ identity: currentIdentity }) =>
+      discriminativePrior.map(({ identity: priorIdentity }) => {
+        const score = discriminativeScore(
+          currentIdentity,
+          priorIdentity,
+          semanticFingerprint,
+          currentTokenCounts,
+          priorTokenCounts,
+        );
+        return score === 0 ? 0 : score * cardinalityScale + 1;
+      }),
     );
-  for (const currentIndex of currentOrder) {
-    assign(currentIndex, new Set());
+    for (const [currentOffset, priorOffset] of maximumWeightPairs(weights)) {
+      const currentEntry = discriminativeCurrent[currentOffset]!;
+      const priorEntry = discriminativePrior[priorOffset]!;
+      recordMatch(currentEntry.index, priorEntry.index);
+      remainingCurrent.delete(currentEntry.index);
+      remainingPrior.delete(priorEntry.index);
+    }
+
+    // A semantic alias alone proves continuity only when at least one original side is singular.
+    // Residual many-to-many groups represent replacements unless another token discriminates them.
+    if (currentGroup.length === 1 || priorGroup.length === 1) {
+      const fallbackCurrent = currentGroup.find(({ index }) => remainingCurrent.has(index));
+      const fallbackPrior = priorGroup.find(
+        ({ index, identity }) =>
+          remainingPrior.has(index) && identityFingerprints(identity).has(semanticFingerprint),
+      );
+      if (fallbackCurrent !== undefined && fallbackPrior !== undefined) {
+        recordMatch(fallbackCurrent.index, fallbackPrior.index);
+      }
+    }
   }
-  const priorByCurrent = new Map<number, number>();
-  for (const [priorIndex, currentIndex] of matchedCurrentByPrior) {
-    priorByCurrent.set(currentIndex, priorIndex);
-  }
+
   return {
-    currentMatches: new Set(matchedCurrentByPrior.values()),
-    priorMatches: new Set(matchedCurrentByPrior.keys()),
+    currentMatches,
+    priorMatches,
     priorByCurrent,
   };
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { ReviewFindingV1 } from "../src/review/findings.js";
+import { findingFingerprint, type ReviewFindingV1 } from "../src/review/findings.js";
 import { planFindingReconciliation } from "../src/review/reconciliation.js";
 
 function finding(fingerprint: string, startLine: number): ReviewFindingV1 {
@@ -23,6 +23,10 @@ function finding(fingerprint: string, startLine: number): ReviewFindingV1 {
       side: "RIGHT",
     },
   };
+}
+
+function token(character: string): string {
+  return character.repeat(64);
 }
 
 describe("finding reconciliation", () => {
@@ -65,6 +69,194 @@ describe("finding reconciliation", () => {
         obsoleteThreadIds: ["THREAD_B", "THREAD_Z"],
         currentBodyFindings: [],
         bodyStateChanged: false,
+      },
+    );
+  });
+
+  it("does not pair a same-count occurrence replacement through the shared semantic alias", () => {
+    const retained = {
+      ...finding(token("a"), 2),
+      fingerprintAliases: [token("d")],
+    };
+    const added = {
+      ...finding(token("c"), 8),
+      fingerprintAliases: [token("f")],
+    };
+    const semantic = findingFingerprint(retained);
+    const retainedThread = {
+      id: "THREAD_RETAINED",
+      fingerprint: token("a"),
+      aliases: [semantic, token("d")],
+    };
+    const removedThread = {
+      id: "THREAD_REMOVED",
+      fingerprint: token("b"),
+      aliases: [semantic, token("e")],
+    };
+
+    for (const findings of [
+      [retained, added],
+      [added, retained],
+    ]) {
+      for (const ownedOpenThreads of [
+        [retainedThread, removedThread],
+        [removedThread, retainedThread],
+      ]) {
+        const plan = planFindingReconciliation(findings, {
+          activeFingerprints: [token("a"), token("b")],
+          ownedOpenThreads,
+          runHeadShas: ["1".repeat(40)],
+        });
+        assert.deepEqual(plan.netNewFindings, [added]);
+        assert.deepEqual(plan.obsoleteThreadIds, ["THREAD_REMOVED"]);
+        assert.deepEqual(plan.currentBodyFindings, []);
+        assert.equal(plan.bodyStateChanged, false);
+      }
+    }
+  });
+
+  it("locks exact identities before deterministic weighted stable and context matches", () => {
+    const exact = finding(token("a"), 2);
+    const stable = {
+      ...finding(token("c"), 5),
+      fingerprintAliases: [token("b"), token("2")],
+    };
+    const contextual = {
+      ...finding(token("e"), 8),
+      fingerprintAliases: [token("1"), token("3")],
+    };
+    const semantic = findingFingerprint(exact);
+
+    assert.deepEqual(
+      planFindingReconciliation([contextual, exact, stable], {
+        activeFingerprints: [token("a"), token("b"), token("d")],
+        bodyFindings: [
+          {
+            fingerprint: token("b"),
+            aliases: [semantic, token("1")],
+          },
+        ],
+        ownedOpenThreads: [
+          {
+            id: "THREAD_CONTEXT",
+            fingerprint: token("d"),
+            aliases: [semantic, token("2"), token("3")],
+          },
+          {
+            id: "THREAD_EXACT",
+            fingerprint: token("a"),
+            aliases: [semantic],
+          },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [],
+        obsoleteThreadIds: [],
+        currentBodyFindings: [stable],
+        bodyStateChanged: true,
+      },
+    );
+  });
+
+  it("uses semantic-only fallback only when one side of the group is a singleton", () => {
+    const first = finding(token("a"), 2);
+    const second = finding(token("b"), 5);
+    const semantic = findingFingerprint(first);
+    const oneToMany = planFindingReconciliation([second, first], {
+      activeFingerprints: [token("d")],
+      ownedOpenThreads: [
+        {
+          id: "THREAD_SINGLE",
+          fingerprint: token("d"),
+          aliases: [semantic],
+        },
+      ],
+      runHeadShas: ["1".repeat(40)],
+    });
+    assert.deepEqual(oneToMany.netNewFindings, [second]);
+    assert.deepEqual(oneToMany.obsoleteThreadIds, []);
+
+    const manyToOne = planFindingReconciliation([finding(token("c"), 8)], {
+      activeFingerprints: [token("d"), token("e")],
+      ownedOpenThreads: [
+        {
+          id: "THREAD_HIGHER",
+          fingerprint: token("e"),
+          aliases: [semantic],
+        },
+        {
+          id: "THREAD_LOWER",
+          fingerprint: token("d"),
+          aliases: [semantic],
+        },
+      ],
+      runHeadShas: ["2".repeat(40)],
+    });
+    assert.deepEqual(manyToOne.netNewFindings, []);
+    assert.deepEqual(manyToOne.obsoleteThreadIds, ["THREAD_HIGHER"]);
+  });
+
+  it("leaves ambiguous many-to-many semantic-only residuals unmatched", () => {
+    const first = finding(token("a"), 2);
+    const second = finding(token("b"), 5);
+    const semantic = findingFingerprint(first);
+
+    assert.deepEqual(
+      planFindingReconciliation([second, first], {
+        activeFingerprints: [token("c"), token("d")],
+        ownedOpenThreads: [
+          { id: "THREAD_D", fingerprint: token("d"), aliases: [semantic] },
+          { id: "THREAD_C", fingerprint: token("c"), aliases: [semantic] },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [second, first],
+        obsoleteThreadIds: ["THREAD_C", "THREAD_D"],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
+      },
+    );
+  });
+
+  it("preserves legacy aliases, body migration, and thread identities within one group", () => {
+    const legacyToken = token("1");
+    const legacy = {
+      ...finding(token("a"), 2),
+      fingerprintAliases: [legacyToken],
+    };
+    const body = {
+      ...finding(token("b"), 5),
+      fingerprintAliases: [token("2")],
+      range: null,
+      attachment: { kind: "file", path: "source.ts" } as const,
+    };
+    const thread = {
+      ...finding(token("c"), 8),
+      fingerprintAliases: [token("3")],
+    };
+    const semantic = findingFingerprint(legacy);
+
+    assert.deepEqual(
+      planFindingReconciliation([thread, body, legacy], {
+        activeFingerprints: [legacyToken, token("b"), token("4")],
+        bodyFindings: [{ fingerprint: token("b"), aliases: [token("2")] }],
+        bodyStateMigrationRequired: true,
+        ownedOpenThreads: [
+          {
+            id: "THREAD_CURRENT",
+            fingerprint: token("4"),
+            aliases: [semantic, token("3")],
+          },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [],
+        obsoleteThreadIds: [],
+        currentBodyFindings: [body],
+        bodyStateChanged: true,
       },
     );
   });
