@@ -168,6 +168,9 @@ function harness(
       events.push("get-pr");
       return snapshot;
     },
+    async getReviewEvidence() {
+      return { completedChecks: [] };
+    },
     async getHeadSha(_reference, signal?: AbortSignal) {
       events.push("get-head");
       headRequests += 1;

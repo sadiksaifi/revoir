@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 
 import type { RevoirConfiguration } from "../config/schema.js";
+import type { CompletedCheckEvidence, GitHubReviewEvidence } from "./evidence.js";
 import type { GitHubReviewPayload, ReviewPublication } from "./publication.js";
 import { PullRequestEligibilityError } from "./pull-request.js";
 import type {
@@ -23,6 +24,11 @@ export interface GitHubReviewSession {
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<PullRequestSnapshot>;
+  getReviewEvidence(
+    reference: PullRequestReference,
+    headSha: string,
+    signal: AbortSignal,
+  ): Promise<GitHubReviewEvidence>;
   getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string>;
   removeOwnCompletionReaction(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
   removeOwnPendingReview(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
@@ -247,6 +253,16 @@ function string(value: unknown, path: string): string {
   return value;
 }
 
+function optionalString(value: unknown, path: string): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`GitHub returned an invalid ${path}.`);
+  }
+  return value;
+}
+
 function repository(value: unknown, path: string): PullRequestRepository {
   const repositoryValue = record(value, path);
   return {
@@ -263,6 +279,7 @@ function parsePullRequest(value: unknown): PullRequestSnapshot {
   const head = record(pullRequest.head, "pull request head");
   return {
     number: positiveInteger(pullRequest.number, "pull request number"),
+    description: optionalString(pullRequest.body, "pull request description") ?? "",
     state: string(pullRequest.state, "pull request state"),
     draft:
       typeof pullRequest.draft === "boolean"
@@ -275,6 +292,72 @@ function parsePullRequest(value: unknown): PullRequestSnapshot {
     headSha: string(head.sha, "pull request head SHA"),
     baseRepository: repository(base.repo, "pull request base repository"),
     headRepository: repository(head.repo, "pull request head repository"),
+  };
+}
+
+const FAILED_ACTIONS_CONCLUSIONS = new Set([
+  "action_required",
+  "failure",
+  "startup_failure",
+  "timed_out",
+]);
+
+interface ParsedCompletedCheck {
+  evidence: CompletedCheckEvidence;
+  actionsJobId?: number;
+}
+
+function actionsJobId(detailsUrl: string, reference: PullRequestReference): number | undefined {
+  let url: URL;
+  try {
+    url = new URL(detailsUrl);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port !== "") {
+    return undefined;
+  }
+  const path = `/${reference.owner}/${reference.repository}/actions/runs/`;
+  if (!url.pathname.startsWith(path)) {
+    return undefined;
+  }
+  const match = /^([1-9][0-9]*)\/job\/([1-9][0-9]*)$/u.exec(url.pathname.slice(path.length));
+  if (match === null) {
+    return undefined;
+  }
+  const jobId = Number(match[2]);
+  return Number.isSafeInteger(jobId) ? jobId : undefined;
+}
+
+function parseCompletedCheck(
+  value: unknown,
+  reference: PullRequestReference,
+): ParsedCompletedCheck | undefined {
+  const check = record(value, "check run");
+  const status = string(check.status, "check run status");
+  if (status !== "completed") {
+    return undefined;
+  }
+  const conclusion = string(check.conclusion, "completed check run conclusion");
+  const detailsUrl = optionalString(check.details_url, "check run details URL");
+  const output =
+    check.output === undefined || check.output === null ? undefined : record(check.output, "check output");
+  const title = optionalString(output?.title, "check output title");
+  const summary = optionalString(output?.summary, "check output summary");
+  const evidence: CompletedCheckEvidence = {
+    name: string(check.name, "check run name"),
+    conclusion,
+    ...(detailsUrl === undefined ? {} : { detailsUrl }),
+    ...(title === undefined ? {} : { title }),
+    ...(summary === undefined ? {} : { summary }),
+  };
+  const jobId =
+    detailsUrl !== undefined && FAILED_ACTIONS_CONCLUSIONS.has(conclusion)
+      ? actionsJobId(detailsUrl, reference)
+      : undefined;
+  return {
+    evidence,
+    ...(jobId === undefined ? {} : { actionsJobId: jobId }),
   };
 }
 
@@ -360,6 +443,73 @@ class InstallationSession implements GitHubReviewSession {
 
   async getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string> {
     return (await this.getPullRequest(reference, signal)).headSha;
+  }
+
+  async getReviewEvidence(
+    reference: PullRequestReference,
+    headSha: string,
+    signal: AbortSignal,
+  ): Promise<GitHubReviewEvidence> {
+    const checks: ParsedCompletedCheck[] = [];
+    let page = 1;
+    for (;;) {
+      throwIfAborted(signal);
+      // Check pages are consumed as they exist now; pending checks are deliberately ignored.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await this.#request(
+        `/repos/${reference.owner}/${reference.repository}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
+        signal,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      const responseValue = await responseJson(response, "check run lookup", signal);
+      const value = record(responseValue, "check run lookup");
+      if (!Array.isArray(value.check_runs)) {
+        throw new Error("GitHub check run lookup returned an invalid response.");
+      }
+      for (const check of value.check_runs) {
+        const parsed = parseCompletedCheck(check, reference);
+        if (parsed !== undefined) {
+          checks.push(parsed);
+        }
+      }
+      if (value.check_runs.length < 100) {
+        break;
+      }
+      page += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
+
+    const logRequests = new Map<number, Promise<string>>();
+    const completedChecks = await Promise.all(
+      checks.map(async (check): Promise<CompletedCheckEvidence> => {
+        if (check.actionsJobId === undefined) {
+          return check.evidence;
+        }
+        let request = logRequests.get(check.actionsJobId);
+        if (request === undefined) {
+          request = this.#getActionsJobLog(reference, check.actionsJobId, signal);
+          logRequests.set(check.actionsJobId, request);
+        }
+        return Object.assign({}, check.evidence, { failedActionsLog: await request });
+      }),
+    );
+    return { completedChecks };
+  }
+
+  async #getActionsJobLog(
+    reference: PullRequestReference,
+    jobId: number,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const response = await this.#request(
+      `/repos/${reference.owner}/${reference.repository}/actions/jobs/${jobId}/logs`,
+      signal,
+    );
+    if (!response.ok) {
+      throw new Error(`GitHub Actions job log lookup failed with HTTP ${response.status}.`);
+    }
+    return settleEffect(response.text(), signal);
   }
 
   async removeOwnCompletionReaction(
