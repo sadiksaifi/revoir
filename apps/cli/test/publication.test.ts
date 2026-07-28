@@ -6,6 +6,7 @@ import {
   createReviewPublication,
   renderFileFinding,
   renderInlineFinding,
+  renderRunMarker,
 } from "../src/review/publication.js";
 
 function finding(overrides: Partial<ReviewFindingV1> = {}): ReviewFindingV1 {
@@ -31,7 +32,7 @@ function finding(overrides: Partial<ReviewFindingV1> = {}): ReviewFindingV1 {
 }
 
 describe("findings-only review publication", () => {
-  it("builds exact single- and multiline inline coordinates without a summary body", () => {
+  it("builds exact inline coordinates with only a stable hidden run marker", () => {
     const single = finding();
     const multiline = finding({
       fingerprint: "b".repeat(64),
@@ -53,6 +54,7 @@ describe("findings-only review publication", () => {
     const publication = createReviewPublication("1".repeat(40), [single, multiline]);
     assert.deepEqual(publication.payload, {
       commit_id: "1".repeat(40),
+      body: renderRunMarker("1".repeat(40)),
       comments: [
         {
           path: "src/review.ts",
@@ -70,7 +72,6 @@ describe("findings-only review publication", () => {
         },
       ],
     });
-    assert.equal("body" in publication.payload, false);
     assert.equal("event" in publication.payload, false);
   });
 
@@ -88,11 +89,16 @@ describe("findings-only review publication", () => {
       attachment: { kind: "file", path: "assets/logo.png" },
     });
     const publication = createReviewPublication("2".repeat(40), [inline, file]);
-    assert.equal(publication.payload.body, renderFileFinding(file));
+    assert.equal(
+      publication.payload.body,
+      `${renderFileFinding(file)}\n\n${renderRunMarker("2".repeat(40))}`,
+    );
     assert.equal(publication.payload.comments?.length, 1);
     assert.equal(
       publication.fallbackPayload.body,
-      `${renderFileFinding(inline)}\n\n${renderFileFinding(file)}`,
+      `${renderFileFinding(inline)}\n\n${renderFileFinding(file)}\n\n${renderRunMarker(
+        "2".repeat(40),
+      )}`,
     );
     assert.equal("comments" in publication.fallbackPayload, false);
   });

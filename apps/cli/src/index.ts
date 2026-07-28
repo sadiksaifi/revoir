@@ -67,6 +67,7 @@ export {
   createReviewPublication,
   renderFileFinding,
   renderInlineFinding,
+  renderRunMarker,
   type GitHubInlineReviewComment,
   type GitHubReviewPayload,
   type ReviewPublication,

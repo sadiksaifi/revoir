@@ -118,6 +118,10 @@ export function renderFileFinding(finding: ReviewFindingV1): string {
   return details(finding, explicitLocation(finding));
 }
 
+export function renderRunMarker(commitId: string): string {
+  return `<!-- revoir:run:v1:${commitId} -->`;
+}
+
 export function createReviewPublication(
   commitId: string,
   findings: readonly ReviewFindingV1[],
@@ -147,13 +151,16 @@ export function createReviewPublication(
     }
   }
 
+  const marker = renderRunMarker(commitId);
   const body =
-    bodyFindings.length === 0 ? undefined : bodyFindings.map(renderFileFinding).join("\n\n");
-  const fallbackBody = findings.map(renderFileFinding).join("\n\n");
+    bodyFindings.length === 0
+      ? marker
+      : `${bodyFindings.map(renderFileFinding).join("\n\n")}\n\n${marker}`;
+  const fallbackBody = `${findings.map(renderFileFinding).join("\n\n")}\n\n${marker}`;
   return {
     payload: {
       commit_id: commitId,
-      ...(body === undefined ? {} : { body }),
+      body,
       ...(comments.length === 0 ? {} : { comments }),
     },
     fallbackPayload: {
