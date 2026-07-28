@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { parseReviewJob, ReviewJobSchemaError, type ReviewJobV1 } from "@revoir/contracts";
 
+import { isCallerCancellation } from "../cancellation.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import {
   GitHubReviewFailureReporter,
@@ -44,6 +45,14 @@ export interface QueueRunService {
   run(signal?: AbortSignal): Promise<void>;
 }
 
+export interface QueueRunLogger {
+  write(event: string, data?: Readonly<Record<string, unknown>>): Promise<void>;
+}
+
+const NOOP_LOGGER: QueueRunLogger = {
+  async write() {},
+};
+
 function locallyEligible(job: ReviewJobV1, configuration: RevoirConfiguration["github"]): boolean {
   if (
     job.installationId !== configuration.installationId ||
@@ -84,6 +93,10 @@ function waitForNextPoll(signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener("abort", done, { once: true });
   });
+}
+
+function aborted(signal?: AbortSignal): boolean {
+  return signal?.aborted === true;
 }
 
 function throwIfCancelled(signal?: AbortSignal): void {
@@ -138,10 +151,6 @@ function consumeReservation(state: OperationalFailureState): OperationalFailureS
     return state;
   }
   return committedState(state.reservation.slot, state.terminalCategory);
-}
-
-function isExactCallerCancellation(error: unknown, signal?: AbortSignal): boolean {
-  return signal?.aborted === true && error === signal.reason;
 }
 
 class StoreOperationTimeoutError extends Error {
@@ -224,6 +233,7 @@ export class QueueReviewRunner implements QueueRunService {
   readonly #pendingStoreSettlements = new Map<string, StoreOperationRecord<unknown>>();
   readonly #queue: QueueClient;
   readonly #reviews: ManualReviewService;
+  readonly #logger: QueueRunLogger;
   #serializedConsumption: Promise<void> = Promise.resolve();
 
   constructor(
@@ -234,12 +244,14 @@ export class QueueReviewRunner implements QueueRunService {
     operationalFailures: OperationalFailureStore = new FileOperationalFailureStore(
       configuration.paths.stateDir,
     ),
+    logger: QueueRunLogger = NOOP_LOGGER,
   ) {
     this.#configuration = configuration;
     this.#queue = queue;
     this.#reviews = reviews;
     this.#failures = failures;
     this.#operationalFailures = operationalFailures;
+    this.#logger = logger;
   }
 
   consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
@@ -313,9 +325,9 @@ export class QueueReviewRunner implements QueueRunService {
       await this.#saveFailureState(job.deliveryId, reservedState, slot, signal);
       throwIfCancelled(signal);
     } catch (error) {
-      if (isExactCallerCancellation(error, signal)) {
+      if (isCallerCancellation(error, signal)) {
         await this.#rollbackReservation(job.deliveryId, reservation);
-        throw error;
+        throw signal?.reason instanceof Error ? signal.reason : error;
       }
       if (signal?.aborted === true) {
         throw signal.reason instanceof Error ? signal.reason : error;
@@ -323,15 +335,25 @@ export class QueueReviewRunner implements QueueRunService {
       return this.#settleStoreFailure(delivery, job, error, signal);
     }
 
+    const metadata = {
+      deliveryId: job.deliveryId,
+      repository: `${job.repository.owner}/${job.repository.name}`,
+      pullRequest: job.pullRequest.number,
+      headSha: job.pullRequest.headSha,
+    };
+    const startedAt = Date.now();
+    await this.#logger.write("queue_review_started", metadata);
+
+    let result: Awaited<ReturnType<ManualReviewService["review"]>>;
     try {
-      await this.#reviews.review(referenceFor(job), {
+      result = await this.#reviews.review(referenceFor(job), {
         expectedHeadSha: job.pullRequest.headSha,
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
-      if (isExactCallerCancellation(error, signal)) {
+      if (isCallerCancellation(error, signal)) {
         await this.#rollbackReservation(job.deliveryId, reservation);
-        throw error;
+        throw signal?.reason instanceof Error ? signal.reason : error;
       }
       if (error instanceof PullRequestEligibilityError) {
         if (signal?.aborted === true) {
@@ -339,6 +361,11 @@ export class QueueReviewRunner implements QueueRunService {
         }
         await this.#queue.acknowledge(delivery.leaseId, signal);
         await this.#clearFailureState(job.deliveryId);
+        await this.#logger.write("queue_review_rejected", {
+          ...metadata,
+          durationMs: Date.now() - startedAt,
+          error,
+        });
       } else {
         const failure = classifyReviewFailure(error);
         const nextState = committedState(slot, failure.category);
@@ -368,6 +395,11 @@ export class QueueReviewRunner implements QueueRunService {
           OPERATIONAL_RETRY_DELAYS_SECONDS[slot - 1]!,
           signal,
         );
+        await this.#logger.write("queue_review_retried", {
+          ...metadata,
+          durationMs: Date.now() - startedAt,
+          error,
+        });
       }
       return "settled";
     }
@@ -377,6 +409,11 @@ export class QueueReviewRunner implements QueueRunService {
     throwIfCancelled(signal);
     await this.#queue.acknowledge(delivery.leaseId, signal);
     await this.#clearFailureState(job.deliveryId);
+    await this.#logger.write("queue_review_settled", {
+      ...metadata,
+      outcome: result.status,
+      durationMs: Date.now() - startedAt,
+    });
     return "settled";
   }
 
@@ -420,7 +457,7 @@ export class QueueReviewRunner implements QueueRunService {
       loaded = await this.#waitRecordedStoreOperation(loadRecord, "load", signal);
     } catch (error) {
       if (
-        isExactCallerCancellation(error, signal) &&
+        isCallerCancellation(error, signal) &&
         this.#pendingLoads.get(deliveryId) === loadRecord
       ) {
         this.#pendingLoads.delete(deliveryId);
@@ -641,8 +678,8 @@ export class QueueReviewRunner implements QueueRunService {
     try {
       return await waitForStoreOperation(record.operation, operationName, waitSignal, callerSignal);
     } catch (error) {
-      if (isExactCallerCancellation(error, callerSignal)) {
-        throw error;
+      if (isCallerCancellation(error, callerSignal)) {
+        throw callerSignal?.reason instanceof Error ? callerSignal.reason : error;
       }
       throw new StoreOperationFailure(record, error);
     }
@@ -809,12 +846,20 @@ export class QueueReviewRunner implements QueueRunService {
 
   async run(signal?: AbortSignal): Promise<void> {
     for (;;) {
-      if (signal?.aborted === true) {
+      if (aborted(signal)) {
         return;
       }
       // Pull and settlement are deliberately serialized to keep one review in flight.
-      // eslint-disable-next-line no-await-in-loop
-      const result = await this.consumeOne(signal);
+      let result: QueueConsumption;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        result = await this.consumeOne(signal);
+      } catch (error) {
+        if (aborted(signal)) {
+          return;
+        }
+        throw error;
+      }
       if (result === "idle") {
         // eslint-disable-next-line no-await-in-loop
         await waitForNextPoll(signal);
@@ -823,12 +868,16 @@ export class QueueReviewRunner implements QueueRunService {
   }
 }
 
-export function createDefaultQueueRunService(configuration: RevoirConfiguration): QueueRunService {
+export function createDefaultQueueRunService(
+  configuration: RevoirConfiguration,
+  logger: QueueRunLogger = NOOP_LOGGER,
+): QueueRunService {
   return new QueueReviewRunner(
     configuration,
     new CloudflareQueueClient(configuration.cloudflare, configuration.timeouts.reviewMs),
     createDefaultManualReviewService(configuration),
     new GitHubReviewFailureReporter(configuration.github),
     new FileOperationalFailureStore(configuration.paths.stateDir),
+    logger,
   );
 }

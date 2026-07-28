@@ -13,6 +13,8 @@ import type { QueueRunService } from "../src/queue/runner.js";
 import { FindingContractError, validateModelReviewOutput } from "../src/review/findings.js";
 import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
+import type { ServiceLogger } from "../src/service/logging.js";
+import type { ServiceManager, ServiceStatus } from "../src/service/manager.js";
 import { passingGateway, TEST_PRIVATE_KEY } from "./helpers.js";
 
 class CapturingWritable extends Writable {
@@ -453,6 +455,87 @@ describe("CLI", () => {
     assert.equal(runs, 1);
   });
 
+  it("dispatches idempotent service lifecycle commands and renders actionable status", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+
+    const calls: string[] = [];
+    let status: ServiceStatus = {
+      state: "healthy",
+      detail: "LaunchAgent is healthy with process 321.",
+      pid: 321,
+    };
+    const serviceManager: ServiceManager = {
+      async install() {
+        calls.push("install");
+      },
+      async start() {
+        calls.push("start");
+      },
+      async stop() {
+        calls.push("stop");
+      },
+      async status() {
+        calls.push("status");
+        return status;
+      },
+      async uninstall() {
+        calls.push("uninstall");
+      },
+    };
+
+    assert.equal(await runCli(["install"], { io, serviceManager }), 0);
+    assert.equal(await runCli(["start"], { io, serviceManager }), 0);
+    assert.equal(await runCli(["status"], { io, serviceManager }), 0);
+    assert.match(stdout.output, /Service healthy: LaunchAgent is healthy with process 321/u);
+    assert.equal(await runCli(["stop"], { io, serviceManager }), 0);
+    assert.equal(await runCli(["uninstall"], { io, serviceManager }), 0);
+    assert.deepEqual(calls, ["install", "start", "status", "stop", "uninstall"]);
+
+    stdout.output = "";
+    status = {
+      state: "failed",
+      detail: 'LaunchAgent failed with exit code 78. Inspect "revoir logs".',
+    };
+    assert.equal(await runCli(["status"], { io, serviceManager }), 1);
+    assert.match(stdout.output, /Service failed: LaunchAgent failed with exit code 78/u);
+
+    assert.equal(await runCli(["install", "unexpected"], { io, serviceManager }), 2);
+    assert.match(stderr.output, /install does not accept positional arguments/u);
+
+    stderr.output = "";
+    await chmod(resolveApplicationPaths(io.environment, root).configFile, 0o644);
+    assert.equal(await runCli(["install"], { io, serviceManager }), 2);
+    assert.match(stderr.output, /unsafe mode 0644.*chmod 600/u);
+    assert.deepEqual(calls, ["install", "start", "status", "stop", "uninstall", "status"]);
+  });
+
+  it("prints structured XDG service logs without requiring configuration", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const logsDirectory = join(root, "state", "revoir", "logs");
+    await mkdir(logsDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(logsDirectory, "service.jsonl"),
+      '{"timestamp":"2026-07-29T08:00:00.000Z","event":"daemon_started","data":{}}\n',
+      { mode: 0o600 },
+    );
+
+    assert.equal(await runCli(["logs"], { io }), 0);
+    assert.match(stdout.output, /"event":"daemon_started"/u);
+    assert.equal(stderr.output, "");
+
+    assert.equal(await runCli(["logs", "unexpected"], { io }), 2);
+    assert.match(stderr.output, /logs does not accept positional arguments/u);
+  });
+
   it("redacts pull-consumer failures", async () => {
     const { root, io, stdout, stderr } = await createIo();
     const { privateKeyFile, tokenFile } = await writeCredentials(root);
@@ -473,6 +556,58 @@ describe("CLI", () => {
     assert.equal(await runCli(["run"], { io, runService: failed }), 1);
     assert.match(stderr.output, /\[REDACTED\]/u);
     assert.doesNotMatch(stderr.output, /cli-cloudflare-secret/u);
+  });
+
+  it("passes shutdown into the daemon and flushes structured lifecycle logs before exit", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    const controller = new AbortController();
+    const operations: string[] = [];
+    const logger: ServiceLogger = {
+      async write(event) {
+        operations.push(`log:${event}`);
+      },
+      async flush() {
+        operations.push("flush");
+      },
+      async close() {
+        operations.push("close");
+      },
+    };
+    const runService: QueueRunService = {
+      async run(signal) {
+        operations.push("run");
+        assert.equal(signal, controller.signal);
+        controller.abort(new Error("SIGTERM requested graceful shutdown"));
+      },
+    };
+
+    assert.equal(
+      await runCli(["run"], {
+        io,
+        runService,
+        serviceLogger: logger,
+        shutdownSignal: controller.signal,
+      }),
+      0,
+    );
+    assert.deepEqual(operations, [
+      "log:daemon_started",
+      "run",
+      "log:daemon_stopped",
+      "flush",
+      "close",
+    ]);
+    assert.equal(stdout.output, "");
+    assert.equal(stderr.output, "");
   });
 
   it("classifies eligibility rejection separately and redacts review failures", async () => {

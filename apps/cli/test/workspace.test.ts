@@ -518,6 +518,54 @@ describe("Git review workspace", () => {
     }
   });
 
+  it("preserves caller cancellation through command wrapping and workspace redaction", async () => {
+    try {
+      const cache = await temporaryDirectory("revoir-cache-cancellation-");
+      const controller = new AbortController();
+      const cancellation = new Error("daemon stopping");
+      const runner: CommandRunner = {
+        async run() {
+          controller.abort(cancellation);
+          throw new Error("git failed", { cause: cancellation });
+        },
+      };
+      const pullRequest: PullRequestSnapshot = {
+        number: 17,
+        state: "open",
+        draft: false,
+        authorId: 42,
+        baseSha: "1".repeat(40),
+        headSha: "2".repeat(40),
+        baseRepository: {
+          id: 99,
+          fullName: "owner/repository",
+          cloneUrl: "https://github.com/owner/repository.git",
+        },
+        headRepository: {
+          id: 99,
+          fullName: "owner/repository",
+          cloneUrl: "https://github.com/owner/repository.git",
+        },
+      };
+
+      await assert.rejects(
+        () =>
+          new GitWorkspacePreparer(cache, 10_000, runner).prepare(
+            parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+            pullRequest,
+            "installation-token",
+            controller.signal,
+          ),
+        (error: unknown) => {
+          assert.equal(error, cancellation);
+          return true;
+        },
+      );
+    } finally {
+      await cleanupTemporaryDirectories();
+    }
+  });
+
   it("retains a retryable cleanup handle when partial preparation cleanup fails", async () => {
     try {
       const cache = await temporaryDirectory("revoir-cache-partial-cleanup-retry-");

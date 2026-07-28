@@ -113,6 +113,7 @@ describe("automatic queue review runner", () => {
     ];
     const acknowledgements: string[] = [];
     const retries: string[] = [];
+    const events: Array<{ event: string; data: Readonly<Record<string, unknown>> }> = [];
     const queue: QueueClient = {
       async pullOne() {
         return deliveries.shift();
@@ -162,6 +163,11 @@ describe("automatic queue review runner", () => {
       reviewService,
       silentFailureReporter,
       new MemoryOperationalFailureStore(),
+      {
+        async write(event, data = {}) {
+          events.push({ event, data });
+        },
+      },
     );
 
     while (deliveries.length > 0) {
@@ -196,6 +202,20 @@ describe("automatic queue review runner", () => {
         expectedHeadSha: "2".repeat(40),
       },
     ]);
+    assert.deepEqual(
+      events.map(({ event }) => event),
+      [
+        "queue_review_started",
+        "queue_review_settled",
+        "queue_review_started",
+        "queue_review_settled",
+        "queue_review_started",
+        "queue_review_rejected",
+        "queue_review_started",
+        "queue_review_retried",
+      ],
+    );
+    assert.equal(events.at(-1)?.data["deliveryId"], reviewJob().deliveryId);
   });
 
   it("pulls and settles at most one review at a time", async () => {
@@ -239,6 +259,55 @@ describe("automatic queue review runner", () => {
 
     assert.equal(pulls, 3);
     assert.equal(maximumActiveReviews, 1);
+  });
+
+  it("exits cleanly on active review cancellation without settling its lease", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("SIGTERM requested graceful shutdown");
+    let delivered = false;
+    const acknowledgements: string[] = [];
+    const retries: string[] = [];
+    const events: string[] = [];
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          if (delivered) {
+            return undefined;
+          }
+          delivered = true;
+          return delivery("shutdown-lease", reviewJob());
+        },
+        async acknowledge(leaseId) {
+          acknowledgements.push(leaseId);
+        },
+        async retry(leaseId) {
+          retries.push(leaseId);
+        },
+      },
+      {
+        async review(_reference, options) {
+          controller.abort(cancellation);
+          assert.equal(options?.signal?.aborted, true);
+          throw options?.signal?.reason;
+        },
+      },
+      silentFailureReporter,
+      failures,
+      {
+        async write(event) {
+          events.push(event);
+        },
+      },
+    );
+
+    await runner.run(controller.signal);
+
+    assert.deepEqual(acknowledgements, []);
+    assert.deepEqual(retries, []);
+    assert.deepEqual(events, ["queue_review_started"]);
+    assert.equal(failures.failures.get(reviewJob().deliveryId)?.reservation, undefined);
   });
 
   it("retries two operational failures with increasing delay and acknowledges the third", async () => {
@@ -2308,6 +2377,54 @@ describe("automatic queue review runner", () => {
     await started;
     controller.abort(cancellation);
     await assert.rejects(cancelled, cancellation);
+    await runner.consumeOne();
+
+    assert.deepEqual(
+      failures.saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 1],
+    );
+  });
+
+  it("rolls back wrapped review cancellation and reuses its owned slot", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("stop active review");
+    const deliveries = [delivery("cancelled", reviewJob(), 7), delivery("reused", reviewJob(), 8)];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge() {},
+      async retry() {
+        assert.fail("Graceful cancellation must not retry.");
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        if (reviews === 1) {
+          controller.abort(cancellation);
+          throw new Error("git failed", { cause: cancellation });
+        }
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviewService,
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(controller.signal), cancellation);
     await runner.consumeOne();
 
     assert.deepEqual(
