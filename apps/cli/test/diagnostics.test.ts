@@ -77,7 +77,16 @@ describe("diagnostic contracts", () => {
       if (url.endsWith("/app")) {
         body = { id: 7, slug: "revoir-test" };
       } else if (url.endsWith("/access_tokens")) {
-        body = { token: "installation-secret" };
+        body = {
+          token: "installation-secret",
+          permissions: {
+            metadata: "read",
+            contents: "read",
+            checks: "read",
+            actions: "read",
+            pull_requests: "write",
+          },
+        };
       } else if (url.endsWith("/user/42")) {
         body = { id: 42, login: "test-user" };
       } else if (url.endsWith("/repositories/99")) {
@@ -117,12 +126,63 @@ describe("diagnostic contracts", () => {
     assert.equal(requests[4]?.authorization, "Bearer cloudflare-secret-token");
   });
 
+  it("reports every missing GitHub installation permission with an actionable fix", async () => {
+    const requiredPermissions = {
+      metadata: "read",
+      contents: "read",
+      checks: "read",
+      actions: "read",
+      pull_requests: "write",
+    } as const;
+
+    await Promise.all(
+      Object.entries(requiredPermissions).map(async ([missingPermission, requiredGrant]) => {
+        const permissions: Record<string, string> = { ...requiredPermissions };
+        delete permissions[missingPermission];
+        const gateway = createDefaultDiagnosticGateway(async (url) => {
+          const body = url.endsWith("/app")
+            ? { id: 7 }
+            : url.endsWith("/access_tokens")
+              ? { token: "installation-secret", permissions }
+              : url.endsWith("/user/42")
+                ? { id: 42 }
+                : { id: 99, full_name: "owner/repository" };
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return body;
+            },
+          };
+        });
+
+        await assert.rejects(
+          gateway.checkGitHub(configuration.github),
+          (error: unknown) =>
+            error instanceof Error &&
+            error.message.includes(missingPermission) &&
+            error.message.includes(requiredGrant) &&
+            error.message.includes("GitHub App settings"),
+        );
+      }),
+    );
+  });
+
   it("rejects mismatched immutable repository values", async () => {
     const gateway = createDefaultDiagnosticGateway(async (url) => {
       const body = url.endsWith("/app")
         ? { id: 7 }
         : url.endsWith("/access_tokens")
-          ? { token: "installation-secret" }
+          ? {
+              token: "installation-secret",
+              permissions: {
+                metadata: "read",
+                contents: "read",
+                checks: "read",
+                actions: "read",
+                pull_requests: "write",
+              },
+            }
           : url.endsWith("/user/42")
             ? { id: 42 }
             : { id: 99, full_name: "owner/different" };

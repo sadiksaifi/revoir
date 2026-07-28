@@ -7,6 +7,13 @@ import type { RevoirConfiguration } from "./config/schema.js";
 const execFile = promisify(execFileCallback);
 const GITHUB_API = "https://api.github.com";
 const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
+const REQUIRED_GITHUB_PERMISSIONS = {
+  metadata: "read",
+  contents: "read",
+  checks: "read",
+  actions: "read",
+  pull_requests: "write",
+} as const;
 
 export type DiagnosticStatus = "passed" | "failed";
 
@@ -92,6 +99,28 @@ function githubHeaders(token: string): Readonly<Record<string, string>> {
   };
 }
 
+function validateGitHubPermissions(value: unknown): void {
+  const permissions = parseJsonRecord(value, "GitHub installation permissions");
+  const invalidPermissions = Object.entries(REQUIRED_GITHUB_PERMISSIONS).filter(
+    ([permission, requiredGrant]) => permissions[permission] !== requiredGrant,
+  );
+  if (invalidPermissions.length === 0) {
+    return;
+  }
+
+  const detail = invalidPermissions
+    .map(([permission, requiredGrant]) => {
+      const configuredGrant = permissions[permission];
+      return `${permission} must be "${requiredGrant}" (found ${
+        typeof configuredGrant === "string" ? `"${configuredGrant}"` : "missing"
+      })`;
+    })
+    .join("; ");
+  throw new Error(
+    `GitHub installation permissions are invalid: ${detail}. Update the repository permissions in the GitHub App settings, approve the permission change for this installation, and rerun diagnostics.`,
+  );
+}
+
 export function createDefaultDiagnosticGateway(
   fetchImplementation: FetchFunction = fetch,
 ): DiagnosticGateway {
@@ -163,6 +192,7 @@ export function createDefaultDiagnosticGateway(
       if (typeof tokenResponse.token !== "string" || tokenResponse.token === "") {
         throw new Error("GitHub installation did not return an access token.");
       }
+      validateGitHubPermissions(tokenResponse.permissions);
       const installationToken = tokenResponse.token;
 
       const user = await requestJson(
