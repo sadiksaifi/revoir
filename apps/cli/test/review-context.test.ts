@@ -4,10 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import {
-  assembleReviewContext,
-  loadApplicableRepositoryGuidance,
-} from "../src/review/context.js";
+import { assembleReviewContext, loadApplicableRepositoryGuidance } from "../src/review/context.js";
 import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pull-request.js";
 import type { PreparedWorkspace } from "../src/review/workspace.js";
 

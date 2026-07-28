@@ -317,8 +317,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       }
       workspaceCleanup = createTerminalHandle(workspace.cleanup);
       throwIfAborted(signal);
+      const evidence = await github.getReviewEvidence(reference, pullRequest.headSha, signal);
+      throwIfAborted(signal);
       const engineResult = (await this.#reviewEngine.review(
-        { reference, pullRequest, workspace },
+        { reference, pullRequest, workspace, evidence },
         signal,
       )) ?? {
         findings: [],

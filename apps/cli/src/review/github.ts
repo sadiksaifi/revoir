@@ -341,7 +341,9 @@ function parseCompletedCheck(
   const conclusion = string(check.conclusion, "completed check run conclusion");
   const detailsUrl = optionalString(check.details_url, "check run details URL");
   const output =
-    check.output === undefined || check.output === null ? undefined : record(check.output, "check output");
+    check.output === undefined || check.output === null
+      ? undefined
+      : record(check.output, "check output");
   const title = optionalString(output?.title, "check output title");
   const summary = optionalString(output?.summary, "check output summary");
   const evidence: CompletedCheckEvidence = {

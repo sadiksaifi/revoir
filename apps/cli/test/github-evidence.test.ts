@@ -125,14 +125,22 @@ describe("GitHub review evidence", () => {
       ],
     });
     assert.equal(pendingObserved, true);
-    assert.equal(requests.some(({ url }) => url.endsWith("/actions/jobs/200/logs")), false);
-    assert.equal(requests.some(({ url }) => url.endsWith("/actions/jobs/202/logs")), false);
+    assert.equal(
+      requests.some(({ url }) => url.endsWith("/actions/jobs/200/logs")),
+      false,
+    );
+    assert.equal(
+      requests.some(({ url }) => url.endsWith("/actions/jobs/202/logs")),
+      false,
+    );
     const evidenceRequests = requests.filter(
       ({ url }) => url.includes("/check-runs") || url.includes("/actions/jobs/"),
     );
     assert.ok(evidenceRequests.every(({ method }) => method === undefined || method === "GET"));
     assert.equal(
-      requests.some(({ url }) => /\/actions\/(?:runs|workflows)\/.+\/(?:rerun|cancel|dispatches)$/u.test(url)),
+      requests.some(({ url }) =>
+        /\/actions\/(?:runs|workflows)\/.+\/(?:rerun|cancel|dispatches)$/u.test(url),
+      ),
       false,
     );
   });

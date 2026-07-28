@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { createConfiguration } from "../src/config/schema.js";
+import type { GitHubReviewEvidence } from "../src/review/evidence.js";
 import type { ReviewFindingV1 } from "../src/review/findings.js";
 import type {
   GitHubReviewGateway,
@@ -109,6 +110,7 @@ function pullRequest(): PullRequestSnapshot {
 function harness(
   options: {
     currentSha?: string;
+    evidence?: GitHubReviewEvidence;
     pullRequest?: PullRequestSnapshot;
     review?: ReviewEngine["review"];
     prepareError?: Error;
@@ -169,7 +171,8 @@ function harness(
       return snapshot;
     },
     async getReviewEvidence() {
-      return { completedChecks: [] };
+      events.push("get-evidence");
+      return options.evidence ?? { completedChecks: [] };
     },
     async getHeadSha(_reference, signal?: AbortSignal) {
       events.push("get-head");
@@ -385,6 +388,7 @@ describe("clean review orchestrator", () => {
       "remove-old-thumb",
       "add-eyes",
       "prepare-installation-secret",
+      "get-evidence",
       "review",
       "cleanup",
       "delete-10",
@@ -393,6 +397,36 @@ describe("clean review orchestrator", () => {
       "add-+1",
       "get-head",
     ]);
+  });
+
+  it("publishes a finding supported by failed CI evidence without waiting for pending CI", async () => {
+    const evidence: GitHubReviewEvidence = {
+      completedChecks: [
+        {
+          name: "unit",
+          conclusion: "failure",
+          failedActionsLog: "FAIL API returned 200 instead of 404",
+        },
+      ],
+    };
+    const { events, orchestrator } = harness({
+      evidence,
+      review: async (input) => {
+        assert.deepEqual(input.evidence, evidence);
+        return { findings: [validatedFinding()], diagnostics: [] };
+      },
+    });
+
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "findings",
+      reviewedSha: "2".repeat(40),
+      currentSha: "2".repeat(40),
+      publishedFindings: 1,
+      rejectedFindings: 0,
+      diagnostics: [],
+    });
+    assert.ok(events.indexOf("get-evidence") < events.indexOf("create-review"));
+    assert.equal(events.includes("submit-review-20"), true);
   });
 
   it("publishes findings through one current non-blocking review and never adds a thumb", async () => {

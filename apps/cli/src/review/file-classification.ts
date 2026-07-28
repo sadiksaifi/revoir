@@ -108,11 +108,7 @@ export function classifyReviewFile(path: string): ReviewFileClassification {
   if (segments.some((segment) => VENDORED_DIRECTORIES.has(segment))) {
     return classification(path, "vendored", false);
   }
-  if (
-    segments.includes("__snapshots__") ||
-    name.endsWith(".snap") ||
-    name.includes(".snapshot.")
-  ) {
+  if (segments.includes("__snapshots__") || name.endsWith(".snap") || name.includes(".snapshot.")) {
     return classification(path, "snapshot", false);
   }
   if (/(?:^|[.-])min\.[a-z0-9]+(?:\.map)?$/u.test(name)) {

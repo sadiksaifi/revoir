@@ -15,6 +15,7 @@ import {
 } from "@revoir/contracts";
 
 import { isAttachableRange, parseGitDiff, type DiffFile, type DiffSide } from "./diff.js";
+import { classifyReviewFile } from "./file-classification.js";
 
 export {
   FINDING_CONTRACT_VERSION,
@@ -276,6 +277,9 @@ export async function validateModelReviewOutput(
     try {
       const modelFinding = validateFindingSemantics(parseModelFinding(candidate, index), index);
       const repositoryPath = safeRepositoryPath(modelFinding.path);
+      if (!classifyReviewFile(repositoryPath).detailedReview) {
+        throw new Error("path is excluded from detailed review by the fixed file policy.");
+      }
       const file = diff.files.get(repositoryPath);
       // Candidate order is contract-significant for deterministic first-wins deduplication.
       // eslint-disable-next-line no-await-in-loop
