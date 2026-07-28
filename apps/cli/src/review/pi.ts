@@ -22,12 +22,14 @@ Use read, search, and host bash only for evidence. Do not modify files, install 
 package lifecycle scripts, or use repository-provided Pi extensions, skills, prompts, or settings.
 Report only observed, actionable P0-P3 issues. Suppress style preferences and anything already
 enforced by standard formatting or lint automation. Return exactly one JSON value with this shape:
-{"version":1,"findings":[{"priority":"P0|P1|P2|P3","title":"concise title","path":"repository/relative/path","range":{"start":1,"end":1,"side":"RIGHT|LEFT"},"issue":"observed defect","impact":"concrete impact reusing an evidence-supported technical anchor","evidence":"supporting evidence","fixDirection":"concise action"}]}.
+{"version":1,"findings":[{"priority":"P0|P1|P2|P3","path":"repository/relative/path","range":{"start":1,"end":1,"side":"RIGHT|LEFT"},"defectKind":"correctness|validation|resource-lifecycle|concurrency|security|compatibility|error-handling|test-coverage","impactKind":"incorrect-result|operation-failure|data-loss|resource-leak|execution-stall|security-exposure|compatibility-break|regression-risk","fixAction":"guard|validate|preserve|propagate|synchronize|release|restore|add-test","anchor":"exact technical text copied from the selected changed lines or file change"}]}.
 Use RIGHT only for added head lines and LEFT only for deleted base lines. Use range:null only for a
 valid file-level issue with no exact changed-line anchor. Do not include a fingerprint; Revoir
-derives it deterministically after validation. Do not include unknown fields, Markdown, praise,
-a summary, severity explanations, merge instructions, boilerplate, or speculative concerns.
-Start fixDirection with a direct action verb such as Add, Guard, Pass, Remove, or Validate.`;
+derives it deterministically after validation. Choose only the listed semantic enum values. Copy
+anchor exactly, including Unicode normalization and case; never paraphrase it. Revoir verifies the
+anchor against the authoritative diff and renders all review prose locally. Do not include unknown
+fields, prose, Markdown, praise, summaries, severity explanations, merge instructions, boilerplate,
+or speculative concerns.`;
 
 export interface ReviewEngineInput {
   reference: PullRequestReference;

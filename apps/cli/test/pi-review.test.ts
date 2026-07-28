@@ -102,6 +102,8 @@ describe("Pi clean review adapter", () => {
     assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not modify files/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /"version":1/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /P0\|P1\|P2\|P3/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /"defectKind"/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /renders all review prose locally/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /formatting or lint automation/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not include a fingerprint/u);
     assert.equal(sessions.prompts.length, 1);
@@ -122,23 +124,21 @@ describe("Pi clean review adapter", () => {
         findings: [
           {
             priority: "P1",
-            title: "Cancellation is dropped",
             path: "source.ts",
             range: { start: 1, end: 1, side: "RIGHT" },
-            issue: "The added operation does not receive the cancellation signal.",
-            impact: "The missing cancellation signal keeps timed-out work active.",
-            evidence: "The added call has no cancellation signal argument.",
-            fixDirection: "Pass the active signal to the call.",
+            defectKind: "concurrency",
+            impactKind: "execution-stall",
+            fixAction: "synchronize",
+            anchor: "current",
           },
           {
             priority: "P9",
-            title: "Invalid priority",
             path: "source.ts",
             range: null,
-            issue: "This candidate is invalid.",
-            impact: "It must not be published.",
-            evidence: "The priority is outside the contract.",
-            fixDirection: "Remove the invalid candidate.",
+            defectKind: "correctness",
+            impactKind: "incorrect-result",
+            fixAction: "guard",
+            anchor: "source.ts",
           },
         ],
       });
@@ -185,23 +185,21 @@ index 1111111..2222222 100644
         findings: [
           {
             priority: "P9",
-            title: "Invalid priority",
             path: "source.ts",
             range: null,
-            issue: `The ${sourceSecret} candidate is invalid.`,
-            impact: "It must not be published.",
-            evidence: `Observed ${sourceSecret} in private source.`,
-            fixDirection: "Remove the invalid candidate.",
+            defectKind: sourceSecret,
+            impactKind: "incorrect-result",
+            fixAction: "guard",
+            anchor: "source.ts",
           },
           {
             priority: "P1",
-            title: "Invalid path",
             path: `../${sourceSecret}.ts`,
             range: null,
-            issue: "The path points outside the checkout.",
-            impact: "The invalid path escapes the checkout.",
-            evidence: "The path traverses above the repository root.",
-            fixDirection: "Use a repository-relative path.",
+            defectKind: "correctness",
+            impactKind: "incorrect-result",
+            fixAction: "guard",
+            anchor: "source.ts",
           },
         ],
       });

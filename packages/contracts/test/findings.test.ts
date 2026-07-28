@@ -6,13 +6,12 @@ import { FindingSchemaError, parseModelFinding, parseModelReviewOutput } from ".
 function finding(priority = "P1") {
   return {
     priority,
-    title: "Dropped cancellation",
     path: "src/review.ts",
     range: { start: 10, end: 12, side: "RIGHT" },
-    issue: "The cancellation signal is not forwarded.",
-    impact: "A timed-out review continues consuming resources.",
-    evidence: "The added call omits the signal argument used by the callee.",
-    fixDirection: "Pass the active signal to the call.",
+    defectKind: "concurrency",
+    impactKind: "execution-stall",
+    fixAction: "synchronize",
+    anchor: "submitSignal",
   };
 }
 
@@ -36,25 +35,22 @@ describe("finding contract v1", () => {
     assert.deepEqual(parseModelFinding(parsed.findings[0], 0), value.findings[0]);
   });
 
-  it("preserves exact Git path and prose code points", () => {
+  it("preserves exact Git path and technical-anchor code points", () => {
     const decomposedPath = " dir/cafe\u0301 [literal] .ts ";
     const candidate = finding();
     const parsed = parseModelFinding(
       {
         ...candidate,
-        title: "Cafe\u0301 signal",
         path: decomposedPath,
-        issue: "The cafe\u0301 signal is dropped.",
+        anchor: "cafe\u0301Signal",
       },
       0,
     );
 
     assert.equal(parsed.path, decomposedPath);
     assert.deepEqual(Buffer.from(parsed.path), Buffer.from(decomposedPath));
-    assert.equal(parsed.title, "Cafe\u0301 signal");
-    assert.equal(parsed.issue, "The cafe\u0301 signal is dropped.");
-    assert.deepEqual(Buffer.from(parsed.title), Buffer.from("Cafe\u0301 signal"));
-    assert.deepEqual(Buffer.from(parsed.issue), Buffer.from("The cafe\u0301 signal is dropped."));
+    assert.equal(parsed.anchor, "cafe\u0301Signal");
+    assert.deepEqual(Buffer.from(parsed.anchor), Buffer.from("cafe\u0301Signal"));
   });
 
   it("rejects malformed JSON, unknown versions, fields, and envelope shapes", () => {
@@ -120,9 +116,12 @@ describe("finding contract v1", () => {
     );
   });
 
-  it("rejects unknown priorities and malformed ranges", () => {
+  it("rejects unknown priorities, semantic enums, and malformed ranges", () => {
     const cases = [
       finding("P4"),
+      { ...finding(), defectKind: "praise" },
+      { ...finding(), impactKind: "maybe-bad" },
+      { ...finding(), fixAction: "consider" },
       { ...finding(), range: { start: 0, end: 1, side: "RIGHT" } },
       { ...finding(), range: { start: 2, end: 1, side: "RIGHT" } },
       { ...finding(), range: { start: 1, end: 51, side: "RIGHT" } },
@@ -134,16 +133,12 @@ describe("finding contract v1", () => {
     }
   });
 
-  it("rejects empty, untrimmed, multiline, and wrong-type fields", () => {
+  it("rejects empty, untrimmed, multiline, and wrong-type string fields", () => {
     const cases = [
-      { ...finding(), title: "" },
-      { ...finding(), title: " padded " },
-      { ...finding(), title: "two\nlines" },
-      { ...finding(), issue: "two\nlines" },
-      { ...finding(), impact: "two\nlines" },
-      { ...finding(), evidence: "two\nlines" },
-      { ...finding(), fixDirection: "two\nlines" },
-      { ...finding(), evidence: null },
+      { ...finding(), anchor: "" },
+      { ...finding(), anchor: " padded " },
+      { ...finding(), anchor: "two\nlines" },
+      { ...finding(), anchor: null },
       { ...finding(), path: "source\u0000.ts" },
       { ...finding(), path: "source\ud800.ts" },
       { ...finding(), path: "source\nline.ts" },
@@ -154,16 +149,13 @@ describe("finding contract v1", () => {
   });
 
   it("rejects unpaired UTF-16 surrogates in every contract string before field rules", () => {
-    const malformed = ["leading\ud800tail", "leading\ud800X", "leading\udc00tail"];
-    const fields = [
-      "priority",
-      "title",
-      "path",
-      "issue",
-      "impact",
-      "evidence",
-      "fixDirection",
-    ] as const;
+    const malformed = [
+      "trailing\ud800",
+      "leading\ud800tail",
+      "leading\ud800X",
+      "leading\udc00tail",
+    ];
+    const fields = ["priority", "path", "defectKind", "impactKind", "fixAction", "anchor"] as const;
 
     for (const field of fields) {
       for (const value of malformed) {
@@ -175,11 +167,7 @@ describe("finding contract v1", () => {
     }
     for (const value of malformed) {
       assert.throws(
-        () =>
-          parseModelFinding(
-            { ...finding(), range: { start: 1, end: 1, side: value } },
-            0,
-          ),
+        () => parseModelFinding({ ...finding(), range: { start: 1, end: 1, side: value } }, 0),
         /must contain only Unicode scalar values/u,
       );
       assert.throws(
@@ -189,26 +177,18 @@ describe("finding contract v1", () => {
     }
   });
 
-  it("round-trips valid astral characters in every finding string", () => {
+  it("round-trips valid astral characters in exact path and anchor strings", () => {
     const astral = "queue-\u{1f680}";
     const parsed = parseModelFinding(
       {
         ...finding(),
-        title: astral,
         path: `${astral}.ts`,
-        issue: `${astral} drops cancellation.`,
-        impact: `${astral} retains resources.`,
-        evidence: `${astral} omits the signal.`,
-        fixDirection: `Pass the signal to ${astral}.`,
+        anchor: astral,
       },
       0,
     );
 
-    assert.equal(parsed.title, astral);
     assert.equal(parsed.path, `${astral}.ts`);
-    assert.equal(parsed.issue, `${astral} drops cancellation.`);
-    assert.equal(parsed.impact, `${astral} retains resources.`);
-    assert.equal(parsed.evidence, `${astral} omits the signal.`);
-    assert.equal(parsed.fixDirection, `Pass the signal to ${astral}.`);
+    assert.equal(parsed.anchor, astral);
   });
 });

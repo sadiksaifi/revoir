@@ -530,13 +530,12 @@ describe("CLI", () => {
           findings: [
             {
               priority: "P1",
-              title: "Unknown field",
               path: "source.ts",
               range: null,
-              issue: "The candidate has an unsupported shape.",
-              impact: "The finding cannot be validated.",
-              evidence: "The candidate includes a field outside the contract.",
-              fixDirection: "Remove the unsupported field.",
+              defectKind: "correctness",
+              impactKind: "incorrect-result",
+              fixAction: "guard",
+              anchor: "source.ts",
               [sourceSecret]: "echo",
             },
           ],
@@ -568,7 +567,7 @@ describe("CLI", () => {
     assert.equal(stdout.output, "");
   });
 
-  it("prints only static diagnostics for disconnected model prose", async () => {
+  it("prints only static diagnostics for unknown model semantic values", async () => {
     const { root, io, stdout, stderr } = await createIo();
     const { privateKeyFile, tokenFile } = await writeCredentials(root);
     assert.equal(
@@ -581,7 +580,7 @@ describe("CLI", () => {
     stdout.output = "";
     stderr.output = "";
 
-    const modelTitle = "Excellent PRIVATE_SOURCE_TOKEN";
+    const modelDefectKind = "PRIVATE_SOURCE_TOKEN";
     const allInvalid: ManualReviewService = {
       async review() {
         await validateModelReviewOutput(
@@ -590,19 +589,18 @@ describe("CLI", () => {
             findings: [
               {
                 priority: "P1",
-                title: modelTitle,
                 path: "source.ts",
                 range: null,
-                issue: "The cancellation signal is not forwarded.",
-                impact: "The missing signal retains the review slot.",
-                evidence: "The changed call omits the signal argument.",
-                fixDirection: "Pass the cancellation signal to the call.",
+                defectKind: modelDefectKind,
+                impactKind: "incorrect-result",
+                fixAction: "guard",
+                anchor: "source.ts",
               },
             ],
           }),
           { checkout: root, diff: "" },
         );
-        throw new Error("Expected disconnected prose to be rejected.");
+        throw new Error("Expected unknown semantic value to be rejected.");
       },
     };
 
@@ -613,13 +611,13 @@ describe("CLI", () => {
       }),
       1,
     );
-    assert.match(stderr.output, /title must be grounded in observed technical evidence/u);
-    assert.doesNotMatch(stderr.output, new RegExp(modelTitle, "u"));
+    assert.match(stderr.output, /defectKind must be a supported defect kind/u);
+    assert.doesNotMatch(stderr.output, new RegExp(modelDefectKind, "u"));
     assert.doesNotMatch(stderr.output, /PRIVATE_SOURCE_TOKEN/u);
     assert.equal(stdout.output, "");
   });
 
-  it("does not print disconnected model impact source text", async () => {
+  it("does not print malformed model anchor source text", async () => {
     const { root, io, stdout, stderr } = await createIo();
     const { privateKeyFile, tokenFile } = await writeCredentials(root);
     assert.equal(
@@ -632,7 +630,7 @@ describe("CLI", () => {
     stdout.output = "";
     stderr.output = "";
 
-    const modelImpact = "Everything remains correct PRIVATE_IMPACT_SOURCE.";
+    const modelAnchor = " PRIVATE_IMPACT_SOURCE ";
     const allInvalid: ManualReviewService = {
       async review() {
         await validateModelReviewOutput(
@@ -641,19 +639,18 @@ describe("CLI", () => {
             findings: [
               {
                 priority: "P1",
-                title: "Cancellation signal",
                 path: "source.ts",
                 range: null,
-                issue: "The cancellation signal is not forwarded.",
-                impact: modelImpact,
-                evidence: "The changed call omits the cancellation signal argument.",
-                fixDirection: "Pass the cancellation signal to the call.",
+                defectKind: "correctness",
+                impactKind: "incorrect-result",
+                fixAction: "guard",
+                anchor: modelAnchor,
               },
             ],
           }),
           { checkout: root, diff: "" },
         );
-        throw new Error("Expected disconnected impact to be rejected.");
+        throw new Error("Expected malformed anchor to be rejected.");
       },
     };
 
@@ -664,8 +661,8 @@ describe("CLI", () => {
       }),
       1,
     );
-    assert.match(stderr.output, /impact must be grounded in observed technical evidence/u);
-    assert.doesNotMatch(stderr.output, new RegExp(modelImpact, "u"));
+    assert.match(stderr.output, /anchor must contain 1-160 trimmed characters/u);
+    assert.doesNotMatch(stderr.output, new RegExp(modelAnchor.trim(), "u"));
     assert.doesNotMatch(stderr.output, /PRIVATE_IMPACT_SOURCE/u);
     assert.equal(stdout.output, "");
   });

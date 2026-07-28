@@ -89,22 +89,32 @@ new file mode 100644
 function finding(overrides: Record<string, unknown> = {}) {
   const candidate = {
     priority: "P1",
-    title: "Cancellation is dropped",
     path: "source.ts",
     range: { start: 2, end: 3, side: "RIGHT" },
-    issue: "The added branch does not forward the cancellation signal.",
-    impact: "The missing signal lets timed-out work consume the single review slot.",
-    evidence:
-      "Both added calls omit the cancellation signal argument required by the invoked operation.",
-    fixDirection: "Pass the active cancellation signal to both calls.",
+    defectKind: "concurrency",
+    impactKind: "execution-stall",
+    fixAction: "synchronize",
+    anchor: "const",
     ...overrides,
   };
-  if (
-    !Object.prototype.hasOwnProperty.call(overrides, "impact") &&
-    Object.prototype.hasOwnProperty.call(overrides, "issue") &&
-    typeof candidate.issue === "string"
-  ) {
-    candidate.impact = `${candidate.issue} This defect disrupts runtime processing.`;
+  if (!Object.prototype.hasOwnProperty.call(overrides, "anchor")) {
+    const path = typeof candidate.path === "string" ? candidate.path : "";
+    const range =
+      typeof candidate.range === "object" && candidate.range !== null
+        ? (candidate.range as { side?: unknown })
+        : null;
+    candidate.anchor =
+      range === null
+        ? path
+        : path === "deleted.ts"
+          ? "first"
+          : path === "new-name.ts"
+            ? range.side === "LEFT"
+              ? "old"
+              : "new"
+            : path === BACKSLASH_PATH
+              ? "backslash"
+              : "const";
   }
   return candidate;
 }
@@ -209,26 +219,14 @@ describe("finding validation", () => {
         finding({
           path: "deleted.ts",
           range: { start: 1, end: 2, side: "LEFT" },
-          title: "Validation guard is deleted",
-          issue: "The deleted guard was the only validation before persistence.",
-          evidence: "The deleted validation guard is absent before persistence.",
-          fixDirection: "Restore the validation guard before persistence.",
         }),
         finding({
           path: "new-name.ts",
           range: { start: 1, end: 1, side: "LEFT" },
-          title: "Compatibility export is deleted",
-          issue: "The renamed file removes the exported compatibility alias.",
-          evidence: "The deleted export is the compatibility alias.",
-          fixDirection: "Restore the compatibility export.",
         }),
         finding({
           path: "new-name.ts",
           range: { start: 1, end: 1, side: "RIGHT" },
-          title: "Runtime export name changes",
-          issue: "The replacement export has a different runtime name.",
-          evidence: "The added export declares a different runtime name.",
-          fixDirection: "Restore the exported runtime name.",
         }),
       ]),
       { checkout, diff: DIFF },
@@ -267,25 +265,13 @@ describe("finding validation", () => {
         finding({
           path: "logo.png",
           range: null,
-          title: "Alpha channel is removed",
-          issue: "The binary replacement removes the required alpha channel.",
-          evidence: "The replacement bytes contain no alpha channel.",
-          fixDirection: "Restore the alpha channel.",
         }),
         finding({
           path: "mode.sh",
           range: null,
-          title: "Fixture becomes executable",
-          issue: "The executable bit makes this untrusted fixture directly runnable.",
-          evidence: "The changed mode marks the fixture executable.",
-          fixDirection: "Remove the executable bit from the fixture.",
         }),
         finding({
           range: null,
-          title: "Shared resource closes early",
-          issue: "The file-level initialization order closes the shared resource early.",
-          evidence: "The initialization closes the shared resource before its final use.",
-          fixDirection: "Defer closing the shared resource.",
         }),
       ]),
       { checkout, diff: DIFF },
@@ -302,7 +288,12 @@ describe("finding validation", () => {
 
   it("rejects traversal, nonexistent, directory, and out-of-diff paths", async () => {
     const cases = [
+      "",
+      ".",
+      "./source.ts",
       "../source.ts",
+      "nested/../source.ts",
+      "nested//source.ts",
       "/source.ts",
       "missing.ts",
       "directory",
@@ -324,34 +315,48 @@ describe("finding validation", () => {
   });
 
   it("preserves a literal backslash through diff, tree, fingerprint, and payload paths", async () => {
-    const backslashDiff = `diff --git "a/slash\\\\name.ts" "b/slash\\\\name.ts"
-new file mode 100644
---- /dev/null
-+++ "b/slash\\\\name.ts"
-@@ -0,0 +1 @@
-+const backslash = true;
-`;
-    const result = await validateModelReviewOutput(
-      output([
-        finding({
-          path: BACKSLASH_PATH,
-          range: { start: 1, end: 1, side: "RIGHT" },
-          title: "Backslash path is skipped",
-          issue: "The backslash path skips the required validation.",
-          impact: "The skipped backslash validation accepts an invalid entry.",
-          evidence: "The changed backslash declaration bypasses validation.",
-          fixDirection: "Validate the backslash path before use.",
-        }),
-      ]),
-      { checkout, diff: backslashDiff },
-    );
+    const repository = await mkdtemp(join(tmpdir(), "revoir-backslash-path-"));
+    try {
+      await execFileAsync("git", ["init", "--quiet"], { cwd: repository });
+      await execFileAsync("git", ["config", "user.name", "Revoir Test"], { cwd: repository });
+      await execFileAsync("git", ["config", "user.email", "revoir@example.test"], {
+        cwd: repository,
+      });
+      await writeFile(join(repository, "README.md"), "base\n");
+      await execFileAsync("git", ["add", "--all"], { cwd: repository });
+      await execFileAsync("git", ["commit", "--quiet", "-m", "base"], { cwd: repository });
+      const { stdout: base } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+        cwd: repository,
+      });
+      await writeFile(join(repository, BACKSLASH_PATH), "const backslash = true;\n");
+      await execFileAsync("git", ["add", "--all"], { cwd: repository });
+      await execFileAsync("git", ["commit", "--quiet", "-m", "head"], { cwd: repository });
+      const { stdout: diff } = await execFileAsync(
+        "git",
+        ["diff", "--binary", "--src-prefix=a/", "--dst-prefix=b/", base.trim(), "HEAD", "--"],
+        { cwd: repository },
+      );
+      assert.equal(diff.includes('"a/slash\\\\name.ts"'), true);
 
-    assert.equal(result.findings[0]?.path, BACKSLASH_PATH);
-    assert.deepEqual(Buffer.from(result.findings[0]?.path ?? ""), Buffer.from(BACKSLASH_PATH));
-    assert.equal(result.findings[0]?.attachment.path, BACKSLASH_PATH);
-    const publication = createReviewPublication("f".repeat(40), result.findings);
-    assert.equal(publication.payload.comments?.[0]?.path, BACKSLASH_PATH);
-    assert.match(publication.payload.comments?.[0]?.body ?? "", /slash\\name\.ts/u);
+      const result = await validateModelReviewOutput(
+        output([
+          finding({
+            path: BACKSLASH_PATH,
+            range: { start: 1, end: 1, side: "RIGHT" },
+          }),
+        ]),
+        { checkout: repository, diff },
+      );
+
+      assert.equal(result.findings[0]?.path, BACKSLASH_PATH);
+      assert.deepEqual(Buffer.from(result.findings[0]?.path ?? ""), Buffer.from(BACKSLASH_PATH));
+      assert.equal(result.findings[0]?.attachment.path, BACKSLASH_PATH);
+      const publication = createReviewPublication("f".repeat(40), result.findings);
+      assert.equal(publication.payload.comments?.[0]?.path, BACKSLASH_PATH);
+      assert.match(publication.payload.comments?.[0]?.body ?? "", /slash\\name\.ts/u);
+    } finally {
+      await rm(repository, { recursive: true, force: true });
+    }
   });
 
   it("validates exact reviewed-head Git tree entry types including an uninitialized gitlink", async () => {
@@ -360,58 +365,30 @@ new file mode 100644
         finding({
           path: "source.ts",
           range: null,
-          title: "Regular file initializes early",
-          issue: "The regular file initializes the shared resource before validation.",
-          evidence: "The regular file entry initializes the resource before validation.",
-          fixDirection: "Defer regular file initialization until after validation.",
         }),
         finding({
           path: "symlink.ts",
           range: null,
-          title: "Symlink redirects consumers",
-          issue: "The symlink redirects review consumers to the changed implementation.",
-          evidence: "The symlink target redirects consumers to source.ts.",
-          fixDirection: "Update the symlink to the validated implementation.",
         }),
         finding({
           path: "vendor",
           range: null,
-          title: "Gitlink omits compatibility fix",
-          issue: "The gitlink advances to a revision without the required compatibility fix.",
-          evidence: "The changed gitlink revision lacks the compatibility fix.",
-          fixDirection: "Update the gitlink to a revision containing the compatibility fix.",
         }),
         finding({
           path: "literal[1].ts",
           range: null,
-          title: "Literal path initializes early",
-          issue: "The literal bracket path initializes the shared resource before validation.",
-          evidence: "The literal path entry initializes the resource before validation.",
-          fixDirection: "Defer literal path initialization until after validation.",
         }),
         finding({
           path: "directory",
           range: null,
-          title: "Directory is not publishable",
-          issue: "The directory entry does not identify a publishable file.",
-          evidence: "The directory tree entry has no publishable blob.",
-          fixDirection: "Use a publishable file instead of the directory.",
         }),
         finding({
           path: "missing.ts",
           range: null,
-          title: "Tree entry is missing",
-          issue: "The missing entry does not exist in the reviewed head tree.",
-          evidence: "The head tree contains no matching entry.",
-          fixDirection: "Use an existing head tree entry.",
         }),
         finding({
           path: "deleted.ts",
           range: null,
-          title: "Validation file is deleted",
-          issue: "The deleted file removes the only validation before persistence.",
-          evidence: "The deleted file contained the validation before persistence.",
-          fixDirection: "Restore the deleted validation.",
         }),
       ]),
       { checkout, diff: GIT_TREE_DIFF },
@@ -461,493 +438,112 @@ new file mode 100644
     }
   });
 
-  it("rejects speculative, placeholder, non-actionable, and merge prose", async () => {
-    const cases = [
-      { evidence: "This might fail when the request is cancelled." },
-      { evidence: "None" },
-      { fixDirection: "Consider fixing this." },
-      { issue: "P1 means this blocks merge until it is fixed." },
-    ];
-    for (const candidate of cases) {
-      // Keep each rejection isolated for clear case attribution.
-      // eslint-disable-next-line no-await-in-loop
-      await assert.rejects(
-        () =>
-          validateModelReviewOutput(output([finding(candidate)]), {
-            checkout,
-            diff: DIFF,
-          }),
-        FindingContractError,
-      );
-    }
-  });
-
-  it("keeps placeholder title, issue, and impact prose out of publication", async () => {
-    const placeholders = [
-      { field: "title", value: "None" },
-      { field: "issue", value: "Unknown" },
-      { field: "impact", value: "Not provided" },
-    ] as const;
-    const technicalFinding = finding({
-      title: "Terminal status bypasses cancellation",
-      issue: "The branch maps an unknown terminal status to success.",
-      impact: "The terminal status mapping bypasses child-process cancellation.",
-      evidence: "The terminal status branch returns success before cancellation.",
-    });
+  it("rejects unknown and incompatible semantic values with static diagnostics", async () => {
+    const privateValue = "PRIVATE_MODEL_VALUE";
     const result = await validateModelReviewOutput(
       output([
-        technicalFinding,
-        ...placeholders.map(({ field, value }) =>
-          finding({
-            [field]: value,
-            issue:
-              field === "issue"
-                ? value
-                : `The placeholder ${field} candidate omits required review context.`,
-          }),
-        ),
+        finding(),
+        finding({ defectKind: privateValue }),
+        finding({ impactKind: privateValue }),
+        finding({ fixAction: privateValue }),
+        finding({ defectKind: "security", impactKind: "resource-leak" }),
+        finding({ defectKind: "security", impactKind: "security-exposure", fixAction: "release" }),
       ]),
       { checkout, diff: DIFF },
     );
 
     assert.equal(result.findings.length, 1);
-    assert.equal(result.findings[0]?.title, technicalFinding.title);
-    assert.deepEqual(
-      result.diagnostics.map(({ index, code, message }) => ({ index, code, message })),
-      [
-        {
-          index: 1,
-          code: "invalid",
-          message: "findings[1].title must state a substantive title.",
-        },
-        {
-          index: 2,
-          code: "invalid",
-          message: "findings[2].issue must describe an observed issue.",
-        },
-        {
-          index: 3,
-          code: "invalid",
-          message: "findings[3].impact must describe a concrete impact.",
-        },
-      ],
+    assert.equal(result.diagnostics.length, 5);
+    for (const diagnostic of result.diagnostics) {
+      assert.equal(diagnostic.message.includes(privateValue), false);
+      assert.match(diagnostic.message, /supported|incompatible/u);
+    }
+    assert.equal(
+      JSON.stringify(createReviewPublication("1".repeat(40), result.findings)).includes(
+        privateValue,
+      ),
+      false,
+    );
+  });
+
+  it("requires an exact technical anchor in the selected authoritative change", async () => {
+    const privateAnchor = "PRIVATE_UNOBSERVED_ANCHOR";
+    const result = await validateModelReviewOutput(
+      output([
+        finding({ anchor: "added" }),
+        finding({ anchor: privateAnchor }),
+        finding({ anchor: "Added" }),
+        finding({ anchor: "adde\u0301d" }),
+      ]),
+      { checkout, diff: DIFF },
     );
 
-    const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
-    for (const { value } of placeholders) {
-      assert.equal(publication.includes(value), false);
+    assert.equal(result.findings.length, 1);
+    assert.equal(result.findings[0]?.anchor, "added");
+    assert.equal(result.diagnostics.length, 3);
+    for (const diagnostic of result.diagnostics) {
       assert.equal(
-        result.diagnostics
-          .map((diagnostic) => diagnostic.message)
-          .join("\n")
-          .includes(value),
-        false,
+        diagnostic.message,
+        "technical anchor is not present in the authoritative changed content.",
       );
+      assert.equal(diagnostic.message.includes(privateAnchor), false);
     }
   });
 
-  it("rejects structurally empty required prose while preserving terse technical findings", async () => {
-    const terseFinding = finding({
-      title: "Lock",
-      issue: "Lock reenters.",
-      impact: "Lock stalls workers.",
-      evidence: "Lock reacquires recursively.",
-      fixDirection: "Defer lock reacquisition.",
-    });
+  it("covers every defect class without accepting model-controlled prose fields", async () => {
+    const classes = [
+      ["correctness", "incorrect-result", "guard"],
+      ["validation", "operation-failure", "validate"],
+      ["resource-lifecycle", "resource-leak", "release"],
+      ["concurrency", "execution-stall", "synchronize"],
+      ["security", "security-exposure", "validate"],
+      ["compatibility", "compatibility-break", "preserve"],
+      ["error-handling", "operation-failure", "propagate"],
+      ["test-coverage", "regression-risk", "add-test"],
+    ] as const;
     const result = await validateModelReviewOutput(
-      output([
-        terseFinding,
-        finding({ title: "TBD" }),
-        finding({ issue: "TBD" }),
-        finding({ impact: "TBD" }),
-        finding({ evidence: "TBD" }),
-        finding({ fixDirection: "Add." }),
-      ]),
+      output(
+        classes.map(([defectKind, impactKind, fixAction], index) =>
+          finding({
+            priority: `P${index % 4}`,
+            range: null,
+            defectKind,
+            impactKind,
+            fixAction,
+            anchor: "source.ts",
+          }),
+        ),
+      ),
       { checkout, diff: DIFF },
     );
 
-    assert.equal(result.findings.length, 1);
-    assert.equal(result.findings[0]?.title, "Lock");
     assert.deepEqual(
-      result.diagnostics.map(({ index, message }) => ({ index, message })),
-      [
-        { index: 1, message: "findings[1].title must state a substantive title." },
-        { index: 2, message: "findings[2].issue must describe an observed issue." },
-        { index: 3, message: "findings[3].impact must describe a concrete impact." },
-        { index: 4, message: "findings[4].evidence must describe supporting evidence." },
-        { index: 5, message: "findings[5].fixDirection must state a concrete action." },
-      ],
+      result.findings.map(({ defectKind }) => defectKind),
+      classes.map(([defectKind]) => defectKind),
     );
     const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
-    assert.equal(publication.includes("TBD"), false);
-    assert.equal(publication.includes("Add."), false);
-    assert.equal(JSON.stringify(result.diagnostics).includes("TBD"), false);
-  });
-
-  it("rejects common speculative and merge-instruction prose before publication", async () => {
-    const cases: readonly [Record<string, unknown>, RegExp][] = [
-      [{ title: "Cancellation could be dropped" }, /speculative language/u],
-      [{ issue: "The added branch may drop the cancellation signal." }, /speculative language/u],
-      [
-        { evidence: "The changed call likely omits the required cancellation signal." },
-        /speculative language/u,
-      ],
-      [
-        { fixDirection: "Guard the call because it could run after cancellation." },
-        /speculative language/u,
-      ],
-      [{ title: "Must not merge with dropped cancellation" }, /merge or severity boilerplate/u],
-      [
-        {
-          fixDirection:
-            "Reject the change; it must not merge until the cancellation signal is forwarded.",
-        },
-        /merge or severity boilerplate/u,
-      ],
-    ];
-
-    for (const [candidate, reason] of cases) {
-      // Keep each prohibited phrase isolated for exact field and reason attribution.
-      // eslint-disable-next-line no-await-in-loop
-      await assert.rejects(
-        () =>
-          validateModelReviewOutput(output([finding(candidate)]), {
-            checkout,
-            diff: DIFF,
-          }),
-        (error: unknown) => {
-          assert.ok(error instanceof FindingContractError);
-          assert.match(error.diagnostics[0]?.message ?? "", reason);
-          return true;
-        },
-      );
+    for (const forbidden of ["flawless", "looks good", "summary", "must not merge", "perhaps"]) {
+      assert.equal(publication.toLowerCase().includes(forbidden), false);
     }
-  });
 
-  it("allows concrete impact phrasing that describes a possible consequence", async () => {
+    const oldProseShape = {
+      priority: "P1",
+      path: "source.ts",
+      range: null,
+      defectKind: "correctness",
+      impactKind: "incorrect-result",
+      fixAction: "guard",
+      anchor: "source.ts",
+      title: "PRIVATE_TITLE",
+    };
     await assert.rejects(
-      () =>
-        validateModelReviewOutput(
-          output([
-            finding({
-              impact:
-                "A retry could publish the same finding twice after the first request succeeds.",
-            }),
-          ]),
-          { checkout, diff: DIFF },
-        ),
+      () => validateModelReviewOutput(output([oldProseShape]), { checkout, diff: DIFF }),
       (error: unknown) => {
         assert.ok(error instanceof FindingContractError);
-        assert.match(error.diagnostics[0]?.message ?? "", /speculative language/u);
+        assert.equal(JSON.stringify(error.diagnostics).includes("PRIVATE_TITLE"), false);
         return true;
       },
     );
-  });
-
-  it("keeps praise, summaries, and Markdown out of publication", async () => {
-    const prohibited = [
-      "Great work overall",
-      "## Summary\nThe rest of the change looks good.",
-      "The [changed call](https://example.test/private) omits the required signal.",
-      "Pass the active cancellation signal.\n\n- Add a regression test.",
-    ];
-    const result = await validateModelReviewOutput(
-      output([
-        finding(),
-        finding({
-          title: prohibited[0],
-          issue: "The first added branch does not forward cancellation.",
-        }),
-        finding({
-          issue: prohibited[1],
-        }),
-        finding({
-          issue: "The second added branch does not forward cancellation.",
-          evidence: prohibited[2],
-        }),
-        finding({
-          issue: "The third added branch does not forward cancellation.",
-          fixDirection: prohibited[3],
-        }),
-      ]),
-      { checkout, diff: DIFF },
-    );
-
-    assert.equal(result.findings.length, 1);
-    assert.equal(result.diagnostics.length, prohibited.length);
-    const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
-    for (const modelControlledText of prohibited) {
-      assert.equal(publication.includes(modelControlledText), false);
-      assert.equal(
-        result.diagnostics
-          .map((diagnostic) => diagnostic.message)
-          .join("\n")
-          .includes(modelControlledText),
-        false,
-      );
-    }
-  });
-
-  it("grounds every prose role in shared technical evidence", async () => {
-    const disconnected = [
-      { title: "Excellent" },
-      { title: "Parser overflow" },
-      {
-        issue: "The parser truncates bytes.",
-        evidence: "The added call omits the cancellation signal argument.",
-      },
-      { impact: "Great implementation throughout." },
-      { evidence: "The parser trace contains a truncated byte." },
-      { fixDirection: "Guard the parser byte count." },
-    ];
-    const terse = finding({
-      title: "callback_queue",
-      issue: "callback_queue reenters.",
-      impact: "callback_queue stalls.",
-      evidence: "callback_queue reacquires lock.",
-      fixDirection: "Defer callback_queue.",
-    });
-    const result = await validateModelReviewOutput(
-      output([finding(), terse, ...disconnected.map((overrides) => finding(overrides))]),
-      { checkout, diff: DIFF },
-    );
-
-    assert.deepEqual(
-      result.findings.map(({ title }) => title),
-      ["Cancellation is dropped", "callback_queue"],
-    );
-    assert.equal(result.diagnostics.length, disconnected.length);
-    for (const diagnostic of result.diagnostics) {
-      assert.match(diagnostic.message, /ground|praise|share|target/u);
-      assert.equal(
-        disconnected.some((candidate) =>
-          Object.values(candidate).some((value) => diagnostic.message.includes(value)),
-        ),
-        false,
-      );
-    }
-  });
-
-  it("rejects disconnected impact before mixed-output publication", async () => {
-    const disconnectedImpact = "Everything remains correct PRIVATE_IMPACT_SOURCE.";
-    const result = await validateModelReviewOutput(
-      output([
-        finding(),
-        finding({
-          title: "Cancellation signal",
-          impact: disconnectedImpact,
-        }),
-      ]),
-      { checkout, diff: DIFF },
-    );
-
-    assert.equal(result.findings.length, 1);
-    assert.deepEqual(result.diagnostics, [
-      {
-        index: 1,
-        code: "invalid",
-        message: "findings[1].impact must be grounded in observed technical evidence.",
-      },
-    ]);
-    const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
-    assert.equal(publication.includes(disconnectedImpact), false);
-    assert.equal(result.diagnostics[0]?.message.includes(disconnectedImpact), false);
-  });
-
-  it("case-folds lexical anchors while preserving exact technical identities", async () => {
-    const decomposedCafe = "cafe\u0301";
-    const decomposedIdentifier = `${decomposedCafe}_queue`;
-    const result = await validateModelReviewOutput(
-      output([
-        finding({
-          title: "Timeout",
-          issue: "The timeout expires before submission completes.",
-          impact: "The timeout leaves the submission slot occupied.",
-          evidence: "The timeout aborts the active submission request.",
-          fixDirection: "Bound the timeout around submission cleanup.",
-          range: null,
-        }),
-        finding({
-          title: "Café",
-          issue: `The ${decomposedCafe} parser truncates input.`,
-          impact: `The ${decomposedCafe} parser corrupts decoded input.`,
-          evidence: `The ${decomposedCafe} parser drops the final byte.`,
-          fixDirection: `Preserve the ${decomposedCafe} parser byte.`,
-          range: null,
-        }),
-        finding({
-          title: decomposedIdentifier,
-          issue: "The café_queue stalls.",
-          impact: "The stalled café_queue blocks submission.",
-          evidence: "The café_queue reacquires the lock.",
-          fixDirection: "Defer café_queue reacquisition.",
-          range: null,
-        }),
-        finding({
-          title: "Timeout Callback_Queue",
-          issue: "The timeout leaves callback_queue occupied.",
-          impact: "The timeout blocks callback_queue progress.",
-          evidence: "The timeout fires while callback_queue is active.",
-          fixDirection: "Release callback_queue after timeout.",
-          range: null,
-        }),
-        finding({
-          title: "$Queue",
-          issue: "The $queue stalls.",
-          impact: "The stalled $queue blocks submission.",
-          evidence: "The $queue reacquires the lock.",
-          fixDirection: "Defer $queue reacquisition.",
-          range: null,
-        }),
-        finding({
-          title: "QUEUE2",
-          issue: "The queue2 stalls.",
-          impact: "The stalled queue2 blocks submission.",
-          evidence: "The queue2 reacquires the lock.",
-          fixDirection: "Defer queue2 reacquisition.",
-          range: null,
-        }),
-        finding({
-          title: "requestQueue",
-          issue: "The requestqueue stalls.",
-          impact: "The stalled requestqueue blocks submission.",
-          evidence: "The requestqueue reacquires the lock.",
-          fixDirection: "Defer requestqueue reacquisition.",
-          range: null,
-        }),
-        finding({
-          title: "Implementation",
-          issue: "The signal implementation omits cancellation.",
-          impact: "The signal implementation retains the worker.",
-          evidence: "The signal implementation drops cancellation.",
-          fixDirection: "Pass cancellation through the signal implementation.",
-          range: null,
-        }),
-      ]),
-      { checkout, diff: DIFF },
-    );
-
-    assert.deepEqual(
-      result.findings.map(({ title }) => title),
-      ["Timeout", "Café"],
-    );
-    assert.equal(result.diagnostics.length, 6);
-    for (const diagnostic of result.diagnostics) {
-      assert.match(diagnostic.message, /title must be grounded in observed technical evidence/u);
-    }
-  });
-
-  it("applies every global prose policy to all five published fields", async () => {
-    const fields = ["title", "issue", "impact", "evidence", "fixDirection"] as const;
-    const policies = [
-      {
-        reason: /speculative language/u,
-        value: "Perhaps the changed branch drops the active signal.",
-      },
-      {
-        reason: /merge or severity boilerplate/u,
-        value: "Do not merge because the changed branch drops the active signal.",
-      },
-      {
-        reason: /praise or general-summary prose/u,
-        value: "Great implementation despite the changed branch dropping the active signal.",
-      },
-      {
-        reason: /Markdown instead of concise finding prose/u,
-        value: "The _changed branch_ drops the active signal.",
-      },
-      {
-        reason: /Markdown instead of concise finding prose/u,
-        value: "<!-- hidden --> The changed branch drops the active signal.",
-      },
-    ] as const;
-
-    for (const field of fields) {
-      for (const [policyIndex, policy] of policies.entries()) {
-        const overrides =
-          field === "fixDirection"
-            ? { [field]: `Add a guard because ${policy.value}` }
-            : { [field]: policy.value };
-        const candidate = finding({
-          issue: `The changed ${field} candidate ${policyIndex + 1} omits the active signal.`,
-          ...overrides,
-        });
-        // This matrix keeps every model-controlled publication field under every global policy.
-        // eslint-disable-next-line no-await-in-loop
-        const result = await validateModelReviewOutput(output([finding(), candidate]), {
-          checkout,
-          diff: DIFF,
-        });
-        assert.equal(result.findings.length, 1);
-        assert.match(result.diagnostics[0]?.message ?? "", policy.reason);
-        assert.equal(result.diagnostics[0]?.message.includes(policy.value), false);
-        assert.equal(
-          JSON.stringify(createReviewPublication("1".repeat(40), result.findings)).includes(
-            policy.value,
-          ),
-          false,
-        );
-      }
-    }
-  });
-
-  it("rejects GFM nodes and placeholder action targets before publication", async () => {
-    const prohibited = [
-      { issue: "The `validation` accepts an unsupported state." },
-      { impact: "The <strong>worker</strong> stalls after the invalid transition." },
-      { evidence: "The https://example.test/private branch omits the required guard." },
-      { fixDirection: "Add TBD." },
-      { fixDirection: "Replace unknown." },
-    ];
-    const result = await validateModelReviewOutput(
-      output([
-        finding({
-          title: "callback_queue stalls",
-          issue: "callback_queue reenters.",
-          impact: "callback_queue stalls workers.",
-          evidence: "callback_queue reacquires lock.",
-          fixDirection: "Defer callback_queue.",
-        }),
-        ...prohibited.map((overrides, index) =>
-          finding({
-            ...overrides,
-            issue:
-              "issue" in overrides
-                ? overrides.issue
-                : `The changed branch ${index + 1} omits the required review guard.`,
-          }),
-        ),
-      ]),
-      { checkout, diff: DIFF },
-    );
-
-    assert.equal(result.findings.length, 1);
-    assert.equal(result.findings[0]?.title, "callback_queue stalls");
-    assert.equal(result.diagnostics.length, prohibited.length);
-    const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
-    for (const candidate of prohibited) {
-      const modelText = Object.values(candidate)[0];
-      assert.equal(typeof modelText === "string" && publication.includes(modelText), false);
-    }
-  });
-
-  it("publishes valid candidates from mixed output and reports safe diagnostics", async () => {
-    const secretSource = "PRIVATE_SOURCE_TOKEN";
-    const result = await validateModelReviewOutput(
-      output([
-        finding(),
-        finding({
-          priority: "P9",
-          evidence: secretSource,
-          issue: "An invalid proposal must be discarded.",
-        }),
-      ]),
-      { checkout, diff: DIFF },
-    );
-    assert.equal(result.findings.length, 1);
-    assert.equal(result.diagnostics.length, 1);
-    assert.equal(result.diagnostics[0]?.code, "invalid");
-    assert.doesNotMatch(result.diagnostics[0]?.message ?? "", new RegExp(secretSource, "u"));
   });
 
   it("collapses duplicate stable fingerprints with first-valid-wins ordering", async () => {
@@ -956,10 +552,6 @@ new file mode 100644
         finding(),
         finding({
           priority: "P3",
-          title: "Signal presentation differs",
-          impact: "Different signal impact wording.",
-          evidence: "Different cancellation signal evidence wording.",
-          fixDirection: "Guard the call with the active signal.",
         }),
       ]),
       { checkout, diff: DIFF },
@@ -969,18 +561,41 @@ new file mode 100644
     assert.equal(result.diagnostics[0]?.code, "duplicate");
   });
 
-  it("keeps fingerprints stable across wording and changes them with identity", () => {
-    const base = finding() as ModelFindingV1;
+  it("keeps Unicode case-fold lookalikes as distinct exact anchors", async () => {
+    const diff = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1 @@
+-const previous = true;
++const Straße = STRASSE;
+`;
+    const result = await validateModelReviewOutput(
+      output([
+        finding({ range: { start: 1, end: 1, side: "RIGHT" }, anchor: "Straße" }),
+        finding({ range: { start: 1, end: 1, side: "RIGHT" }, anchor: "STRASSE" }),
+      ]),
+      { checkout, diff },
+    );
+
+    assert.equal(result.findings.length, 2);
+    assert.equal(result.diagnostics.length, 0);
+    assert.notEqual(result.findings[0]?.fingerprint, result.findings[1]?.fingerprint);
+  });
+
+  it("uses a fixed structured fingerprint tuple with exact Unicode identity", () => {
+    const base = finding() as unknown as ModelFindingV1;
     const fingerprint = findingFingerprint(base);
+    assert.equal(fingerprint, "8e8e6446b4a836e283ce962e682aa449d035fd966cf82ee4c4caf462902210be");
     assert.equal(
       findingFingerprint({
-        ...base,
-        issue: "  THE added branch does not forward   the cancellation signal. ",
+        anchor: base.anchor,
+        fixAction: base.fixAction,
+        impactKind: base.impactKind,
+        defectKind: base.defectKind,
+        range: base.range,
+        path: base.path,
       }),
-      fingerprint,
-    );
-    assert.notEqual(
-      findingFingerprint({ ...base, issue: "A different issue is observed." }),
       fingerprint,
     );
     assert.notEqual(findingFingerprint({ ...base, path: "new-name.ts" }), fingerprint);
@@ -991,6 +606,40 @@ new file mode 100644
       }),
       fingerprint,
     );
+    for (const changed of [
+      { defectKind: "correctness" },
+      { impactKind: "incorrect-result" },
+      { fixAction: "guard" },
+      { anchor: "Const" },
+      { anchor: "Straße" },
+      { anchor: "STRASSE" },
+      { anchor: "İ" },
+      { anchor: "i" },
+      { anchor: "Σ" },
+      { anchor: "σ" },
+      { anchor: "ς" },
+    ] as const) {
+      assert.notEqual(findingFingerprint({ ...base, ...changed }), fingerprint);
+    }
+    assert.notEqual(
+      findingFingerprint({ ...base, anchor: "café" }),
+      findingFingerprint({ ...base, anchor: "cafe\u0301" }),
+    );
+    assert.notEqual(
+      findingFingerprint({ ...base, path: NFC_PATH }),
+      findingFingerprint({ ...base, path: NFD_PATH }),
+    );
+    for (const [left, right] of [
+      ["Straße", "STRASSE"],
+      ["İ", "i"],
+      ["Σ", "σ"],
+      ["σ", "ς"],
+    ] as const) {
+      assert.notEqual(
+        findingFingerprint({ ...base, anchor: left }),
+        findingFingerprint({ ...base, anchor: right }),
+      );
+    }
   });
 
   it("preserves exact NFD, NFC, metacharacter, and space paths through validation", async () => {
@@ -1018,11 +667,20 @@ index 5555555..6666666 100644
 `;
     const result = await validateModelReviewOutput(
       output([
-        finding({ path: NFD_PATH, range: { start: 1, end: 1, side: "RIGHT" } }),
-        finding({ path: NFC_PATH, range: { start: 1, end: 1, side: "RIGHT" } }),
+        finding({
+          path: NFD_PATH,
+          range: { start: 1, end: 1, side: "RIGHT" },
+          anchor: "decomposed",
+        }),
+        finding({
+          path: NFC_PATH,
+          range: { start: 1, end: 1, side: "RIGHT" },
+          anchor: "composed",
+        }),
         finding({
           path: LITERAL_SPACE_PATH,
           range: { start: 1, end: 1, side: "RIGHT" },
+          anchor: "literal space",
         }),
       ]),
       { checkout, diff },
@@ -1038,9 +696,10 @@ index 5555555..6666666 100644
         {
           path: NFD_PATH,
           fingerprint: findingFingerprint({
-            ...(finding() as ModelFindingV1),
+            ...(finding() as unknown as ModelFindingV1),
             path: NFD_PATH,
             range: { start: 1, end: 1, side: "RIGHT" },
+            anchor: "decomposed",
           }),
           attachment: {
             kind: "inline",
@@ -1053,9 +712,10 @@ index 5555555..6666666 100644
         {
           path: NFC_PATH,
           fingerprint: findingFingerprint({
-            ...(finding() as ModelFindingV1),
+            ...(finding() as unknown as ModelFindingV1),
             path: NFC_PATH,
             range: { start: 1, end: 1, side: "RIGHT" },
+            anchor: "composed",
           }),
           attachment: {
             kind: "inline",
@@ -1068,9 +728,10 @@ index 5555555..6666666 100644
         {
           path: LITERAL_SPACE_PATH,
           fingerprint: findingFingerprint({
-            ...(finding() as ModelFindingV1),
+            ...(finding() as unknown as ModelFindingV1),
             path: LITERAL_SPACE_PATH,
             range: { start: 1, end: 1, side: "RIGHT" },
+            anchor: "literal space",
           }),
           attachment: {
             kind: "inline",

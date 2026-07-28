@@ -1,6 +1,39 @@
 export const FINDING_CONTRACT_VERSION = 1 as const;
 export type FindingPriority = "P0" | "P1" | "P2" | "P3";
 export type FindingSide = "LEFT" | "RIGHT";
+export const FINDING_DEFECT_KINDS = [
+  "correctness",
+  "validation",
+  "resource-lifecycle",
+  "concurrency",
+  "security",
+  "compatibility",
+  "error-handling",
+  "test-coverage",
+] as const;
+export const FINDING_IMPACT_KINDS = [
+  "incorrect-result",
+  "operation-failure",
+  "data-loss",
+  "resource-leak",
+  "execution-stall",
+  "security-exposure",
+  "compatibility-break",
+  "regression-risk",
+] as const;
+export const FINDING_FIX_ACTIONS = [
+  "guard",
+  "validate",
+  "preserve",
+  "propagate",
+  "synchronize",
+  "release",
+  "restore",
+  "add-test",
+] as const;
+export type FindingDefectKind = (typeof FINDING_DEFECT_KINDS)[number];
+export type FindingImpactKind = (typeof FINDING_IMPACT_KINDS)[number];
+export type FindingFixAction = (typeof FINDING_FIX_ACTIONS)[number];
 
 export interface FindingRangeV1 {
   start: number;
@@ -10,13 +43,12 @@ export interface FindingRangeV1 {
 
 export interface ModelFindingV1 {
   priority: FindingPriority;
-  title: string;
   path: string;
   range: FindingRangeV1 | null;
-  issue: string;
-  impact: string;
-  evidence: string;
-  fixDirection: string;
+  defectKind: FindingDefectKind;
+  impactKind: FindingImpactKind;
+  fixAction: FindingFixAction;
+  anchor: string;
 }
 
 export interface ModelReviewOutputV1 {
@@ -30,6 +62,9 @@ export interface FindingV1 extends ModelFindingV1 {
 }
 
 const PRIORITIES = new Set<FindingPriority>(["P0", "P1", "P2", "P3"]);
+const DEFECT_KINDS = new Set<FindingDefectKind>(FINDING_DEFECT_KINDS);
+const IMPACT_KINDS = new Set<FindingImpactKind>(FINDING_IMPACT_KINDS);
+const FIX_ACTIONS = new Set<FindingFixAction>(FINDING_FIX_ACTIONS);
 
 export class FindingSchemaError extends Error {
   constructor(message: string) {
@@ -97,7 +132,7 @@ function hasOnlyUnicodeScalarValues(value: string): boolean {
     const codeUnit = value.charCodeAt(index);
     if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) {
+      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) {
         return false;
       }
       index += 1;
@@ -127,6 +162,19 @@ function positiveInteger(value: unknown, path: string): number {
     throw new FindingSchemaError(`${path} must be a positive integer.`);
   }
   return value as number;
+}
+
+function enumString<T extends string>(
+  value: unknown,
+  path: string,
+  supported: ReadonlySet<T>,
+  description: string,
+): T {
+  const stringValue = contractString(value, path);
+  if (!supported.has(stringValue as T)) {
+    throw new FindingSchemaError(`${path} must be a supported ${description}.`);
+  }
+  return stringValue as T;
 }
 
 function parseRange(value: unknown, path: string): FindingRangeV1 | null {
@@ -181,23 +229,20 @@ export function parseModelFinding(value: unknown, index: number): ModelFindingV1
   const finding = record(value, path);
   exactKeys(
     finding,
-    ["priority", "title", "path", "range", "issue", "impact", "evidence", "fixDirection"],
+    ["priority", "path", "range", "defectKind", "impactKind", "fixAction", "anchor"],
     path,
   );
-  const priority = contractString(finding.priority, `${path}.priority`);
-  if (!PRIORITIES.has(priority as FindingPriority)) {
+  const priority = contractString(finding.priority, `${path}.priority`) as FindingPriority;
+  if (!PRIORITIES.has(priority)) {
     throw new FindingSchemaError(`${path}.priority must be one of P0, P1, P2, or P3.`);
   }
   return {
-    priority: priority as FindingPriority,
-    title: boundedString(finding.title, `${path}.title`, 120, { singleLine: true }),
+    priority,
     path: findingPath(finding.path, `${path}.path`),
     range: parseRange(finding.range, `${path}.range`),
-    issue: boundedString(finding.issue, `${path}.issue`, 2_000, { singleLine: true }),
-    impact: boundedString(finding.impact, `${path}.impact`, 2_000, { singleLine: true }),
-    evidence: boundedString(finding.evidence, `${path}.evidence`, 4_000, { singleLine: true }),
-    fixDirection: boundedString(finding.fixDirection, `${path}.fixDirection`, 1_000, {
-      singleLine: true,
-    }),
+    defectKind: enumString(finding.defectKind, `${path}.defectKind`, DEFECT_KINDS, "defect kind"),
+    impactKind: enumString(finding.impactKind, `${path}.impactKind`, IMPACT_KINDS, "impact kind"),
+    fixAction: enumString(finding.fixAction, `${path}.fixAction`, FIX_ACTIONS, "fix action"),
+    anchor: boundedString(finding.anchor, `${path}.anchor`, 160, { singleLine: true }),
   };
 }

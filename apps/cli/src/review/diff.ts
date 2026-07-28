@@ -14,6 +14,7 @@ export interface DiffFile {
   newPath?: string;
   binary: boolean;
   changedLines: ReadonlyMap<string, number>;
+  changedLineText: ReadonlyMap<string, string>;
 }
 
 export interface DiffIndex {
@@ -148,6 +149,7 @@ class MutableDiffFile {
   newPath: string | undefined = undefined;
   binary = false;
   readonly changedLines = new Map<string, number>();
+  readonly changedLineText = new Map<string, string>();
 }
 
 export function parseGitDiff(diff: string): DiffIndex {
@@ -176,6 +178,7 @@ export function parseGitDiff(diff: string): DiffIndex {
       ...(current.newPath === undefined ? {} : { newPath: current.newPath }),
       binary: current.binary,
       changedLines: current.changedLines,
+      changedLineText: current.changedLineText,
     });
   };
 
@@ -240,10 +243,14 @@ export function parseGitDiff(diff: string): DiffIndex {
 
     position += 1;
     if (line.startsWith("+")) {
-      current.changedLines.set(changedLineKey("RIGHT", newLine), position);
+      const key = changedLineKey("RIGHT", newLine);
+      current.changedLines.set(key, position);
+      current.changedLineText.set(key, line.slice(1));
       newLine += 1;
     } else if (line.startsWith("-")) {
-      current.changedLines.set(changedLineKey("LEFT", oldLine), position);
+      const key = changedLineKey("LEFT", oldLine);
+      current.changedLines.set(key, position);
+      current.changedLineText.set(key, line.slice(1));
       oldLine += 1;
     } else if (line.startsWith(" ")) {
       oldLine += 1;

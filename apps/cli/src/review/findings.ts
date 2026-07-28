@@ -7,16 +7,22 @@ import {
   FINDING_CONTRACT_VERSION,
   parseModelFinding,
   parseModelReviewOutput,
+  type FindingDefectKind,
+  type FindingFixAction,
+  type FindingImpactKind,
   type FindingV1,
   type ModelFindingV1,
 } from "@revoir/contracts";
-import { fromMarkdown } from "mdast-util-from-markdown";
-import { gfmFromMarkdown } from "mdast-util-gfm";
-import { gfm } from "micromark-extension-gfm";
 
 import { isAttachableRange, parseGitDiff, type DiffFile, type DiffSide } from "./diff.js";
 
-export { FINDING_CONTRACT_VERSION, type FindingPriority } from "@revoir/contracts";
+export {
+  FINDING_CONTRACT_VERSION,
+  type FindingDefectKind,
+  type FindingFixAction,
+  type FindingImpactKind,
+  type FindingPriority,
+} from "@revoir/contracts";
 
 export interface ReviewFindingV1 extends FindingV1 {
   attachment: FindingAttachment;
@@ -47,108 +53,29 @@ export interface ValidatedReviewOutput {
   diagnostics: readonly FindingDiagnostic[];
 }
 
-const SPECULATIVE =
-  /\b(?:apparently|appears?|could|guess|likely|may|maybe|might|perhaps|possibly|potentially|seems?)\b/iu;
-const MERGE_OR_SEVERITY_BOILERPLATE =
-  /\b(?:blocks? merge|do not merge|merge (?:instruction|this)|must not merge|p[0-3]\s+means|severity\s+(?:is|means))\b/iu;
-const PRAISE_OR_SUMMARY =
-  /(?:\b(?:excellent|good|great|nice|solid)\s+(?:approach|change|implementation|job|work)\b|\blooks?\s+good\b|\bwell[ -]done\b|\bthe rest of (?:the )?(?:change|code|implementation)\b|^(?:(?:general|overall)\s+)?(?:overview|summary)\b|\boverall(?:,|\s+(?:the|this|change|code|implementation)))/iu;
-const PLACEHOLDER =
-  /^(?:n\/?a|none|not (?:applicable|available|provided)|pending|placeholder|tbc|tbd|todo|to be (?:added|completed|confirmed|decided|defined|determined|provided)|unknown)[.!?]?$/iu;
-const ACTION_VERB =
-  /^(?:add|await|bound|call|cancel|check|clone|close|compare|compute|convert|create|decode|defer|delete|derive|discard|encode|ensure|escape|expose|filter|forward|guard|handle|include|initialize|limit|map|move|parse|pass|preserve|propagate|publish|read|reconcile|record|refactor|reject|release|remove|rename|replace|resolve|restore|retry|return|sanitize|serialize|set|skip|sort|stop|submit|throw|update|use|validate|verify|wrap|write)\b/iu;
-const NON_ACTIONABLE_DETAIL = /^(?:a|an|it|one|ones|something|that|the|these|this|those)$/iu;
-const NON_CONCRETE_ANCHORS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "at",
-  "be",
-  "because",
-  "both",
-  "by",
-  "change",
-  "changed",
-  "code",
-  "does",
-  "each",
-  "finding",
-  "for",
-  "from",
-  "has",
-  "have",
-  "in",
-  "implementation",
-  "into",
-  "is",
-  "it",
-  "its",
-  "of",
-  "on",
-  "only",
-  "or",
-  "our",
-  "review",
-  "same",
-  "that",
-  "the",
-  "their",
-  "these",
-  "this",
-  "those",
-  "through",
-  "to",
-  "was",
-  "were",
-  "when",
-  "while",
-  "with",
-  "without",
-]);
+const execFileAsync = promisify(execFile);
 
-type ProseField = keyof Pick<
-  ModelFindingV1,
-  "title" | "issue" | "impact" | "evidence" | "fixDirection"
->;
-
-interface ProsePolicy {
-  minimumWords: number;
-  substantiveMessage: string;
-  requiresAction: boolean;
-}
-
-const PROSE_POLICIES: Record<ProseField, ProsePolicy> = {
-  title: {
-    minimumWords: 1,
-    substantiveMessage: "must state a substantive title",
-    requiresAction: false,
-  },
-  issue: {
-    minimumWords: 2,
-    substantiveMessage: "must describe an observed issue",
-    requiresAction: false,
-  },
-  impact: {
-    minimumWords: 2,
-    substantiveMessage: "must describe a concrete impact",
-    requiresAction: false,
-  },
-  evidence: {
-    minimumWords: 2,
-    substantiveMessage: "must describe supporting evidence",
-    requiresAction: false,
-  },
-  fixDirection: {
-    minimumWords: 2,
-    substantiveMessage: "must state a concrete action",
-    requiresAction: true,
-  },
+const ALLOWED_IMPACTS: Readonly<Record<FindingDefectKind, readonly FindingImpactKind[]>> = {
+  correctness: ["incorrect-result", "operation-failure", "data-loss"],
+  validation: ["incorrect-result", "operation-failure", "security-exposure"],
+  "resource-lifecycle": ["resource-leak", "operation-failure", "execution-stall"],
+  concurrency: ["incorrect-result", "data-loss", "execution-stall"],
+  security: ["security-exposure", "data-loss"],
+  compatibility: ["compatibility-break", "operation-failure"],
+  "error-handling": ["operation-failure", "resource-leak"],
+  "test-coverage": ["regression-risk"],
 };
 
-const PROSE_FIELDS = Object.keys(PROSE_POLICIES) as readonly ProseField[];
-const execFileAsync = promisify(execFile);
+const ALLOWED_ACTIONS: Readonly<Record<FindingDefectKind, readonly FindingFixAction[]>> = {
+  correctness: ["guard", "preserve", "propagate", "restore"],
+  validation: ["guard", "validate"],
+  "resource-lifecycle": ["guard", "release", "restore"],
+  concurrency: ["guard", "propagate", "synchronize", "release"],
+  security: ["guard", "validate", "preserve", "restore"],
+  compatibility: ["preserve", "propagate", "restore"],
+  "error-handling": ["guard", "propagate", "release", "restore"],
+  "test-coverage": ["add-test"],
+};
 
 export class FindingContractError extends Error {
   readonly diagnostics: readonly FindingDiagnostic[];
@@ -164,149 +91,15 @@ export class FindingContractError extends Error {
   }
 }
 
-function validateFindingProse(finding: ModelFindingV1, index: number): ModelFindingV1 {
+function validateFindingSemantics(finding: ModelFindingV1, index: number): ModelFindingV1 {
   const path = `findings[${index}]`;
-  for (const field of PROSE_FIELDS) {
-    const value = finding[field];
-    const policy = PROSE_POLICIES[field];
-    if (SPECULATIVE.test(value)) {
-      throw new Error(`${path}.${field} uses speculative language instead of observed evidence.`);
-    }
-    if (MERGE_OR_SEVERITY_BOILERPLATE.test(value)) {
-      throw new Error(`${path}.${field} contains merge or severity boilerplate.`);
-    }
-    if (PRAISE_OR_SUMMARY.test(value)) {
-      throw new Error(`${path}.${field} contains praise or general-summary prose.`);
-    }
-    if (!isPlainGfmText(value)) {
-      throw new Error(`${path}.${field} contains Markdown instead of concise finding prose.`);
-    }
-    if (PLACEHOLDER.test(value) || proseTokens(value).length < policy.minimumWords) {
-      throw new Error(`${path}.${field} ${policy.substantiveMessage}.`);
-    }
-    if (policy.requiresAction) {
-      validateFixDirection(value, path);
-    }
+  if (!ALLOWED_IMPACTS[finding.defectKind].includes(finding.impactKind)) {
+    throw new Error(`${path}.impactKind is incompatible with defectKind.`);
   }
-  validateFindingGrounding(finding, path);
+  if (!ALLOWED_ACTIONS[finding.defectKind].includes(finding.fixAction)) {
+    throw new Error(`${path}.fixAction is incompatible with defectKind.`);
+  }
   return finding;
-}
-
-function validateFixDirection(value: string, path: string): void {
-  const action = ACTION_VERB.exec(value);
-  if (action === null || /^(?:consider|fix this|investigate|look into|review)\b/iu.test(value)) {
-    throw new Error(`${path}.fixDirection must state a concrete action.`);
-  }
-  const target = value.slice(action[0].length).trim();
-  const targetDetails = proseTokens(target).filter((token) => !NON_ACTIONABLE_DETAIL.test(token));
-  if (PLACEHOLDER.test(target) || targetDetails.length === 0) {
-    throw new Error(`${path}.fixDirection must state a concrete action.`);
-  }
-}
-
-function isPlainGfmText(value: string): boolean {
-  const tree = fromMarkdown(value, {
-    extensions: [gfm()],
-    mdastExtensions: [gfmFromMarkdown()],
-  });
-  if (tree.children.length !== 1 || tree.children[0]?.type !== "paragraph") {
-    return false;
-  }
-  return (
-    tree.children[0].children.length > 0 &&
-    tree.children[0].children.every((child) => child.type === "text")
-  );
-}
-
-function proseTokens(value: string): readonly string[] {
-  return value.match(/[\p{L}\p{N}]+/gu) ?? [];
-}
-
-interface AnchorToken {
-  raw: string;
-  key: string;
-  kind: "exact" | "lexical";
-}
-
-function unicodeCaseFold(value: string): string {
-  return value.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
-}
-
-function hasMixedCaseIdentity(value: string): boolean {
-  const casedLetters = [...value].filter(
-    (character) => character.toUpperCase() !== character.toLowerCase(),
-  );
-  const hasUpper = casedLetters.some((character) => character === character.toUpperCase());
-  const hasLower = casedLetters.some((character) => character === character.toLowerCase());
-  if (!hasUpper || !hasLower) {
-    return false;
-  }
-  const [first, ...rest] = casedLetters;
-  const isSentenceCapitalized =
-    first === first?.toUpperCase() &&
-    rest.every((character) => character === character.toLowerCase());
-  return !isSentenceCapitalized;
-}
-
-function typedAnchor(raw: string): AnchorToken {
-  const kind =
-    /[_$\p{N}]/u.test(raw) || hasMixedCaseIdentity(raw) ? ("exact" as const) : ("lexical" as const);
-  return {
-    raw,
-    kind,
-    key: kind === "exact" ? `exact:${raw}` : `lexical:${unicodeCaseFold(raw)}`,
-  };
-}
-
-function anchorTokens(value: string): readonly AnchorToken[] {
-  return (value.match(/[\p{L}\p{M}\p{N}_$]+/gu) ?? []).map(typedAnchor).filter((anchor) => {
-    const comparison = anchor.kind === "lexical" ? anchor.key.slice("lexical:".length) : anchor.raw;
-    return (
-      (anchor.kind === "exact" || !NON_CONCRETE_ANCHORS.has(comparison)) &&
-      (comparison.length >= 3 || /[_$\p{N}]/u.test(anchor.raw))
-    );
-  });
-}
-
-function anchorSet(value: string): ReadonlySet<string> {
-  return new Set(anchorTokens(value).map(({ key }) => key));
-}
-
-function intersects(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
-  for (const value of left) {
-    if (right.has(value)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function validateFindingGrounding(finding: ModelFindingV1, path: string): void {
-  const issue = anchorSet(finding.issue);
-  const evidence = anchorSet(finding.evidence);
-  const jointlyObserved = new Set([...issue].filter((anchor) => evidence.has(anchor)));
-  if (jointlyObserved.size === 0) {
-    throw new Error(`${path}.issue and evidence must share a concrete technical anchor.`);
-  }
-  const observed = new Set([...issue, ...evidence]);
-
-  if (!intersects(anchorSet(finding.impact), jointlyObserved)) {
-    throw new Error(`${path}.impact must be grounded in observed technical evidence.`);
-  }
-
-  const titleTokens = anchorTokens(finding.title);
-  const titleGrounded =
-    intersects(new Set(titleTokens.map(({ key }) => key)), observed) &&
-    titleTokens.filter(({ kind }) => kind === "exact").every(({ key }) => observed.has(key));
-  if (titleTokens.length === 0 || !titleGrounded) {
-    throw new Error(`${path}.title must be grounded in observed technical evidence.`);
-  }
-
-  const action = ACTION_VERB.exec(finding.fixDirection);
-  const target = action === null ? "" : finding.fixDirection.slice(action[0].length);
-  if (!intersects(anchorSet(target), observed)) {
-    throw new Error(`${path}.fixDirection must target the observed issue or evidence.`);
-  }
 }
 
 function safeRepositoryPath(value: string): string {
@@ -345,6 +138,31 @@ async function validatePath(
     return;
   }
   throw new Error("path does not identify a file in the reviewed head.");
+}
+
+function changedLineKey(side: DiffSide, line: number): string {
+  return `${side}:${line}`;
+}
+
+function validateTechnicalAnchor(finding: ModelFindingV1, file: DiffFile): void {
+  const observed =
+    finding.range === null
+      ? [
+          file.apiPath,
+          ...(file.oldPath === undefined ? [] : [file.oldPath]),
+          ...(file.newPath === undefined ? [] : [file.newPath]),
+          ...file.changedLineText.values(),
+        ]
+      : Array.from(
+          { length: finding.range.end - finding.range.start + 1 },
+          (_, offset) =>
+            file.changedLineText.get(
+              changedLineKey(finding.range!.side, finding.range!.start + offset),
+            ) ?? "",
+        );
+  if (!observed.some((value) => value.includes(finding.anchor))) {
+    throw new Error("technical anchor is not present in the authoritative changed content.");
+  }
 }
 
 interface GitTreeEntry {
@@ -401,19 +219,23 @@ async function reviewedHeadEntry(
   return undefined;
 }
 
-function canonicalText(value: string): string {
-  return value.normalize("NFC").trim().replace(/\s+/gu, " ").toLowerCase();
-}
-
 export function findingFingerprint(
-  finding: Pick<ModelFindingV1, "path" | "range" | "issue">,
+  finding: Pick<
+    ModelFindingV1,
+    "path" | "range" | "defectKind" | "impactKind" | "fixAction" | "anchor"
+  >,
 ): string {
-  const identity = JSON.stringify({
-    version: FINDING_CONTRACT_VERSION,
-    path: finding.path,
-    range: finding.range,
-    issue: canonicalText(finding.issue),
-  });
+  const identity = JSON.stringify([
+    FINDING_CONTRACT_VERSION,
+    finding.path,
+    finding.range?.start ?? null,
+    finding.range?.end ?? null,
+    finding.range?.side ?? null,
+    finding.defectKind,
+    finding.impactKind,
+    finding.fixAction,
+    finding.anchor,
+  ]);
   return createHash("sha256").update(identity).digest("hex");
 }
 
@@ -452,7 +274,7 @@ export async function validateModelReviewOutput(
   const fingerprints = new Set<string>();
   for (const [index, candidate] of envelope.findings.entries()) {
     try {
-      const modelFinding = validateFindingProse(parseModelFinding(candidate, index), index);
+      const modelFinding = validateFindingSemantics(parseModelFinding(candidate, index), index);
       const repositoryPath = safeRepositoryPath(modelFinding.path);
       const file = diff.files.get(repositoryPath);
       // Candidate order is contract-significant for deterministic first-wins deduplication.
@@ -464,6 +286,7 @@ export async function validateModelReviewOutput(
       if (modelFinding.range !== null && !isAttachableRange(file, modelFinding.range)) {
         throw new Error("range is not a contiguous changed-line range in the reviewed diff.");
       }
+      validateTechnicalAnchor(modelFinding, file);
       const fingerprint = findingFingerprint(modelFinding);
       if (fingerprints.has(fingerprint)) {
         diagnostics.push({

@@ -13,13 +13,12 @@ function finding(overrides: Partial<ReviewFindingV1> = {}): ReviewFindingV1 {
     version: 1,
     fingerprint: "a".repeat(64),
     priority: "P1",
-    title: "Cancellation is dropped",
     path: "src/review.ts",
     range: { start: 10, end: 10, side: "RIGHT" },
-    issue: "The added call does not forward cancellation.",
-    impact: "Timed-out work occupies the only review slot.",
-    evidence: "The changed call omits the signal argument accepted by the callee.",
-    fixDirection: "Pass the active signal to the call.",
+    defectKind: "concurrency",
+    impactKind: "execution-stall",
+    fixAction: "synchronize",
+    anchor: "submitSignal",
     attachment: {
       kind: "inline",
       path: "src/review.ts",
@@ -39,7 +38,10 @@ describe("findings-only review publication", () => {
       priority: "P2",
       path: "src/removed.ts",
       range: { start: 4, end: 6, side: "LEFT" },
-      issue: "The deleted range removes the only bounds check.",
+      defectKind: "validation",
+      impactKind: "operation-failure",
+      fixAction: "validate",
+      anchor: "boundsCheck",
       attachment: {
         kind: "inline",
         path: "src/removed.ts",
@@ -77,10 +79,12 @@ describe("findings-only review publication", () => {
     const file = finding({
       fingerprint: "c".repeat(64),
       priority: "P3",
-      title: "Binary asset drops transparency",
       path: "assets/logo.png",
       range: null,
-      issue: "The replacement image has no alpha channel.",
+      defectKind: "correctness",
+      impactKind: "incorrect-result",
+      fixAction: "restore",
+      anchor: "logo.png",
       attachment: { kind: "file", path: "assets/logo.png" },
     });
     const publication = createReviewPublication("2".repeat(40), [inline, file]);
@@ -97,6 +101,7 @@ describe("findings-only review publication", () => {
     const candidate = finding({
       path: "src/name`with-tick.ts",
       range: { start: 10, end: 12, side: "RIGHT" },
+      anchor: "name`with-tick",
       attachment: {
         kind: "inline",
         path: "src/name`with-tick.ts",
@@ -108,20 +113,27 @@ describe("findings-only review publication", () => {
     const inline = renderInlineFinding(candidate);
     const file = renderFileFinding(candidate);
     for (const text of [inline, file]) {
-      assert.match(text, /^### P1 — ``src\/name`with-tick\.ts:10-12 \(RIGHT\)``/mu);
-      assert.doesNotMatch(text, /Cancellation is dropped/u);
-      assert.match(text, /- Issue: /u);
-      assert.match(text, /- Impact: /u);
-      assert.match(text, /- Evidence: /u);
-      assert.match(text, /- Fix direction: /u);
+      assert.match(text, /^### P1 — Concurrency defect$/mu);
+      assert.match(text, /- Location: ``src\/name`with-tick\.ts:10-12 \(RIGHT\)``/u);
+      assert.match(
+        text,
+        /- Issue: ``name`with-tick`` performs an unsynchronized concurrent transition\./u,
+      );
+      assert.match(text, /- Impact: The affected execution path stops making progress\./u);
+      assert.match(
+        text,
+        /- Evidence: The authoritative diff contains ``name`with-tick`` on RIGHT lines 10-12 in ``src\/name`with-tick\.ts``\./u,
+      );
+      assert.match(
+        text,
+        /- Fix direction: Synchronize the transition performed by ``name`with-tick``\./u,
+      );
       assert.match(text, /<!-- revoir:finding:v1:[0-9a-f]{64} -->/u);
       assert.doesNotMatch(
         text,
         /\b(?:could|do not merge|great work|likely|looks good|may|merge this|must not merge|P1 means|summary)\b/iu,
       );
     }
-    assert.doesNotMatch(inline, /- Location:/u);
-    assert.doesNotMatch(file, /- Location:/u);
   });
 
   it("rejects an empty findings review", () => {

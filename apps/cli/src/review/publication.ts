@@ -1,3 +1,5 @@
+import type { FindingDefectKind, FindingFixAction, FindingImpactKind } from "@revoir/contracts";
+
 import type { ReviewFindingV1 } from "./findings.js";
 
 export interface GitHubInlineReviewComment {
@@ -26,15 +28,72 @@ function code(value: string): string {
   return `${delimiter}${value}${delimiter}`;
 }
 
+const TITLES: Readonly<Record<FindingDefectKind, string>> = {
+  correctness: "Incorrect behavior",
+  validation: "Missing validation",
+  "resource-lifecycle": "Resource lifecycle defect",
+  concurrency: "Concurrency defect",
+  security: "Security boundary defect",
+  compatibility: "Compatibility regression",
+  "error-handling": "Error handling defect",
+  "test-coverage": "Missing regression coverage",
+};
+
+const ISSUES: Readonly<Record<FindingDefectKind, (anchor: string) => string>> = {
+  correctness: (anchor) => `${code(anchor)} produces behavior inconsistent with its contract.`,
+  validation: (anchor) => `${code(anchor)} accepts data without the required validation.`,
+  "resource-lifecycle": (anchor) => `${code(anchor)} leaves a resource lifecycle incomplete.`,
+  concurrency: (anchor) => `${code(anchor)} performs an unsynchronized concurrent transition.`,
+  security: (anchor) => `${code(anchor)} bypasses a required trust-boundary check.`,
+  compatibility: (anchor) => `${code(anchor)} changes a supported interface contract.`,
+  "error-handling": (anchor) => `${code(anchor)} discards an operational failure.`,
+  "test-coverage": (anchor) =>
+    `${code(anchor)} lacks regression coverage for the changed behavior.`,
+};
+
+const IMPACTS: Readonly<Record<FindingImpactKind, string>> = {
+  "incorrect-result": "The affected operation returns an incorrect result.",
+  "operation-failure": "The affected operation fails for a supported input.",
+  "data-loss": "The affected operation loses persisted or in-flight data.",
+  "resource-leak": "The affected resource remains retained after the operation ends.",
+  "execution-stall": "The affected execution path stops making progress.",
+  "security-exposure": "The affected boundary exposes data or authority to an untrusted input.",
+  "compatibility-break": "Existing consumers no longer receive the supported behavior.",
+  "regression-risk": "The changed behavior lacks an automated regression signal.",
+};
+
+const FIX_DIRECTIONS: Readonly<Record<FindingFixAction, (anchor: string) => string>> = {
+  guard: (anchor) => `Guard ${code(anchor)} before the affected operation.`,
+  validate: (anchor) => `Validate the data handled by ${code(anchor)} before use.`,
+  preserve: (anchor) => `Preserve the established contract at ${code(anchor)}.`,
+  propagate: (anchor) => `Propagate the required state through ${code(anchor)}.`,
+  synchronize: (anchor) => `Synchronize the transition performed by ${code(anchor)}.`,
+  release: (anchor) => `Release the retained resource at ${code(anchor)}.`,
+  restore: (anchor) => `Restore the required behavior at ${code(anchor)}.`,
+  "add-test": (anchor) => `Add regression coverage for ${code(anchor)}.`,
+};
+
+function canonicalEvidence(finding: ReviewFindingV1): string {
+  if (finding.range === null) {
+    return `The authoritative file change for ${code(finding.path)} contains ${code(finding.anchor)}.`;
+  }
+  const lines =
+    finding.range.start === finding.range.end
+      ? `line ${finding.range.start}`
+      : `lines ${finding.range.start}-${finding.range.end}`;
+  return `The authoritative diff contains ${code(finding.anchor)} on ${finding.range.side} ${lines} in ${code(finding.path)}.`;
+}
+
 function details(finding: ReviewFindingV1, location?: string): string {
   const explicit = location ?? explicitLocation(finding);
   return [
-    `### ${finding.priority} — ${code(explicit)}`,
+    `### ${finding.priority} — ${TITLES[finding.defectKind]}`,
     "",
-    `- Issue: ${finding.issue}`,
-    `- Impact: ${finding.impact}`,
-    `- Evidence: ${finding.evidence}`,
-    `- Fix direction: ${finding.fixDirection}`,
+    `- Location: ${code(explicit)}`,
+    `- Issue: ${ISSUES[finding.defectKind](finding.anchor)}`,
+    `- Impact: ${IMPACTS[finding.impactKind]}`,
+    `- Evidence: ${canonicalEvidence(finding)}`,
+    `- Fix direction: ${FIX_DIRECTIONS[finding.fixAction](finding.anchor)}`,
     "",
     `<!-- revoir:finding:v1:${finding.fingerprint} -->`,
   ].join("\n");
