@@ -356,8 +356,6 @@ export class CleanReviewOrchestrator implements ManualReviewService {
             throw new AggregateError(reactionFailures, "Reaction cleanup required retries.");
           }
 
-          const priorReviewState = await github.getPriorReviewState(reference, signal);
-          throwIfAborted(signal);
           const currentSha = await github.getHeadSha(reference, signal);
           throwIfAborted(signal);
           if (currentSha !== pullRequest.headSha) {
@@ -367,12 +365,14 @@ export class CleanReviewOrchestrator implements ManualReviewService {
               currentSha,
             };
           } else {
+            await github.removeOwnPendingReview(reference, signal);
+            throwIfAborted(signal);
+            const priorReviewState = await github.getPriorReviewState(reference, signal);
+            throwIfAborted(signal);
             const reconciliation = planFindingReconciliation(
               engineResult.findings,
               priorReviewState,
             );
-            await github.removeOwnPendingReview(reference, signal);
-            throwIfAborted(signal);
             const preResolutionSha = await github.getHeadSha(reference, signal);
             throwIfAborted(signal);
             if (

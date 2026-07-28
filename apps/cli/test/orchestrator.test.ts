@@ -114,6 +114,7 @@ function harness(
     pullRequest?: PullRequestSnapshot;
     review?: ReviewEngine["review"];
     priorReviewState?: PriorReviewState;
+    priorReviewStateAfterPendingRemoval?: PriorReviewState;
     prepareError?: Error;
     completionError?: Error;
     reactionError?: ReviewReaction;
@@ -168,6 +169,7 @@ function harness(
       ? 0
       : (options.pendingDeletionErrorAttempts ?? Number.POSITIVE_INFINITY);
   const ownedReactions = new Set<ReviewReaction>();
+  let pendingReviewRemoved = false;
   const session: GitHubReviewSession = {
     installationToken: "installation-secret",
     async getPullRequest() {
@@ -202,6 +204,7 @@ function harness(
     async removeOwnPendingReview() {
       events.push("remove-pending-review");
       options.pendingReviewState?.clear();
+      pendingReviewRemoved = true;
       if (options.mutateHeadDuring === "pending-review-removal") {
         currentSha = "3".repeat(40);
       }
@@ -209,6 +212,7 @@ function harness(
     async getPriorReviewState() {
       events.push("get-prior-review-state");
       return (
+        (pendingReviewRemoved ? options.priorReviewStateAfterPendingRemoval : undefined) ??
         options.priorReviewState ?? {
           activeFingerprints: [],
           ownedOpenThreads: [],
@@ -414,9 +418,9 @@ describe("clean review orchestrator", () => {
       "review",
       "cleanup",
       "delete-10",
-      "get-prior-review-state",
       "get-head",
       "remove-pending-review",
+      "get-prior-review-state",
       "get-head",
       "add-+1",
       "get-head",
@@ -452,9 +456,9 @@ describe("clean review orchestrator", () => {
     });
     assert.deepEqual(events.slice(-8), [
       "delete-10",
-      "get-prior-review-state",
       "get-head",
       "remove-pending-review",
+      "get-prior-review-state",
       "get-head",
       "create-review",
       "get-head",
@@ -539,6 +543,27 @@ describe("clean review orchestrator", () => {
     assert.equal(createdPublications.length, 0);
     assert.equal(events.includes("resolve-threads-THREAD_CURRENT"), false);
     assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("refreshes prior state after an uncertain pending review becomes submitted", async () => {
+    const unchanged = validatedFinding();
+    const publishedState: PriorReviewState = {
+      activeFingerprints: [unchanged.fingerprint],
+      ownedOpenThreads: [{ id: "THREAD_SUBMITTED", fingerprint: unchanged.fingerprint }],
+      runHeadShas: ["1".repeat(40)],
+    };
+    const { createdPublications, events, orchestrator } = harness({
+      priorReviewStateAfterPendingRemoval: publishedState,
+      review: async () => ({ findings: [unchanged], diagnostics: [] }),
+    });
+
+    assert.equal((await orchestrator.review(reference)).status, "findings");
+    assert.equal(createdPublications.length, 0);
+    assert.equal(events.includes("resolve-threads-THREAD_SUBMITTED"), false);
+    assert.ok(
+      events.indexOf("remove-pending-review") < events.lastIndexOf("get-prior-review-state"),
+      JSON.stringify(events),
+    );
   });
 
   it("resolves a disappeared owned finding before completing the clean review", async () => {
@@ -764,12 +789,7 @@ describe("clean review orchestrator", () => {
           reviewedSha: "2".repeat(40),
           currentSha: "3".repeat(40),
         });
-        assert.deepEqual(events.slice(-4), [
-          "cleanup",
-          "delete-10",
-          "get-prior-review-state",
-          "get-head",
-        ]);
+        assert.deepEqual(events.slice(-4), ["review", "cleanup", "delete-10", "get-head"]);
         assert.equal(events.includes("add-+1"), false);
       }),
     );
@@ -792,8 +812,8 @@ describe("clean review orchestrator", () => {
     await assert.rejects(() => failed.orchestrator.review(reference), /postcheck failed/u);
 
     assert.deepEqual(failed.events.slice(-6), [
-      "get-head",
       "remove-pending-review",
+      "get-prior-review-state",
       "get-head",
       "add-+1",
       "get-head",
@@ -836,12 +856,7 @@ describe("clean review orchestrator", () => {
 
     const shaFailure = harness({ headError: new Error("SHA lookup failed") });
     await assert.rejects(() => shaFailure.orchestrator.review(reference), /SHA lookup failed/u);
-    assert.deepEqual(shaFailure.events.slice(-4), [
-      "cleanup",
-      "delete-10",
-      "get-prior-review-state",
-      "get-head",
-    ]);
+    assert.deepEqual(shaFailure.events.slice(-4), ["review", "cleanup", "delete-10", "get-head"]);
   });
 
   it("cleans after preparation and completion failures", async () => {
@@ -856,9 +871,9 @@ describe("clean review orchestrator", () => {
     );
     assert.deepEqual(completionFailure.events.slice(-7), [
       "delete-10",
-      "get-prior-review-state",
       "get-head",
       "remove-pending-review",
+      "get-prior-review-state",
       "get-head",
       "add-+1",
       "remove-own-+1",
@@ -1463,12 +1478,7 @@ describe("clean review orchestrator", () => {
       ]),
       ReviewTimeoutError,
     );
-    assert.deepEqual(timedOut.events.slice(-4), [
-      "cleanup",
-      "delete-10",
-      "get-prior-review-state",
-      "get-head",
-    ]);
+    assert.deepEqual(timedOut.events.slice(-4), ["review", "cleanup", "delete-10", "get-head"]);
   });
 
   it("bounds non-settling workspace cleanup by the original deadline and continues cleanup", async () => {
