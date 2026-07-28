@@ -36,6 +36,40 @@ function throwIfAborted(signal: AbortSignal): void {
   }
 }
 
+async function acquireReviewLock(lock: ReviewLock, signal: AbortSignal) {
+  throwIfAborted(signal);
+  const acquisition = lock.acquire(signal);
+  return new Promise<Awaited<ReturnType<ReviewLock["acquire"]>>>((resolve, reject) => {
+    let abandoned = false;
+    const onAbort = (): void => {
+      abandoned = true;
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled."));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void acquisition.then(
+      async (lease) => {
+        signal.removeEventListener("abort", onAbort);
+        if (abandoned || signal.aborted) {
+          await lease.release().catch(() => {});
+          if (!abandoned) {
+            reject(
+              signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled."),
+            );
+          }
+          return;
+        }
+        resolve(lease);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        if (!abandoned) {
+          reject(error);
+        }
+      },
+    );
+  });
+}
+
 export class CleanReviewOrchestrator implements ManualReviewService {
   readonly #configuration: RevoirConfiguration;
   readonly #github: GitHubReviewGateway;
@@ -60,20 +94,34 @@ export class CleanReviewOrchestrator implements ManualReviewService {
   }
 
   async review(reference: PullRequestReference): Promise<ManualReviewResult> {
-    const lease = await this.#lock.acquire();
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => {
+      abortController.abort(new ReviewTimeoutError(this.#configuration.timeouts.reviewMs));
+    }, this.#configuration.timeouts.reviewMs);
+
+    let lease: Awaited<ReturnType<ReviewLock["acquire"]>> | undefined;
     let result: ManualReviewResult | undefined;
     let failure: unknown;
     try {
-      result = await this.#reviewWithLease(reference);
+      lease = await acquireReviewLock(this.#lock, abortController.signal);
+      throwIfAborted(abortController.signal);
+      result = await this.#reviewWithLease(reference, abortController.signal);
     } catch (error) {
       failure = error;
+    } finally {
+      clearTimeout(timeout);
+      if (!abortController.signal.aborted) {
+        abortController.abort(asError(failure ?? "Review finished."));
+      }
     }
 
     let releaseFailure: unknown;
-    try {
-      await lease.release();
-    } catch (error) {
-      releaseFailure = error;
+    if (lease !== undefined) {
+      try {
+        await lease.release();
+      } catch (error) {
+        releaseFailure = error;
+      }
     }
     if (failure !== undefined && releaseFailure !== undefined) {
       throw new AggregateError(
@@ -93,12 +141,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     return result;
   }
 
-  async #reviewWithLease(reference: PullRequestReference): Promise<ManualReviewResult> {
-    const abortController = new AbortController();
-    const timeout = setTimeout(() => {
-      abortController.abort(new ReviewTimeoutError(this.#configuration.timeouts.reviewMs));
-    }, this.#configuration.timeouts.reviewMs);
-
+  async #reviewWithLease(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<ManualReviewResult> {
     let workspace: PreparedWorkspace | undefined;
     let activeReaction:
       | {
@@ -109,43 +155,43 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     let failure: unknown;
 
     try {
-      const github = await this.#github.authenticate(
-        this.#configuration.github,
-        reference,
-        abortController.signal,
-      );
-      const pullRequest = await github.getPullRequest(reference, abortController.signal);
+      const github = await this.#github.authenticate(this.#configuration.github, reference, signal);
+      const pullRequest = await github.getPullRequest(reference, signal);
       assertPullRequestEligible(reference, pullRequest, this.#configuration.github);
-      throwIfAborted(abortController.signal);
+      throwIfAborted(signal);
 
-      await github.removeOwnCompletionReaction(reference, abortController.signal);
-      const reactionId = await github.addReaction(reference, "eyes", abortController.signal);
+      await github.removeOwnCompletionReaction(reference, signal);
       activeReaction = {
-        delete: (signal) => github.deleteReaction(reference, reactionId, signal),
+        delete: (cleanupSignal) => github.removeOwnReaction(reference, "eyes", cleanupSignal),
+      };
+      const reactionId = await github.addReaction(reference, "eyes", signal);
+      activeReaction = {
+        delete: (cleanupSignal) => github.deleteReaction(reference, reactionId, cleanupSignal),
       };
 
       workspace = await this.#workspaces.prepare(
         reference,
         pullRequest,
         github.installationToken,
-        abortController.signal,
+        signal,
       );
-      throwIfAborted(abortController.signal);
-      await this.#reviewEngine.review(
-        { reference, pullRequest, workspace },
-        abortController.signal,
-      );
-      throwIfAborted(abortController.signal);
+      throwIfAborted(signal);
+      await this.#reviewEngine.review({ reference, pullRequest, workspace }, signal);
+      throwIfAborted(signal);
 
       await workspace.cleanup();
       workspace = undefined;
-      await activeReaction.delete(abortController.signal);
+      await activeReaction.delete(signal);
       activeReaction = undefined;
 
-      const currentSha = await github.getHeadSha(reference, abortController.signal);
-      throwIfAborted(abortController.signal);
+      const currentSha = await github.getHeadSha(reference, signal);
+      throwIfAborted(signal);
       if (currentSha === pullRequest.headSha) {
-        await github.addReaction(reference, "+1", abortController.signal);
+        activeReaction = {
+          delete: (cleanupSignal) => github.removeOwnReaction(reference, "+1", cleanupSignal),
+        };
+        await github.addReaction(reference, "+1", signal);
+        activeReaction = undefined;
         result = {
           status: "clean",
           reviewedSha: pullRequest.headSha,
@@ -160,11 +206,6 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       }
     } catch (error) {
       failure = error;
-    } finally {
-      clearTimeout(timeout);
-      if (!abortController.signal.aborted) {
-        abortController.abort(asError(failure ?? "Review finished."));
-      }
     }
 
     const cleanupFailures: Error[] = [];

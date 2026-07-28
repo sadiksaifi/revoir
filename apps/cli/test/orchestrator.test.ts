@@ -72,6 +72,8 @@ function harness(
     review?: ReviewEngine["review"];
     prepareError?: Error;
     completionError?: Error;
+    reactionError?: ReviewReaction;
+    reconciliationNeverSettles?: boolean;
     headError?: Error;
     headNeverSettles?: boolean;
     mutateHeadDuring?: "workspace-cleanup" | "reaction-removal";
@@ -83,6 +85,7 @@ function harness(
   const snapshot = options.pullRequest ?? pullRequest();
   let currentSha = options.currentSha ?? snapshot.headSha;
   let nextReactionId = 10;
+  const ownedReactions = new Set<ReviewReaction>();
   const session: GitHubReviewSession = {
     installationToken: "installation-secret",
     async getPullRequest() {
@@ -112,13 +115,35 @@ function harness(
     },
     async addReaction(_reference, reaction: ReviewReaction) {
       events.push(`add-${reaction}`);
+      ownedReactions.add(reaction);
+      if (reaction === options.reactionError) {
+        throw new Error(`ambiguous ${reaction} creation`);
+      }
       if (reaction === "+1" && options.completionError !== undefined) {
         throw options.completionError;
       }
       return nextReactionId++;
     },
+    async removeOwnReaction(_reference, reaction, signal) {
+      events.push(`remove-own-${reaction}`);
+      if (options.reconciliationNeverSettles) {
+        return new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      }
+      ownedReactions.delete(reaction);
+    },
     async deleteReaction(_reference, id) {
       events.push(`delete-${id}`);
+      if (id === 10) {
+        ownedReactions.delete("eyes");
+      }
       if (id === 10 && options.mutateHeadDuring === "reaction-removal") {
         currentSha = "3".repeat(40);
       }
@@ -160,6 +185,7 @@ function harness(
   };
   return {
     events,
+    ownedReactions,
     orchestrator: new CleanReviewOrchestrator(configuration(options.reviewMs), {
       github,
       lock: options.lock ?? {
@@ -264,12 +290,55 @@ describe("clean review orchestrator", () => {
       () => completionFailure.orchestrator.review(reference),
       /reaction failed/u,
     );
-    assert.deepEqual(completionFailure.events.slice(-4), [
+    assert.deepEqual(completionFailure.events.slice(-5), [
       "cleanup",
       "delete-10",
       "get-head",
       "add-+1",
+      "remove-own-+1",
     ]);
+  });
+
+  it("reconciles bot-owned eyes and completion reactions after ambiguous creation", async () => {
+    await Promise.all(
+      (["eyes", "+1"] as const).map(async (reaction) => {
+        const ambiguous = harness({
+          reactionError: reaction,
+          ...(reaction === "+1"
+            ? { completionError: new Error("network failed after creating reaction") }
+            : {}),
+        });
+        await assert.rejects(() => ambiguous.orchestrator.review(reference));
+        assert.equal(ambiguous.events.includes(`remove-own-${reaction}`), true);
+        assert.equal(ambiguous.ownedReactions.has(reaction), false);
+        if (reaction === "eyes") {
+          assert.equal(ambiguous.events.includes("prepare-installation-secret"), false);
+        }
+      }),
+    );
+  });
+
+  it("bounds ambiguous reaction reconciliation cleanup", async () => {
+    const ambiguous = harness({
+      reactionError: "eyes",
+      reconciliationNeverSettles: true,
+      reviewMs: 5,
+    });
+
+    await assert.rejects(
+      Promise.race([
+        ambiguous.orchestrator.review(reference),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("reaction reconciliation did not time out")), 100);
+        }),
+      ]),
+      (error: unknown) => {
+        assert.ok(error instanceof AggregateError);
+        assert.ok(error.errors.some((item) => item instanceof ReviewTimeoutError));
+        return true;
+      },
+    );
+    assert.equal(ambiguous.events.includes("remove-own-eyes"), true);
   });
 
   it("aborts a timed-out review and still cleans every artifact", async () => {
@@ -289,6 +358,47 @@ describe("clean review orchestrator", () => {
     });
     await assert.rejects(() => timedOut.orchestrator.review(reference), ReviewTimeoutError);
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
+  });
+
+  it("starts the review deadline before lock acquisition and never starts a late review", async () => {
+    let finishAcquiring: ((lease: { release(): Promise<void> }) => void) | undefined;
+    let acquisitionSignal: AbortSignal | undefined;
+    let releases = 0;
+    const timedOut = harness({
+      reviewMs: 5,
+      lock: {
+        async acquire(signal) {
+          acquisitionSignal = signal;
+          return new Promise((resolve) => {
+            finishAcquiring = resolve;
+          });
+        },
+      },
+    });
+
+    await assert.rejects(
+      Promise.race([
+        timedOut.orchestrator.review(reference),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("lock acquisition did not cancel")), 100);
+        }),
+      ]),
+      ReviewTimeoutError,
+    );
+    assert.equal(acquisitionSignal?.aborted, true);
+    assert.deepEqual(timedOut.events, []);
+
+    assert.ok(finishAcquiring);
+    finishAcquiring({
+      async release() {
+        releases += 1;
+      },
+    });
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(releases, 1);
+    assert.deepEqual(timedOut.events, []);
   });
 
   it("times out non-settling session creation, cleans artifacts, and disposes a late session", async () => {

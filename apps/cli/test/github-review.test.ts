@@ -96,6 +96,8 @@ describe("GitHub App review gateway", () => {
             user: { login: "revoir-test[bot]" },
           },
           { id: 32, content: "+1", user: { login: "human" } },
+          { id: 34, content: "eyes", user: { login: "revoir-test[bot]" } },
+          { id: 35, content: "eyes", user: { login: "human" } },
         ]);
       }
       if (url.endsWith("/issues/17/reactions") && init?.method === "POST") {
@@ -105,7 +107,11 @@ describe("GitHub App review gateway", () => {
           user: { login: "revoir-test[bot]" },
         });
       }
-      if (url.endsWith("/reactions/31") || url.endsWith("/reactions/33")) {
+      if (
+        url.endsWith("/reactions/31") ||
+        url.endsWith("/reactions/33") ||
+        url.endsWith("/reactions/34")
+      ) {
         return new Response(null, { status: 204 });
       }
       throw new Error(`Unexpected request ${url}`);
@@ -127,6 +133,7 @@ describe("GitHub App review gateway", () => {
       "2".repeat(40),
     );
     await session.removeOwnCompletionReaction(reference, abortController.signal);
+    await session.removeOwnReaction(reference, "eyes", abortController.signal);
     assert.equal(await session.addReaction(reference, "eyes", abortController.signal), 33);
     await session.deleteReaction(reference, 33, abortController.signal);
 
@@ -153,7 +160,66 @@ describe("GitHub App review gateway", () => {
     );
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/31")).length, 1);
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/32")).length, 0);
+    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/34")).length, 1);
+    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/35")).length, 0);
     assert.ok(requests.every((request) => request.init?.signal === abortController.signal));
+  });
+
+  it("can reconcile created reactions after invalid JSON and network ambiguity", async () => {
+    await Promise.all(
+      (["eyes", "+1"] as const).map(async (reaction) => {
+        const requests: Array<{ url: string; method: string | undefined }> = [];
+        const reactions = [{ id: 40, content: reaction, user: { login: "human" } }];
+        const fetchImplementation: FetchLike = async (input, init) => {
+          const url = String(input);
+          requests.push({ url, method: init?.method });
+          if (url.endsWith("/app")) {
+            return json({ slug: "revoir-test" });
+          }
+          if (url.endsWith("/app/installations/8/access_tokens")) {
+            return json({ token: "installation-secret" });
+          }
+          if (url.endsWith("/issues/17/reactions") && init?.method === "POST") {
+            reactions.push({
+              id: 41,
+              content: reaction,
+              user: { login: "revoir-test[bot]" },
+            });
+            if (reaction === "eyes") {
+              return new Response("not json", {
+                status: 201,
+                headers: { "Content-Type": "application/json" },
+              });
+            }
+            throw new Error("network failed after reaction creation");
+          }
+          if (url.endsWith("/issues/17/reactions?per_page=100")) {
+            return json(reactions);
+          }
+          if (url.endsWith("/reactions/41") && init?.method === "DELETE") {
+            reactions.splice(
+              reactions.findIndex((candidate) => candidate.id === 41),
+              1,
+            );
+            return new Response(null, { status: 204 });
+          }
+          throw new Error(`Unexpected request ${url}`);
+        };
+        const session = await new GitHubAppReviewGateway(
+          fetchImplementation,
+          "https://api.test",
+          () => 1_000,
+        ).authenticate(configuration.github, reference, new AbortController().signal);
+
+        await assert.rejects(() =>
+          session.addReaction(reference, reaction, new AbortController().signal),
+        );
+        await session.removeOwnReaction(reference, reaction, new AbortController().signal);
+
+        assert.deepEqual(reactions, [{ id: 40, content: reaction, user: { login: "human" } }]);
+        assert.equal(requests.filter((request) => request.url.endsWith("/reactions/40")).length, 0);
+      }),
+    );
   });
 
   it("cancels non-settling authentication requests", async () => {

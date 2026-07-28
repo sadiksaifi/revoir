@@ -73,6 +73,10 @@ export interface WorkspacePreparer {
   ): Promise<PreparedWorkspace>;
 }
 
+export interface GitWorkspacePreparerHooks {
+  remove?(path: string, options: { recursive: true; force: true }): Promise<void>;
+}
+
 const ASKPASS = `#!/bin/sh
 case "$1" in
   *Username*) printf '%s\\n' "$REVOIR_GIT_USERNAME" ;;
@@ -88,6 +92,7 @@ function throwIfAborted(signal: AbortSignal): void {
 
 export class GitWorkspacePreparer implements WorkspacePreparer {
   readonly #cacheDirectory: string;
+  readonly #remove: NonNullable<GitWorkspacePreparerHooks["remove"]>;
   readonly #shellTimeoutMs: number;
   readonly #runner: CommandRunner;
 
@@ -95,8 +100,10 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
     cacheDirectory: string,
     shellTimeoutMs: number,
     runner: CommandRunner = new SystemCommandRunner(),
+    hooks: GitWorkspacePreparerHooks = {},
   ) {
     this.#cacheDirectory = cacheDirectory;
+    this.#remove = hooks.remove ?? rm;
     this.#shellTimeoutMs = shellTimeoutMs;
     this.#runner = runner;
   }
@@ -172,20 +179,36 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
       }
 
       let cleaned = false;
+      let cleanupAttempt: Promise<void> | undefined;
+      const removeDirectory = this.#remove;
       return {
         root,
         checkout,
         diff: diff.stdout,
         remoteUrl,
         async cleanup() {
-          if (!cleaned) {
+          if (cleaned) {
+            return;
+          }
+          if (cleanupAttempt !== undefined) {
+            return cleanupAttempt;
+          }
+
+          const attempt = removeDirectory(root, { recursive: true, force: true }).then(() => {
             cleaned = true;
-            await rm(root, { recursive: true, force: true });
+          });
+          cleanupAttempt = attempt;
+          try {
+            await attempt;
+          } finally {
+            if (cleanupAttempt === attempt) {
+              cleanupAttempt = undefined;
+            }
           }
         },
       };
     } catch (error) {
-      await rm(root, { recursive: true, force: true });
+      await this.#remove(root, { recursive: true, force: true });
       if (error instanceof Error && error.message.includes(installationToken)) {
         throw new Error(error.message.split(installationToken).join("[REDACTED]"), {
           cause: error,

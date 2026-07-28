@@ -5,6 +5,8 @@ export type ProcessIdentity =
   | { kind: "missing" }
   | { kind: "alive"; processBirth: string | undefined };
 
+const PROCESS_INSPECTION_TIMEOUT_MS = 1_000;
+
 function isFileSystemError(error: unknown, code: string): boolean {
   return (
     error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code
@@ -50,11 +52,11 @@ export function darwinProcessBirth(output: string, pid: number): string | undefi
   return startedAt.length === 0 ? undefined : `darwin:${startedAt}`;
 }
 
-async function inspectLinuxProcess(pid: number): Promise<string | undefined> {
+async function inspectLinuxProcess(pid: number, signal?: AbortSignal): Promise<string | undefined> {
   try {
     const [stat, bootId] = await Promise.all([
-      readFile(`/proc/${pid}/stat`, "utf8"),
-      readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+      readFile(`/proc/${pid}/stat`, { encoding: "utf8", signal }),
+      readFile("/proc/sys/kernel/random/boot_id", { encoding: "utf8", signal }),
     ]);
     return linuxProcessBirth(stat, bootId);
   } catch {
@@ -62,7 +64,10 @@ async function inspectLinuxProcess(pid: number): Promise<string | undefined> {
   }
 }
 
-async function inspectDarwinProcess(pid: number): Promise<string | undefined> {
+async function inspectDarwinProcess(
+  pid: number,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
   return new Promise((resolve) => {
     execFile(
       "/bin/ps",
@@ -70,6 +75,8 @@ async function inspectDarwinProcess(pid: number): Promise<string | undefined> {
       {
         encoding: "utf8",
         env: { ...process.env, LC_ALL: "C" },
+        signal,
+        timeout: PROCESS_INSPECTION_TIMEOUT_MS,
       },
       (error, stdout) => {
         resolve(error === null ? darwinProcessBirth(stdout, pid) : undefined);
@@ -78,16 +85,16 @@ async function inspectDarwinProcess(pid: number): Promise<string | undefined> {
   });
 }
 
-export async function inspectProcess(pid: number): Promise<ProcessIdentity> {
+export async function inspectProcess(pid: number, signal?: AbortSignal): Promise<ProcessIdentity> {
   if (!processExists(pid)) {
     return { kind: "missing" };
   }
 
   const processBirth =
     process.platform === "linux"
-      ? await inspectLinuxProcess(pid)
+      ? await inspectLinuxProcess(pid, signal)
       : process.platform === "darwin"
-        ? await inspectDarwinProcess(pid)
+        ? await inspectDarwinProcess(pid, signal)
         : undefined;
 
   if (processBirth !== undefined) {

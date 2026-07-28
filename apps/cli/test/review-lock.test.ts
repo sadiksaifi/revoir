@@ -357,4 +357,29 @@ describe("manual review process lock", () => {
     const nextLease = await deterministicLock(stateDirectory, identities).acquire();
     await nextLease.release();
   });
+
+  it("aborts a non-settling process probe without leaving a lock behind", async () => {
+    const stateDirectory = await temporaryStateDirectory();
+    const cancellation = new Error("cancel lock acquisition");
+    const abortController = new AbortController();
+    const lock = new FileReviewLock(stateDirectory, {
+      async inspectProcess() {
+        return new Promise(() => {});
+      },
+    });
+
+    const acquisition = lock.acquire(abortController.signal);
+    abortController.abort(cancellation);
+
+    await assert.rejects(
+      Promise.race([
+        acquisition,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("process probe did not cancel")), 100);
+        }),
+      ]),
+      cancellation,
+    );
+    assert.deepEqual(await readdir(stateDirectory), []);
+  });
 });

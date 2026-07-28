@@ -18,6 +18,11 @@ export interface GitHubReviewSession {
   ): Promise<PullRequestSnapshot>;
   getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string>;
   removeOwnCompletionReaction(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
+  removeOwnReaction(
+    reference: PullRequestReference,
+    reaction: ReviewReaction,
+    signal: AbortSignal,
+  ): Promise<void>;
   addReaction(
     reference: PullRequestReference,
     reaction: ReviewReaction,
@@ -251,6 +256,14 @@ class InstallationSession implements GitHubReviewSession {
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<void> {
+    await this.removeOwnReaction(reference, "+1", signal);
+  }
+
+  async removeOwnReaction(
+    reference: PullRequestReference,
+    reaction: ReviewReaction,
+    signal: AbortSignal,
+  ): Promise<void> {
     const response = await this.#request(
       `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/reactions?per_page=100`,
       signal,
@@ -259,16 +272,14 @@ class InstallationSession implements GitHubReviewSession {
     if (!Array.isArray(value)) {
       throw new Error("GitHub reaction lookup returned an invalid response.");
     }
-    const ownedCompletionReactions = value
+    const ownedReactions = value
       .map((item) => parseReaction(item))
       .filter(
-        (reaction) =>
-          reaction.content === "+1" && reaction.user.login.toLowerCase() === this.#botLogin,
+        (candidate) =>
+          candidate.content === reaction && candidate.user.login.toLowerCase() === this.#botLogin,
       );
     await Promise.all(
-      ownedCompletionReactions.map((reaction) =>
-        this.deleteReaction(reference, reaction.id, signal),
-      ),
+      ownedReactions.map((candidate) => this.deleteReaction(reference, candidate.id, signal)),
     );
   }
 

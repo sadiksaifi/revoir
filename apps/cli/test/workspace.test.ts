@@ -136,6 +136,59 @@ describe("Git review workspace", () => {
     }
   });
 
+  it("retries a failed cleanup and removes checkout and askpass artifacts", async () => {
+    try {
+      const origin = await repositoryFixture();
+      const cache = await temporaryDirectory("revoir-cache-cleanup-retry-");
+      let removalAttempts = 0;
+      const preparer = new GitWorkspacePreparer(cache, 10_000, new SystemCommandRunner(), {
+        async remove(path, options) {
+          removalAttempts += 1;
+          if (removalAttempts === 1) {
+            throw new Error("injected cleanup failure");
+          }
+          await rm(path, options);
+        },
+      });
+      const pullRequest: PullRequestSnapshot = {
+        number: 17,
+        state: "open",
+        draft: false,
+        authorId: 42,
+        baseSha: origin.baseSha,
+        headSha: origin.headSha,
+        baseRepository: {
+          id: 99,
+          fullName: "owner/repository",
+          cloneUrl: origin.root,
+        },
+        headRepository: {
+          id: 99,
+          fullName: "owner/repository",
+          cloneUrl: origin.root,
+        },
+      };
+      const workspace = await preparer.prepare(
+        parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+        pullRequest,
+        "installation-token",
+        new AbortController().signal,
+      );
+      const askpass = join(workspace.root, "git-askpass.sh");
+
+      await assert.rejects(() => workspace.cleanup(), /injected cleanup failure/u);
+      await lstat(workspace.checkout);
+      await lstat(askpass);
+
+      await Promise.all([workspace.cleanup(), workspace.cleanup()]);
+      assert.equal(removalAttempts, 2);
+      await assert.rejects(() => lstat(workspace.checkout), { code: "ENOENT" });
+      await assert.rejects(() => lstat(askpass), { code: "ENOENT" });
+    } finally {
+      await cleanupTemporaryDirectories();
+    }
+  });
+
   it("removes partial checkout and askpass artifacts and redacts token-bearing errors", async () => {
     try {
       const cache = await temporaryDirectory("revoir-cache-failure-");

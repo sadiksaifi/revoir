@@ -21,7 +21,7 @@ interface StaleClaim {
 
 export interface FileReviewLockHooks {
   afterStaleClaim?(): Promise<void>;
-  inspectProcess?(pid: number): Promise<ProcessIdentity>;
+  inspectProcess?(pid: number, signal: AbortSignal): Promise<ProcessIdentity>;
 }
 
 type LockState = { kind: "missing" } | { kind: "invalid" } | { kind: "owned"; owner: LockOwner };
@@ -36,7 +36,7 @@ export interface ReviewLockLease {
 }
 
 export interface ReviewLock {
-  acquire(): Promise<ReviewLockLease>;
+  acquire(signal: AbortSignal): Promise<ReviewLockLease>;
 }
 
 export class ReviewInProgressError extends Error {
@@ -50,6 +50,36 @@ function isFileSystemError(error: unknown, code: string): boolean {
   return (
     error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code
   );
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled.");
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) {
+    throw abortReason(signal);
+  }
+}
+
+async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function toLockOwner(value: unknown): LockOwner | undefined {
@@ -148,7 +178,7 @@ function sameOwner(left: LockOwner, right: LockOwner): boolean {
 export class FileReviewLock implements ReviewLock {
   readonly #lockPath: string;
   readonly #hooks: FileReviewLockHooks;
-  readonly #inspectProcess: (pid: number) => Promise<ProcessIdentity>;
+  readonly #inspectProcess: (pid: number, signal: AbortSignal) => Promise<ProcessIdentity>;
 
   constructor(stateDirectory: string, hooks: FileReviewLockHooks = {}) {
     this.#lockPath = join(stateDirectory, LOCK_FILE);
@@ -156,13 +186,15 @@ export class FileReviewLock implements ReviewLock {
     this.#inspectProcess = hooks.inspectProcess ?? inspectProcess;
   }
 
-  async acquire(): Promise<ReviewLockLease> {
+  async acquire(signal: AbortSignal = new AbortController().signal): Promise<ReviewLockLease> {
+    throwIfAborted(signal);
     await mkdir(dirname(this.#lockPath), { recursive: true, mode: 0o700 });
-    return this.#tryAcquire(3);
+    throwIfAborted(signal);
+    return this.#tryAcquire(3, signal);
   }
 
-  async #tryAcquire(attemptsRemaining: number): Promise<ReviewLockLease> {
-    const identity = await this.#inspectProcess(process.pid);
+  async #tryAcquire(attemptsRemaining: number, signal: AbortSignal): Promise<ReviewLockLease> {
+    const identity = await abortable(this.#inspectProcess(process.pid, signal), signal);
     const owner: LockOwner = {
       pid: process.pid,
       owner: randomUUID(),
@@ -181,16 +213,21 @@ export class FileReviewLock implements ReviewLock {
       }
       await link(candidatePath, this.#lockPath);
       await unlink(candidatePath).catch(() => {});
-      return this.#lease(owner);
+      const lease = this.#lease(owner);
+      if (signal.aborted) {
+        await lease.release();
+        throw abortReason(signal);
+      }
+      return lease;
     } catch (error) {
       await unlink(candidatePath).catch(() => {});
       if (!isFileSystemError(error, "EEXIST")) {
         throw error;
       }
-      if (attemptsRemaining <= 1 || !(await this.#removeStaleOwner(owner))) {
+      if (attemptsRemaining <= 1 || !(await this.#removeStaleOwner(owner, signal))) {
         throw new ReviewInProgressError();
       }
-      return this.#tryAcquire(attemptsRemaining - 1);
+      return this.#tryAcquire(attemptsRemaining - 1, signal);
     }
   }
 
@@ -214,12 +251,14 @@ export class FileReviewLock implements ReviewLock {
     };
   }
 
-  async #removeStaleOwner(claimant: LockOwner): Promise<boolean> {
+  async #removeStaleOwner(claimant: LockOwner, signal: AbortSignal): Promise<boolean> {
+    throwIfAborted(signal);
     const observed = await readLockSnapshot(this.#lockPath);
+    throwIfAborted(signal);
     if (observed.kind === "missing") {
       return true;
     }
-    if (observed.kind === "invalid" || (await this.#isOwnerAlive(observed.owner))) {
+    if (observed.kind === "invalid" || (await this.#isOwnerAlive(observed.owner, signal))) {
       return false;
     }
 
@@ -227,14 +266,16 @@ export class FileReviewLock implements ReviewLock {
       .update(`${observed.owner.pid}\0${observed.owner.owner}`)
       .digest("hex");
     const claimRootPath = `${this.#lockPath}.${ownerKey}.reclaim`;
-    const claim = await this.#claimStaleOwner(claimRootPath, observed.owner, claimant);
+    const claim = await this.#claimStaleOwner(claimRootPath, observed.owner, claimant, signal);
     if (claim === undefined) {
       return false;
     }
 
     try {
       await this.#hooks.afterStaleClaim?.();
+      throwIfAborted(signal);
       const current = await readLockSnapshot(this.#lockPath);
+      throwIfAborted(signal);
       if (current.kind === "missing") {
         return true;
       }
@@ -273,6 +314,7 @@ export class FileReviewLock implements ReviewLock {
     claimRootPath: string,
     target: LockOwner,
     claimant: LockOwner,
+    signal: AbortSignal,
   ): Promise<{ paths: string[] } | undefined> {
     const candidatePath = `${claimRootPath}.${claimant.pid}.${claimant.owner}.tmp`;
     const claim: StaleClaim = {
@@ -293,6 +335,7 @@ export class FileReviewLock implements ReviewLock {
 
       let generation = 0;
       for (;;) {
+        throwIfAborted(signal);
         const claimPath = generation === 0 ? claimRootPath : `${claimRootPath}.${generation}`;
         try {
           // Claim generations must be inspected and created in order.
@@ -323,7 +366,7 @@ export class FileReviewLock implements ReviewLock {
         if (existing !== undefined && sameOwner(existing.target, target)) {
           // Claim generations must be inspected in order.
           // eslint-disable-next-line no-await-in-loop
-          existingClaimantAlive = await this.#isOwnerAlive(existing.claimant);
+          existingClaimantAlive = await this.#isOwnerAlive(existing.claimant, signal);
         }
         if (
           existing === undefined ||
@@ -340,8 +383,8 @@ export class FileReviewLock implements ReviewLock {
     }
   }
 
-  async #isOwnerAlive(owner: LockOwner): Promise<boolean> {
-    const identity = await this.#inspectProcess(owner.pid);
+  async #isOwnerAlive(owner: LockOwner, signal: AbortSignal): Promise<boolean> {
+    const identity = await abortable(this.#inspectProcess(owner.pid, signal), signal);
     if (identity.kind === "missing") {
       return false;
     }
