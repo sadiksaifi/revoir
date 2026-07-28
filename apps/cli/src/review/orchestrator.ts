@@ -315,7 +315,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
           const postDraftSha = await github.getHeadSha(reference, signal);
           throwIfAborted(signal);
           if (postDraftSha === pullRequest.headSha) {
-            await pendingReview.submit(signal);
+            await pendingReview.submit(signal, terminalSignal);
             pendingReviewCleanup = undefined;
             result = {
               status: "findings",

@@ -14,7 +14,7 @@ export type ReviewReaction = "eyes" | "+1";
 export interface GitHubPendingReview {
   readonly id: number;
   delete(signal: AbortSignal): Promise<void>;
-  submit(signal: AbortSignal): Promise<void>;
+  submit(signal: AbortSignal, reconciliationSignal: AbortSignal): Promise<void>;
 }
 
 export interface GitHubReviewSession {
@@ -518,7 +518,7 @@ class InstallationSession implements GitHubReviewSession {
     return {
       id,
       delete: (deleteSignal) => this.#deletePendingReview(reference, id, deleteSignal),
-      submit: async (submitSignal) => {
+      submit: async (submitSignal, reconciliationSignal) => {
         let failure: unknown;
         try {
           const submitResponse = await this.#request(
@@ -542,7 +542,7 @@ class InstallationSession implements GitHubReviewSession {
           failure = error;
         }
 
-        const liveReview = await this.#getReview(reference, id, submitSignal);
+        const liveReview = await this.#getReview(reference, id, reconciliationSignal);
         if (
           liveReview.state.toUpperCase() !== "PENDING" &&
           liveReview.userLogin.toLowerCase() === this.#botLogin

@@ -222,7 +222,7 @@ describe("GitHub App review gateway", () => {
       new AbortController().signal,
     );
     assert.equal(submitted.id, 81);
-    await submitted.submit(new AbortController().signal);
+    await submitted.submit(new AbortController().signal, new AbortController().signal);
 
     const deleted = await session.createPendingReview(
       reference,
@@ -372,12 +372,14 @@ describe("GitHub App review gateway", () => {
       new AbortController().signal,
     );
     await assert.rejects(
-      () => pending.submit(new AbortController().signal),
+      () => pending.submit(new AbortController().signal, new AbortController().signal),
       /rejected the non-blocking review/u,
     );
   });
 
-  it("treats an ambiguous submit as successful when GitHub confirms publication", async () => {
+  it("reconciles a deadline-cancelled submit when GitHub confirms publication", async () => {
+    const submitController = new AbortController();
+    const reconciliationController = new AbortController();
     const fetchImplementation: FetchLike = async (input, init) => {
       const url = String(input);
       if (url.endsWith("/app")) {
@@ -390,9 +392,12 @@ describe("GitHub App review gateway", () => {
         return json({ id: 111 });
       }
       if (url.endsWith("/reviews/111/events") && init?.method === "POST") {
-        throw new Error("network failed after submission");
+        submitController.abort(new Error("deadline elapsed after submission"));
+        return json({ id: 111, state: "COMMENTED" });
       }
       if (url.endsWith("/reviews/111") && init?.method === undefined) {
+        assert.equal(init?.signal, reconciliationController.signal);
+        assert.equal(init.signal?.aborted, false);
         return json({
           id: 111,
           state: "COMMENTED",
@@ -415,7 +420,7 @@ describe("GitHub App review gateway", () => {
       publication,
       new AbortController().signal,
     );
-    await pending.submit(new AbortController().signal);
+    await pending.submit(submitController.signal, reconciliationController.signal);
   });
 
   it("treats only deleted and already-absent reaction responses as successful", async () => {

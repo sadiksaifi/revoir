@@ -121,7 +121,9 @@ function harness(
       | "completion-creation"
       | "review-creation";
     pendingCreationError?: Error;
+    pendingDeletionGate?: Promise<void>;
     pendingDeletionError?: Error;
+    pendingSubmissionRace?: boolean;
     pendingSubmissionError?: Error;
     reactionDeletionGate?: Promise<void>;
     reactionDeletionError?: Error;
@@ -238,12 +240,24 @@ function harness(
         id: 20,
         async delete() {
           events.push("delete-review-20");
+          await options.pendingDeletionGate;
           if (options.pendingDeletionError !== undefined) {
             throw options.pendingDeletionError;
           }
         },
-        async submit() {
+        async submit(submitSignal, reconciliationSignal) {
           events.push("submit-review-20");
+          if (options.pendingSubmissionRace === true) {
+            if (!submitSignal.aborted) {
+              await new Promise<void>((resolve) => {
+                submitSignal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            }
+            if (reconciliationSignal === undefined || reconciliationSignal.aborted) {
+              throw submitSignal.reason;
+            }
+            return;
+          }
           if (options.pendingSubmissionError !== undefined) {
             throw options.pendingSubmissionError;
           }
@@ -425,6 +439,43 @@ describe("clean review orchestrator", () => {
       "delete-review-20",
     ]);
     assert.equal(submission.events.includes("add-+1"), false);
+  });
+
+  it("reconciles a remotely submitted review after cancellation and releases the process lock", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-submit-race-lock-"));
+    let allowSubmittedDeletion: (() => void) | undefined;
+    const submittedDeletionGate = new Promise<void>((resolve) => {
+      allowSubmittedDeletion = resolve;
+    });
+    const first = harness({
+      reviewMs: 20,
+      lock: new FileReviewLock(stateDirectory),
+      pendingDeletionGate: submittedDeletionGate,
+      pendingSubmissionRace: true,
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+    const lockPath = join(stateDirectory, "manual-review.lock");
+
+    try {
+      const firstReview = first.orchestrator.review(reference);
+      await waitFor(
+        () => first.events.includes("submit-review-20"),
+        "review submission did not start",
+      );
+      await assert.rejects(firstReview, ReviewTimeoutError);
+      await waitFor(
+        () => fileIsMissing(lockPath),
+        "submitted-review reconciliation did not release the process lock",
+      );
+
+      assert.equal(first.events.includes("delete-review-20"), false);
+      assert.equal((await second.orchestrator.review(reference)).status, "clean");
+    } finally {
+      allowSubmittedDeletion?.();
+      await waitFor(() => fileIsMissing(lockPath), "test cleanup did not release the process lock");
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
   });
 
   it("removes the active reaction and publishes no completion for stale output", async () => {
