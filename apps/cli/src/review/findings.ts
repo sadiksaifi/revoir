@@ -224,23 +224,52 @@ function proseTokens(value: string): readonly string[] {
 
 interface AnchorToken {
   raw: string;
-  normalized: string;
+  key: string;
+  kind: "exact" | "lexical";
+}
+
+function unicodeCaseFold(value: string): string {
+  return value.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
+}
+
+function hasMixedCaseIdentity(value: string): boolean {
+  const casedLetters = [...value].filter(
+    (character) => character.toUpperCase() !== character.toLowerCase(),
+  );
+  const hasUpper = casedLetters.some((character) => character === character.toUpperCase());
+  const hasLower = casedLetters.some((character) => character === character.toLowerCase());
+  if (!hasUpper || !hasLower) {
+    return false;
+  }
+  const [first, ...rest] = casedLetters;
+  const isSentenceCapitalized =
+    first === first?.toUpperCase() &&
+    rest.every((character) => character === character.toLowerCase());
+  return !isSentenceCapitalized;
+}
+
+function typedAnchor(raw: string): AnchorToken {
+  const kind =
+    /[_$\p{N}]/u.test(raw) || hasMixedCaseIdentity(raw) ? ("exact" as const) : ("lexical" as const);
+  return {
+    raw,
+    kind,
+    key: kind === "exact" ? `exact:${raw}` : `lexical:${unicodeCaseFold(raw)}`,
+  };
 }
 
 function anchorTokens(value: string): readonly AnchorToken[] {
-  return (value.match(/[\p{L}\p{N}_$]+/gu) ?? [])
-    .map((raw) => ({
-      raw,
-      normalized: raw.normalize("NFC").toLocaleLowerCase("en-US"),
-    }))
-    .filter(
-      ({ raw, normalized }) =>
-        !NON_CONCRETE_ANCHORS.has(normalized) && (normalized.length >= 3 || /[_$\p{N}]/u.test(raw)),
+  return (value.match(/[\p{L}\p{M}\p{N}_$]+/gu) ?? []).map(typedAnchor).filter((anchor) => {
+    const comparison = anchor.kind === "lexical" ? anchor.key.slice("lexical:".length) : anchor.raw;
+    return (
+      (anchor.kind === "exact" || !NON_CONCRETE_ANCHORS.has(comparison)) &&
+      (comparison.length >= 3 || /[_$\p{N}]/u.test(anchor.raw))
     );
+  });
 }
 
 function anchorSet(value: string): ReadonlySet<string> {
-  return new Set(anchorTokens(value).map(({ normalized }) => normalized));
+  return new Set(anchorTokens(value).map(({ key }) => key));
 }
 
 function intersects(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
@@ -267,11 +296,8 @@ function validateFindingGrounding(finding: ModelFindingV1, path: string): void {
 
   const titleTokens = anchorTokens(finding.title);
   const titleGrounded =
-    titleTokens.length === 1
-      ? [...anchorTokens(`${finding.issue} ${finding.evidence}`)].some(
-          ({ raw }) => raw === titleTokens[0]?.raw,
-        )
-      : intersects(new Set(titleTokens.map(({ normalized }) => normalized)), observed);
+    intersects(new Set(titleTokens.map(({ key }) => key)), observed) &&
+    titleTokens.filter(({ kind }) => kind === "exact").every(({ key }) => observed.has(key));
   if (titleTokens.length === 0 || !titleGrounded) {
     throw new Error(`${path}.title must be grounded in observed technical evidence.`);
   }

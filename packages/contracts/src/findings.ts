@@ -77,7 +77,7 @@ function boundedString(
   if (value.includes("\u0000")) {
     throw new FindingSchemaError(`${path} contains an unsupported null byte.`);
   }
-  return value.normalize("NFC");
+  return value;
 }
 
 function hasOnlyUnicodeScalarValues(value: string): boolean {

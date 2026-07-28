@@ -722,6 +722,89 @@ describe("finding validation", () => {
     assert.equal(result.diagnostics[0]?.message.includes(disconnectedImpact), false);
   });
 
+  it("case-folds lexical anchors while preserving exact technical identities", async () => {
+    const decomposedCafe = "cafe\u0301";
+    const decomposedIdentifier = `${decomposedCafe}_queue`;
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          title: "Timeout",
+          issue: "The timeout expires before submission completes.",
+          impact: "The timeout leaves the submission slot occupied.",
+          evidence: "The timeout aborts the active submission request.",
+          fixDirection: "Bound the timeout around submission cleanup.",
+          range: null,
+        }),
+        finding({
+          title: "Café",
+          issue: `The ${decomposedCafe} parser truncates input.`,
+          impact: `The ${decomposedCafe} parser corrupts decoded input.`,
+          evidence: `The ${decomposedCafe} parser drops the final byte.`,
+          fixDirection: `Preserve the ${decomposedCafe} parser byte.`,
+          range: null,
+        }),
+        finding({
+          title: decomposedIdentifier,
+          issue: "The café_queue stalls.",
+          impact: "The stalled café_queue blocks submission.",
+          evidence: "The café_queue reacquires the lock.",
+          fixDirection: "Defer café_queue reacquisition.",
+          range: null,
+        }),
+        finding({
+          title: "Timeout Callback_Queue",
+          issue: "The timeout leaves callback_queue occupied.",
+          impact: "The timeout blocks callback_queue progress.",
+          evidence: "The timeout fires while callback_queue is active.",
+          fixDirection: "Release callback_queue after timeout.",
+          range: null,
+        }),
+        finding({
+          title: "$Queue",
+          issue: "The $queue stalls.",
+          impact: "The stalled $queue blocks submission.",
+          evidence: "The $queue reacquires the lock.",
+          fixDirection: "Defer $queue reacquisition.",
+          range: null,
+        }),
+        finding({
+          title: "QUEUE2",
+          issue: "The queue2 stalls.",
+          impact: "The stalled queue2 blocks submission.",
+          evidence: "The queue2 reacquires the lock.",
+          fixDirection: "Defer queue2 reacquisition.",
+          range: null,
+        }),
+        finding({
+          title: "requestQueue",
+          issue: "The requestqueue stalls.",
+          impact: "The stalled requestqueue blocks submission.",
+          evidence: "The requestqueue reacquires the lock.",
+          fixDirection: "Defer requestqueue reacquisition.",
+          range: null,
+        }),
+        finding({
+          title: "Implementation",
+          issue: "The signal implementation omits cancellation.",
+          impact: "The signal implementation retains the worker.",
+          evidence: "The signal implementation drops cancellation.",
+          fixDirection: "Pass cancellation through the signal implementation.",
+          range: null,
+        }),
+      ]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.deepEqual(
+      result.findings.map(({ title }) => title),
+      ["Timeout", "Café"],
+    );
+    assert.equal(result.diagnostics.length, 6);
+    for (const diagnostic of result.diagnostics) {
+      assert.match(diagnostic.message, /title must be grounded in observed technical evidence/u);
+    }
+  });
+
   it("applies every global prose policy to all five published fields", async () => {
     const fields = ["title", "issue", "impact", "evidence", "fixDirection"] as const;
     const policies = [
