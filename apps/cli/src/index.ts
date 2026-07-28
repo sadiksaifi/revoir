@@ -22,3 +22,37 @@ export {
   validateNodeRuntime,
 } from "./diagnostics.js";
 export { SecretRedactor } from "./redaction.js";
+export {
+  GitHubAppReviewGateway,
+  createGitHubAppJwt,
+  type GitHubReviewGateway,
+  type GitHubReviewSession,
+} from "./review/github.js";
+export {
+  CleanReviewOrchestrator,
+  createDefaultManualReviewService,
+  type ManualReviewResult,
+  type ManualReviewService,
+} from "./review/orchestrator.js";
+export {
+  PiReviewEngine,
+  SdkPiSessionFactory,
+  type PiSession,
+  type PiSessionFactory,
+  type ReviewEngine,
+} from "./review/pi.js";
+export {
+  assertPullRequestEligible,
+  parsePullRequestUrl,
+  PullRequestEligibilityError,
+  PullRequestUrlError,
+  type PullRequestReference,
+  type PullRequestSnapshot,
+} from "./review/pull-request.js";
+export {
+  GitWorkspacePreparer,
+  SystemCommandRunner,
+  type CommandRunner,
+  type PreparedWorkspace,
+  type WorkspacePreparer,
+} from "./review/workspace.js";
