@@ -583,10 +583,9 @@ index 1111111..2222222 100644
     assert.notEqual(result.findings[0]?.fingerprint, result.findings[1]?.fingerprint);
   });
 
-  it("uses a fixed structured fingerprint tuple with exact Unicode identity", () => {
+  it("uses a stable finding-identity fingerprint matrix across repeated reviews", () => {
     const base = finding() as unknown as ModelFindingV1;
     const fingerprint = findingFingerprint(base);
-    assert.equal(fingerprint, "8e8e6446b4a836e283ce962e682aa449d035fd966cf82ee4c4caf462902210be");
     assert.equal(
       findingFingerprint({
         anchor: base.anchor,
@@ -598,18 +597,24 @@ index 1111111..2222222 100644
       }),
       fingerprint,
     );
-    assert.notEqual(findingFingerprint({ ...base, path: "new-name.ts" }), fingerprint);
-    assert.notEqual(
+    assert.equal(findingFingerprint({ ...base }), fingerprint, "identical finding");
+    assert.equal(
       findingFingerprint({
         ...base,
-        range: { start: 2, end: 2, side: "RIGHT" },
+        range: { start: 20, end: 21, side: "LEFT" },
       }),
       fingerprint,
+      "moved finding",
     );
+    assert.equal(
+      findingFingerprint({ ...base, fixAction: "propagate" }),
+      fingerprint,
+      "changed remediation for the same defect",
+    );
+    assert.notEqual(findingFingerprint({ ...base, path: "new-name.ts" }), fingerprint);
     for (const changed of [
       { defectKind: "correctness" },
       { impactKind: "incorrect-result" },
-      { fixAction: "guard" },
       { anchor: "Const" },
       { anchor: "Straße" },
       { anchor: "STRASSE" },

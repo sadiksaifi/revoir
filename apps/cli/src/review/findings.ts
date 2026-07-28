@@ -228,12 +228,8 @@ export function findingFingerprint(
   const identity = JSON.stringify([
     FINDING_CONTRACT_VERSION,
     finding.path,
-    finding.range?.start ?? null,
-    finding.range?.end ?? null,
-    finding.range?.side ?? null,
     finding.defectKind,
     finding.impactKind,
-    finding.fixAction,
     finding.anchor,
   ]);
   return createHash("sha256").update(identity).digest("hex");
