@@ -1,0 +1,40 @@
+{
+  "action": "synchronize",
+  "number": 17,
+  "installation": {
+    "id": 8
+  },
+  "repository": {
+    "id": 99,
+    "name": "repository",
+    "full_name": "owner/repository",
+    "owner": {
+      "login": "owner"
+    }
+  },
+  "pull_request": {
+    "number": 17,
+    "state": "open",
+    "draft": false,
+    "user": {
+      "id": 42
+    },
+    "base": {
+      "sha": "1111111111111111111111111111111111111111",
+      "repo": {
+        "id": 99,
+        "full_name": "owner/repository"
+      }
+    },
+    "head": {
+      "sha": "2222222222222222222222222222222222222222",
+      "repo": {
+        "id": 99,
+        "full_name": "owner/repository"
+      }
+    }
+  },
+  "sender": {
+    "id": 42
+  }
+}

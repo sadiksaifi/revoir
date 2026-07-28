@@ -22,6 +22,14 @@ export {
   validateNodeRuntime,
 } from "./diagnostics.js";
 export { SecretRedactor } from "./redaction.js";
+export { CloudflareQueueClient, type QueueDelivery } from "./queue/client.js";
+export {
+  createDefaultQueueRunService,
+  QueueReviewRunner,
+  type QueueClient,
+  type QueueConsumption,
+  type QueueRunService,
+} from "./queue/runner.js";
 export {
   GitHubAppReviewGateway,
   createGitHubAppJwt,
@@ -46,6 +54,7 @@ export {
 export {
   CleanReviewOrchestrator,
   createDefaultManualReviewService,
+  type ManualReviewOptions,
   type ManualReviewResult,
   type ManualReviewService,
 } from "./review/orchestrator.js";

@@ -9,6 +9,7 @@ import { CLI_VERSION, runCli, type CliIo } from "../src/cli.js";
 import { resolveApplicationPaths } from "../src/config/paths.js";
 import { loadConfiguration } from "../src/config/store.js";
 import { createDefaultDiagnosticGateway, type DiagnosticGateway } from "../src/diagnostics.js";
+import type { QueueRunService } from "../src/queue/runner.js";
 import { FindingContractError, validateModelReviewOutput } from "../src/review/findings.js";
 import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
@@ -418,6 +419,60 @@ describe("CLI", () => {
     );
     assert.match(stderr.output, /canonical form/u);
     assert.equal(calls.length, 1);
+  });
+
+  it("runs the authenticated pull consumer without accepting review inputs", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+
+    let runs = 0;
+    const runService: QueueRunService = {
+      async run() {
+        runs += 1;
+      },
+    };
+    assert.equal(await runCli(["run"], { io, runService }), 0);
+    assert.equal(runs, 1);
+    assert.equal(stdout.output, "");
+
+    assert.equal(await runCli(["run", "unexpected"], { io, runService }), 2);
+    assert.match(stderr.output, /does not accept positional arguments/u);
+    assert.equal(runs, 1);
+
+    stderr.output = "";
+    assert.equal(await runCli(["run", "--json"], { io, runService }), 2);
+    assert.match(stderr.output, /--json is not supported/u);
+    assert.equal(runs, 1);
+  });
+
+  it("redacts pull-consumer failures", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    const failed: QueueRunService = {
+      async run() {
+        throw new Error("Cloudflare rejected cli-cloudflare-secret");
+      },
+    };
+
+    assert.equal(await runCli(["run"], { io, runService: failed }), 1);
+    assert.match(stderr.output, /\[REDACTED\]/u);
+    assert.doesNotMatch(stderr.output, /cli-cloudflare-secret/u);
   });
 
   it("classifies eligibility rejection separately and redacts review failures", async () => {

@@ -1,0 +1,32 @@
+{
+  "name": "@revoir/relay",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "format": "pnpm --workspace-root run format apps/relay",
+    "format:check": "pnpm --workspace-root run format:check apps/relay",
+    "lint": "pnpm --workspace-root run lint apps/relay",
+    "lint:fix": "pnpm --workspace-root run lint:fix apps/relay",
+    "prebuild": "pnpm --filter @revoir/contracts run build",
+    "pretest": "pnpm --filter cli run build",
+    "pretypecheck": "pnpm --filter cli run build",
+    "test": "node --test --import tsx 'test/**/*.test.ts'",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
+  },
+  "dependencies": {
+    "@revoir/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "cli": "workspace:*",
+    "esbuild": "0.28.1",
+    "miniflare": "4.20260722.0",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "wrangler": "4.114.0"
+  }
+}

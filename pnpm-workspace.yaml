@@ -4,6 +4,7 @@ packages:
 
 onlyBuiltDependencies:
   - esbuild
+  - workerd
 
 catalog:
   "@types/node": ^26.1.1

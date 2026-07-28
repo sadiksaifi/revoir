@@ -33,8 +33,15 @@ export type ManualReviewResult =
       diagnostics: readonly FindingDiagnostic[];
     };
 
+export interface ManualReviewOptions {
+  expectedHeadSha?: string;
+}
+
 export interface ManualReviewService {
-  review(reference: PullRequestReference): Promise<ManualReviewResult>;
+  review(
+    reference: PullRequestReference,
+    options?: ManualReviewOptions,
+  ): Promise<ManualReviewResult>;
 }
 
 export class ReviewTimeoutError extends Error {
@@ -201,7 +208,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     this.#workspaces = dependencies.workspaces;
   }
 
-  async review(reference: PullRequestReference): Promise<ManualReviewResult> {
+  async review(
+    reference: PullRequestReference,
+    options?: ManualReviewOptions,
+  ): Promise<ManualReviewResult> {
     const deadline = new ReviewDeadline(this.#configuration.timeouts.reviewMs);
     const acquisition = this.#lock.acquire(deadline.signal);
     let lease: Awaited<ReturnType<ReviewLock["acquire"]>>;
@@ -221,7 +231,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     }
 
     const finalization = this.#retainFinalization(
-      this.#finalizeReview(reference, deadline.signal, lease),
+      this.#finalizeReview(reference, options, deadline.signal, lease),
     );
     try {
       return await deadline.wait(finalization);
@@ -245,13 +255,14 @@ export class CleanReviewOrchestrator implements ManualReviewService {
 
   async #finalizeReview(
     reference: PullRequestReference,
+    options: ManualReviewOptions | undefined,
     signal: AbortSignal,
     lease: Awaited<ReturnType<ReviewLock["acquire"]>>,
   ): Promise<ManualReviewResult> {
     let result: ManualReviewResult | undefined;
     let failure: unknown;
     try {
-      result = await this.#reviewWithLease(reference, signal);
+      result = await this.#reviewWithLease(reference, options, signal);
     } catch (error) {
       failure = error;
     }
@@ -275,6 +286,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
 
   async #reviewWithLease(
     reference: PullRequestReference,
+    options: ManualReviewOptions | undefined,
     signal: AbortSignal,
   ): Promise<ManualReviewResult> {
     const terminalSignal = new AbortController().signal;
@@ -290,6 +302,17 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       const pullRequest = await github.getPullRequest(reference, signal);
       assertPullRequestEligible(reference, pullRequest, this.#configuration.github);
       throwIfAborted(signal);
+
+      if (
+        options?.expectedHeadSha !== undefined &&
+        options.expectedHeadSha !== pullRequest.headSha
+      ) {
+        return {
+          status: "stale",
+          reviewedSha: options.expectedHeadSha,
+          currentSha: pullRequest.headSha,
+        };
+      }
 
       const startingSha = await github.getHeadSha(reference, signal);
       throwIfAborted(signal);
