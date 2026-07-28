@@ -8,7 +8,7 @@ import { afterEach, describe, it } from "node:test";
 import { CLI_VERSION, runCli, type CliIo } from "../src/cli.js";
 import { resolveApplicationPaths } from "../src/config/paths.js";
 import { loadConfiguration } from "../src/config/store.js";
-import type { DiagnosticGateway } from "../src/diagnostics.js";
+import { createDefaultDiagnosticGateway, type DiagnosticGateway } from "../src/diagnostics.js";
 import { passingGateway, TEST_PRIVATE_KEY } from "./helpers.js";
 
 class CapturingWritable extends Writable {
@@ -227,6 +227,60 @@ describe("CLI", () => {
       1,
     );
     assert.match(stdout.output, /diagnostic-origin\.ts:42:7/u);
+    assert.doesNotMatch(stdout.output + stderr.output, /cli-cloudflare-secret/u);
+  });
+
+  it("reports the Queues write requirement for a read-only Cloudflare token", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const cloudflareGateway = createDefaultDiagnosticGateway(async (url) => {
+      if (url.endsWith("/messages/ack")) {
+        return {
+          ok: false,
+          status: 403,
+          async json() {
+            return { success: false };
+          },
+        };
+      }
+      const body = url.endsWith("/consumers")
+        ? {
+            success: true,
+            result: [{ consumer_id: "consumer", type: "http_pull" }],
+          }
+        : {
+            success: true,
+            result: {
+              queue_id: "queue",
+              queue_name: "review-jobs",
+              settings: { delivery_paused: false },
+            },
+          };
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return body;
+        },
+      };
+    });
+    const readOnlyGateway: DiagnosticGateway = {
+      ...passingGateway(),
+      checkCloudflare: cloudflareGateway.checkCloudflare,
+    };
+
+    assert.equal(await runCli(["diagnose"], { io, gateway: readOnlyGateway }), 1);
+    assert.match(stdout.output, /Queues Read and Queues Write.*rerun diagnostics/u);
     assert.doesNotMatch(stdout.output + stderr.output, /cli-cloudflare-secret/u);
   });
 

@@ -65,12 +65,14 @@ describe("diagnostic contracts", () => {
       url: string;
       method: string;
       authorization: string;
+      body: string | undefined;
     }> = [];
     const gateway = createDefaultDiagnosticGateway(async (url, init) => {
       requests.push({
         url,
         method: init?.method ?? "GET",
         authorization: init?.headers?.Authorization ?? "",
+        body: init?.body,
       });
 
       let body: unknown;
@@ -107,6 +109,11 @@ describe("diagnostic contracts", () => {
             },
           ],
         };
+      } else if (url.endsWith("/queues/queue/messages/ack")) {
+        body = {
+          success: true,
+          result: { ackCount: 0, retryCount: 0, warnings: {} },
+        };
       } else if (url.includes("api.cloudflare.com")) {
         body = {
           success: true,
@@ -140,18 +147,18 @@ describe("diagnostic contracts", () => {
     });
     assert.equal(
       await gateway.checkCloudflare(configuration.cloudflare),
-      "queue review-jobs, HTTP pull consumer consumer; token and resource access verified read-only. Queues Read and Queues Write grants remain required (live pull not attempted).",
+      "queue review-jobs, HTTP pull consumer consumer; token and pull acknowledgement access verified without leasing messages.",
     );
-    assert.equal(requests.length, 6);
+    assert.equal(requests.length, 7);
     assert.match(requests[0]?.authorization ?? "", /^Bearer [^.]+\.[^.]+\.[^.]+$/u);
     assert.equal(requests[1]?.method, "POST");
     assert.equal(requests[2]?.authorization, "Bearer installation-secret");
     assert.equal(requests[4]?.authorization, "Bearer cloudflare-secret-token");
     assert.equal(requests[5]?.authorization, "Bearer cloudflare-secret-token");
-    assert.equal(
-      requests.some((request) => request.url.includes("/messages/")),
-      false,
-    );
+    assert.equal(requests[6]?.authorization, "Bearer cloudflare-secret-token");
+    assert.equal(requests[6]?.method, "POST");
+    assert.match(requests[6]?.url ?? "", /\/messages\/ack$/u);
+    assert.deepEqual(JSON.parse(requests[6]?.body ?? ""), { acks: [], retries: [] });
   });
 
   it("reports every missing GitHub installation permission with an actionable fix", async () => {
@@ -277,6 +284,48 @@ describe("diagnostic contracts", () => {
     assert.equal(
       requestedUrls.some((url) => url.includes("/messages/")),
       false,
+    );
+  });
+
+  it("rejects a Queues Read-only token that cannot acknowledge pull messages", async () => {
+    const gateway = createDefaultDiagnosticGateway(async (url) => {
+      if (url.endsWith("/messages/ack")) {
+        return {
+          ok: false,
+          status: 403,
+          async json() {
+            return {
+              success: false,
+              errors: [{ code: 10000, message: "Authentication error" }],
+            };
+          },
+        };
+      }
+      const body = url.endsWith("/consumers")
+        ? {
+            success: true,
+            result: [{ consumer_id: "consumer", type: "http_pull" }],
+          }
+        : {
+            success: true,
+            result: {
+              queue_id: "queue",
+              queue_name: "review-jobs",
+              settings: { delivery_paused: false },
+            },
+          };
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return body;
+        },
+      };
+    });
+
+    await assert.rejects(
+      gateway.checkCloudflare(configuration.cloudflare),
+      /Queues Read and Queues Write.*rerun diagnostics/u,
     );
   });
 

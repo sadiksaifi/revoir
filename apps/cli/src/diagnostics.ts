@@ -7,6 +7,8 @@ import type { RevoirConfiguration } from "./config/schema.js";
 const execFile = promisify(execFileCallback);
 const GITHUB_API = "https://api.github.com";
 const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
+const CLOUDFLARE_PULL_ACKNOWLEDGEMENT_ERROR =
+  "Cloudflare Queue pull acknowledgement check failed. Grant Account > Queues > Edit (Queues Read and Queues Write) to this token for the configured account, then rerun diagnostics.";
 const REQUIRED_GITHUB_PERMISSIONS = {
   metadata: "read",
   contents: "read",
@@ -57,6 +59,7 @@ type FetchFunction = (
   init?: {
     method?: string;
     headers?: Readonly<Record<string, string>>;
+    body?: string;
   },
 ) => Promise<JsonResponse>;
 
@@ -293,6 +296,27 @@ export function createDefaultDiagnosticGateway(
         );
       }
 
+      let acknowledgementResponse: Record<string, unknown>;
+      try {
+        // Empty lists exercise the pull consumer's write-only acknowledgement endpoint
+        // without pulling, leasing, acknowledging, or retrying a real message.
+        acknowledgementResponse = await requestJson(
+          fetchImplementation,
+          "Cloudflare Queue pull acknowledgement",
+          `${queueUrl}/messages/ack`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ acks: [], retries: [] }),
+          },
+        );
+      } catch (error) {
+        throw new Error(CLOUDFLARE_PULL_ACKNOWLEDGEMENT_ERROR, { cause: error });
+      }
+      if (acknowledgementResponse.success !== true) {
+        throw new Error(CLOUDFLARE_PULL_ACKNOWLEDGEMENT_ERROR);
+      }
+
       const queueName =
         typeof result.queue_name === "string"
           ? result.queue_name
@@ -303,7 +327,7 @@ export function createDefaultDiagnosticGateway(
         typeof httpPullConsumer.consumer_id === "string" && httpPullConsumer.consumer_id !== ""
           ? httpPullConsumer.consumer_id
           : "configured";
-      return `queue ${queueName}, HTTP pull consumer ${consumerId}; token and resource access verified read-only. Queues Read and Queues Write grants remain required (live pull not attempted).`;
+      return `queue ${queueName}, HTTP pull consumer ${consumerId}; token and pull acknowledgement access verified without leasing messages.`;
     },
   };
 }
