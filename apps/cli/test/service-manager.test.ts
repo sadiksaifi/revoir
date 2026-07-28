@@ -189,4 +189,14 @@ describe("launchd service manager", () => {
     assert.deepEqual(operations, []);
     await assert.rejects(readFile(manager.plistFile, "utf8"), { code: "ENOENT" });
   });
+
+  it("reports an installed service as failed when its executable disappears", async () => {
+    const { executable, manager } = await createFixture();
+    await manager.install();
+    await rm(executable);
+
+    const status = await manager.status();
+    assert.equal(status.state, "failed");
+    assert.match(status.detail, /executable .* is unavailable or not executable/iu);
+  });
 });

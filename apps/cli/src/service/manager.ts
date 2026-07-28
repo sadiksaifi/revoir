@@ -220,6 +220,17 @@ export class LaunchdServiceManager {
     if (plistState !== "valid") {
       return { state: "failed", detail: plistState };
     }
+    try {
+      await validateExecutable(this.#executable);
+    } catch (error) {
+      return {
+        state: "failed",
+        detail:
+          error instanceof Error
+            ? error.message
+            : "The configured Revoir executable is unavailable.",
+      };
+    }
     if (inspection === undefined) {
       return {
         state: "stopped",
