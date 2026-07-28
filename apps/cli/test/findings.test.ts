@@ -86,7 +86,7 @@ new file mode 100644
 `;
 
 function finding(overrides: Record<string, unknown> = {}) {
-  return {
+  const candidate = {
     priority: "P1",
     title: "Cancellation is dropped",
     path: "source.ts",
@@ -98,6 +98,14 @@ function finding(overrides: Record<string, unknown> = {}) {
     fixDirection: "Pass the active cancellation signal to both calls.",
     ...overrides,
   };
+  if (
+    !Object.prototype.hasOwnProperty.call(overrides, "impact") &&
+    Object.prototype.hasOwnProperty.call(overrides, "issue") &&
+    typeof candidate.issue === "string"
+  ) {
+    candidate.impact = `${candidate.issue} This defect disrupts runtime processing.`;
+  }
+  return candidate;
 }
 
 function output(findings: readonly unknown[], extra: Record<string, unknown> = {}): string {
@@ -451,7 +459,7 @@ describe("finding validation", () => {
     const technicalFinding = finding({
       title: "Terminal status bypasses cancellation",
       issue: "The branch maps an unknown terminal status to success.",
-      impact: "No cancellation reaches the child process after that mapping.",
+      impact: "The terminal status mapping bypasses child-process cancellation.",
       evidence: "The terminal status branch returns success before cancellation.",
     });
     const result = await validateModelReviewOutput(
@@ -510,7 +518,7 @@ describe("finding validation", () => {
     const terseFinding = finding({
       title: "Lock",
       issue: "Lock reenters.",
-      impact: "Worker stalls.",
+      impact: "Lock stalls workers.",
       evidence: "Lock reacquires recursively.",
       fixDirection: "Defer lock reacquisition.",
     });
@@ -688,6 +696,32 @@ describe("finding validation", () => {
     }
   });
 
+  it("rejects disconnected impact before mixed-output publication", async () => {
+    const disconnectedImpact = "Everything remains correct PRIVATE_IMPACT_SOURCE.";
+    const result = await validateModelReviewOutput(
+      output([
+        finding(),
+        finding({
+          title: "Cancellation signal",
+          impact: disconnectedImpact,
+        }),
+      ]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.equal(result.findings.length, 1);
+    assert.deepEqual(result.diagnostics, [
+      {
+        index: 1,
+        code: "invalid",
+        message: "findings[1].impact must be grounded in observed technical evidence.",
+      },
+    ]);
+    const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
+    assert.equal(publication.includes(disconnectedImpact), false);
+    assert.equal(result.diagnostics[0]?.message.includes(disconnectedImpact), false);
+  });
+
   it("applies every global prose policy to all five published fields", async () => {
     const fields = ["title", "issue", "impact", "evidence", "fixDirection"] as const;
     const policies = [
@@ -755,7 +789,7 @@ describe("finding validation", () => {
         finding({
           title: "callback_queue stalls",
           issue: "callback_queue reenters.",
-          impact: "Worker stalls.",
+          impact: "callback_queue stalls workers.",
           evidence: "callback_queue reacquires lock.",
           fixDirection: "Defer callback_queue.",
         }),
@@ -808,7 +842,7 @@ describe("finding validation", () => {
         finding({
           priority: "P3",
           title: "Signal presentation differs",
-          impact: "Different impact wording.",
+          impact: "Different signal impact wording.",
           evidence: "Different cancellation signal evidence wording.",
           fixDirection: "Guard the call with the active signal.",
         }),

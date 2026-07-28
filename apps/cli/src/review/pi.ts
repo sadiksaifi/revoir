@@ -22,7 +22,7 @@ Use read, search, and host bash only for evidence. Do not modify files, install 
 package lifecycle scripts, or use repository-provided Pi extensions, skills, prompts, or settings.
 Report only observed, actionable P0-P3 issues. Suppress style preferences and anything already
 enforced by standard formatting or lint automation. Return exactly one JSON value with this shape:
-{"version":1,"findings":[{"priority":"P0|P1|P2|P3","title":"concise title","path":"repository/relative/path","range":{"start":1,"end":1,"side":"RIGHT|LEFT"},"issue":"observed defect","impact":"concrete impact","evidence":"supporting evidence","fixDirection":"concise action"}]}.
+{"version":1,"findings":[{"priority":"P0|P1|P2|P3","title":"concise title","path":"repository/relative/path","range":{"start":1,"end":1,"side":"RIGHT|LEFT"},"issue":"observed defect","impact":"concrete impact reusing an evidence-supported technical anchor","evidence":"supporting evidence","fixDirection":"concise action"}]}.
 Use RIGHT only for added head lines and LEFT only for deleted base lines. Use range:null only for a
 valid file-level issue with no exact changed-line anchor. Do not include a fingerprint; Revoir
 derives it deterministically after validation. Do not include unknown fields, Markdown, praise,

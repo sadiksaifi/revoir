@@ -255,9 +255,14 @@ function intersects(left: ReadonlySet<string>, right: ReadonlySet<string>): bool
 function validateFindingGrounding(finding: ModelFindingV1, path: string): void {
   const issue = anchorSet(finding.issue);
   const evidence = anchorSet(finding.evidence);
-  const observed = new Set([...issue, ...evidence]);
-  if (!intersects(issue, evidence)) {
+  const jointlyObserved = new Set([...issue].filter((anchor) => evidence.has(anchor)));
+  if (jointlyObserved.size === 0) {
     throw new Error(`${path}.issue and evidence must share a concrete technical anchor.`);
+  }
+  const observed = new Set([...issue, ...evidence]);
+
+  if (!intersects(anchorSet(finding.impact), jointlyObserved)) {
+    throw new Error(`${path}.impact must be grounded in observed technical evidence.`);
   }
 
   const titleTokens = anchorTokens(finding.title);

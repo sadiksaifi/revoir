@@ -618,4 +618,55 @@ describe("CLI", () => {
     assert.doesNotMatch(stderr.output, /PRIVATE_SOURCE_TOKEN/u);
     assert.equal(stdout.output, "");
   });
+
+  it("does not print disconnected model impact source text", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const modelImpact = "Everything remains correct PRIVATE_IMPACT_SOURCE.";
+    const allInvalid: ManualReviewService = {
+      async review() {
+        await validateModelReviewOutput(
+          JSON.stringify({
+            version: 1,
+            findings: [
+              {
+                priority: "P1",
+                title: "Cancellation signal",
+                path: "source.ts",
+                range: null,
+                issue: "The cancellation signal is not forwarded.",
+                impact: modelImpact,
+                evidence: "The changed call omits the cancellation signal argument.",
+                fixDirection: "Pass the cancellation signal to the call.",
+              },
+            ],
+          }),
+          { checkout: root, diff: "" },
+        );
+        throw new Error("Expected disconnected impact to be rejected.");
+      },
+    };
+
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: allInvalid,
+      }),
+      1,
+    );
+    assert.match(stderr.output, /impact must be grounded in observed technical evidence/u);
+    assert.doesNotMatch(stderr.output, new RegExp(modelImpact, "u"));
+    assert.doesNotMatch(stderr.output, /PRIVATE_IMPACT_SOURCE/u);
+    assert.equal(stdout.output, "");
+  });
 });
