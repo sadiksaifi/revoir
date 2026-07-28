@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { promisify } from "node:util";
 
 import type { ModelFindingV1 } from "@revoir/contracts";
 
@@ -12,6 +14,8 @@ import {
   validateModelReviewOutput,
 } from "../src/review/findings.js";
 import { createReviewPublication } from "../src/review/publication.js";
+
+const execFileAsync = promisify(execFile);
 
 const DIFF = `diff --git a/source.ts b/source.ts
 index 1111111..2222222 100644
@@ -54,6 +58,30 @@ old mode 100644
 new mode 100755
 `;
 
+const GIT_TREE_DIFF = `${DIFF}diff --git a/symlink.ts b/symlink.ts
+new file mode 120000
+index 0000000..7777777
+--- /dev/null
++++ b/symlink.ts
+@@ -0,0 +1 @@
++source.ts
+diff --git a/vendor b/vendor
+index 8888888..9999999 160000
+--- a/vendor
++++ b/vendor
+@@ -1 +1 @@
+-Subproject commit 1111111111111111111111111111111111111111
++Subproject commit 2222222222222222222222222222222222222222
+diff --git a/directory b/directory
+index aaaaaaa..bbbbbbb 040000
+diff --git a/literal[1].ts b/literal[1].ts
+new file mode 100644
+--- /dev/null
++++ b/literal[1].ts
+@@ -0,0 +1 @@
++literal
+`;
+
 function finding(overrides: Record<string, unknown> = {}) {
   return {
     priority: "P1",
@@ -83,8 +111,31 @@ describe("finding validation", () => {
       writeFile(join(checkout, "logo.png"), Buffer.from([0, 1, 2])),
       writeFile(join(checkout, "mode.sh"), "#!/bin/sh\n"),
       writeFile(join(checkout, "outside.ts"), "unchanged\n"),
-      mkdir(join(checkout, "directory")),
+      writeFile(join(checkout, "literal[1].ts"), "literal\n"),
+      mkdir(join(checkout, "directory")).then(() =>
+        writeFile(join(checkout, "directory", "nested.ts"), "nested\n"),
+      ),
+      symlink("source.ts", join(checkout, "symlink.ts")),
     ]);
+    await execFileAsync("git", ["init", "--quiet"], { cwd: checkout });
+    await execFileAsync("git", ["config", "user.name", "Revoir Test"], { cwd: checkout });
+    await execFileAsync("git", ["config", "user.email", "revoir@example.test"], {
+      cwd: checkout,
+    });
+    await execFileAsync("git", ["add", "--all"], { cwd: checkout });
+    await execFileAsync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: checkout });
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+      cwd: checkout,
+      encoding: "utf8",
+    });
+    await execFileAsync(
+      "git",
+      ["update-index", "--add", "--cacheinfo", `160000,${stdout.trim()},vendor`],
+      { cwd: checkout },
+    );
+    await execFileAsync("git", ["commit", "--quiet", "-m", "add gitlink"], {
+      cwd: checkout,
+    });
   });
 
   after(async () => {
@@ -213,6 +264,71 @@ describe("finding validation", () => {
         FindingContractError,
       );
     }
+  });
+
+  it("validates exact reviewed-head Git tree entry types including an uninitialized gitlink", async () => {
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          path: "source.ts",
+          range: null,
+          issue: "The regular file initializes the shared resource before validation.",
+        }),
+        finding({
+          path: "symlink.ts",
+          range: null,
+          issue: "The symlink redirects review consumers to the changed implementation.",
+        }),
+        finding({
+          path: "vendor",
+          range: null,
+          issue: "The gitlink advances to a revision without the required compatibility fix.",
+        }),
+        finding({
+          path: "literal[1].ts",
+          range: null,
+          issue: "The literal bracket path initializes the shared resource before validation.",
+        }),
+        finding({
+          path: "directory",
+          range: null,
+          issue: "The directory entry does not identify a publishable file.",
+        }),
+        finding({
+          path: "missing.ts",
+          range: null,
+          issue: "The missing entry does not exist in the reviewed head tree.",
+        }),
+        finding({
+          path: "deleted.ts",
+          range: null,
+          issue: "The deleted file removes the only validation before persistence.",
+        }),
+      ]),
+      { checkout, diff: GIT_TREE_DIFF },
+    );
+
+    assert.equal(result.findings.length, 5);
+    assert.deepEqual(
+      result.findings.map(({ path, attachment: findingAttachment }) => ({
+        path,
+        attachment: findingAttachment,
+      })),
+      [
+        { path: "source.ts", attachment: { kind: "file", path: "source.ts" } },
+        { path: "symlink.ts", attachment: { kind: "file", path: "symlink.ts" } },
+        { path: "vendor", attachment: { kind: "file", path: "vendor" } },
+        { path: "literal[1].ts", attachment: { kind: "file", path: "literal[1].ts" } },
+        { path: "deleted.ts", attachment: { kind: "file", path: "deleted.ts" } },
+      ],
+    );
+    assert.deepEqual(
+      result.diagnostics.map(({ index, message }) => ({ index, message })),
+      [
+        { index: 4, message: "path does not identify a file in the reviewed head." },
+        { index: 5, message: "path does not exist in the reviewed head." },
+      ],
+    );
   });
 
   it("rejects context, wrong-side, gapped, and binary line ranges", async () => {

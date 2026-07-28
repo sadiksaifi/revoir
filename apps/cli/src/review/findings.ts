@@ -1,6 +1,7 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat } from "node:fs/promises";
 import { isAbsolute, join, normalize, posix, relative, sep } from "node:path";
+import { promisify } from "node:util";
 
 import {
   FINDING_CONTRACT_VERSION,
@@ -98,6 +99,7 @@ const PROSE_POLICIES: Record<ProseField, ProsePolicy> = {
 };
 
 const PROSE_FIELDS = Object.keys(PROSE_POLICIES) as readonly ProseField[];
+const execFileAsync = promisify(execFile);
 
 export class FindingContractError extends Error {
   readonly diagnostics: readonly FindingDiagnostic[];
@@ -204,17 +206,68 @@ async function validatePath(
   if (file.newPath === undefined) {
     return;
   }
-  try {
-    const metadata = await lstat(candidate);
-    if (!metadata.isFile() && !metadata.isSymbolicLink()) {
-      throw new Error("path does not identify a file in the reviewed head.");
-    }
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      throw new Error("path does not exist in the reviewed head.", { cause: error });
-    }
-    throw error;
+  const entry = await reviewedHeadEntry(checkout, finding.path);
+  if (entry === undefined) {
+    throw new Error("path does not exist in the reviewed head.");
   }
+  if (entry.type === "blob" || (entry.mode === "160000" && entry.type === "commit")) {
+    return;
+  }
+  throw new Error("path does not identify a file in the reviewed head.");
+}
+
+interface GitTreeEntry {
+  mode: string;
+  type: string;
+}
+
+async function reviewedHeadEntry(
+  checkout: string,
+  repositoryPath: string,
+): Promise<GitTreeEntry | undefined> {
+  let stdout: Buffer;
+  try {
+    ({ stdout } = await execFileAsync(
+      "git",
+      ["-C", checkout, "ls-tree", "-z", "--full-tree", "HEAD", "--", `:(literal)${repositoryPath}`],
+      { encoding: "buffer" },
+    ));
+  } catch (error) {
+    throw new Error("The reviewed head Git tree could not be inspected.", { cause: error });
+  }
+
+  const expectedPath = Buffer.from(repositoryPath);
+  let offset = 0;
+  while (offset < stdout.length) {
+    const terminator = stdout.indexOf(0, offset);
+    if (terminator < 0) {
+      throw new Error("The reviewed head Git tree returned malformed output.");
+    }
+    const record = stdout.subarray(offset, terminator);
+    const separator = record.indexOf(9);
+    if (separator < 0) {
+      throw new Error("The reviewed head Git tree returned malformed output.");
+    }
+    if (record.subarray(separator + 1).equals(expectedPath)) {
+      const [mode, type, objectId, extra] = record
+        .subarray(0, separator)
+        .toString("ascii")
+        .split(" ");
+      if (
+        mode === undefined ||
+        type === undefined ||
+        objectId === undefined ||
+        extra !== undefined ||
+        !/^[0-7]{6}$/u.test(mode) ||
+        !/^[0-9a-f]{40,64}$/u.test(objectId)
+      ) {
+        throw new Error("The reviewed head Git tree returned malformed output.");
+      }
+      return { mode, type };
+    }
+    offset = terminator + 1;
+  }
+  return undefined;
 }
 
 function canonicalText(value: string): string {
