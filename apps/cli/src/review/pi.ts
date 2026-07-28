@@ -116,6 +116,7 @@ const DENIED_REVIEW_COMMANDS = [
   /(?:^|[\s;&|()'"`])(?:(?:python(?:3(?:\.[0-9]+)?)?\s+-m\s+pip)|pip[0-9.]*)(?:\s+install)(?=[\s;&|()'"`]|$)/u,
   /(?:^|[\s;&|()'"`])(?:uv\s+(?:add|pip|sync)|cargo\s+install|gem\s+install|bundle\s+(?:install|update)|composer\s+(?:install|require|update)|go\s+get)(?=[\s;&|()'"`]|$)/u,
   /(?:^|[\s;&|()'"`])(?:[^\s;&|()'"`]+\/)*gh(?=[\s;&|()'"`]|$)/u,
+  /(?:^|[\s;&|()'"`])(?:[^\s;&|()'"`]+\/)*(?:bash|dash|fish|ksh|sh|zsh)(?=[\s;&|()'"`]|$)/u,
 ];
 
 const MAX_BRACE_VARIANTS = 256;

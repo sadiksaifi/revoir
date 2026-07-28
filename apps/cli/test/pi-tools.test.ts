@@ -142,11 +142,13 @@ describe("Pi review isolation", () => {
         "p{n..n}pm install",
         "/bin/bash -c '{pnpm,install}'",
         `printf '%s' "'" ; {pnpm,install}`,
+        "printf '\\160\\156\\160\\155 install\\n' | bash",
+        "printf '%s' cG5wbSBpbnN0YWxsCg== | base64 -d | sh",
       ];
       const delegate = createLocalBashOperations();
       const options = {
         onData() {},
-        env: { PATH: bin },
+        env: { PATH: `${bin}:/usr/bin:/bin` },
       };
 
       for (const command of denied) {
