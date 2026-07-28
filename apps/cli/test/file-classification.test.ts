@@ -85,4 +85,48 @@ describe("review file classification", () => {
       });
     }
   });
+
+  it("uses semantic lock basenames without excluding similarly named authored files", () => {
+    const lockPaths = [
+      "packages.lock.json",
+      "src/packages.LOCK.JSON",
+      "pubspec.lock",
+      "npm-shrinkwrap.json",
+      "gradle.lockfile",
+      "cache.lockb",
+      "dependency-lock.yaml",
+      "workspace_lock.yml",
+      "lock.json",
+      "shrinkwrap.yaml",
+    ];
+    for (const path of lockPaths) {
+      assert.deepEqual(classifyReviewFile(path), {
+        path,
+        category: "lock",
+        detailedReview: false,
+        supportingEvidence: true,
+      });
+    }
+
+    const sourcePaths = [
+      "clock.json",
+      "locksmith.json",
+      "lockstep.yaml",
+      "deadlock-analysis.json",
+      "catalog.locked",
+      "lock.ts",
+      "package-lock.xml",
+      "package-lock.json.example",
+      "yarn.lock.backup",
+      "README.lock.md",
+    ];
+    for (const path of sourcePaths) {
+      assert.deepEqual(classifyReviewFile(path), {
+        path,
+        category: "source",
+        detailedReview: true,
+        supportingEvidence: true,
+      });
+    }
+  });
 });

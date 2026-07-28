@@ -66,6 +66,12 @@ new file mode 100644
 +++ b/dist/app.min.js
 @@ -0,0 +1 @@
 +minified
+diff --git a/packages.lock.json b/packages.lock.json
+new file mode 100644
+--- /dev/null
++++ b/packages.lock.json
+@@ -0,0 +1 @@
++{"version":1}
 `;
 
 const GIT_TREE_DIFF = `${DIFF}diff --git a/symlink.ts b/symlink.ts
@@ -140,6 +146,7 @@ describe("finding validation", () => {
       writeFile(join(checkout, "logo.png"), Buffer.from([0, 1, 2])),
       writeFile(join(checkout, "mode.sh"), "#!/bin/sh\n"),
       writeFile(join(checkout, "outside.ts"), "unchanged\n"),
+      writeFile(join(checkout, "packages.lock.json"), '{"version":1}\n'),
       writeFile(join(checkout, "literal[1].ts"), "literal\n"),
       writeFile(join(checkout, NFD_PATH), "decomposed\n"),
       writeFile(join(checkout, LITERAL_SPACE_PATH), "literal space\n"),
@@ -339,6 +346,33 @@ describe("finding validation", () => {
       (error: unknown) => {
         assert.ok(error instanceof FindingContractError);
         assert.match(error.diagnostics[0]?.message ?? "", /excluded from detailed review/u);
+        return true;
+      },
+    );
+  });
+
+  it("rejects findings against lockfiles recognized by semantic basename rules", async () => {
+    await assert.rejects(
+      () =>
+        validateModelReviewOutput(
+          output([
+            finding({
+              path: "packages.lock.json",
+              range: { start: 1, end: 1, side: "RIGHT" },
+              anchor: "version",
+            }),
+          ]),
+          { checkout, diff: DIFF },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof FindingContractError);
+        assert.deepEqual(error.diagnostics, [
+          {
+            index: 0,
+            code: "invalid",
+            message: "path is excluded from detailed review by the fixed file policy.",
+          },
+        ]);
         return true;
       },
     );

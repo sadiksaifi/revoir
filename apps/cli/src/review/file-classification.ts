@@ -29,23 +29,12 @@ const MANIFEST_NAMES = new Set([
   "pyproject.toml",
 ]);
 
-const LOCK_NAMES = new Set([
-  "bun.lock",
-  "bun.lockb",
-  "cargo.lock",
-  "composer.lock",
-  "deno.lock",
-  "gemfile.lock",
+const LOCK_NAME_EXCEPTIONS = new Set([
   "go.sum",
   "go.work.sum",
-  "package-lock.json",
+  "npm-shrinkwrap.json",
   "package.resolved",
-  "pipfile.lock",
-  "pnpm-lock.yaml",
-  "podfile.lock",
-  "poetry.lock",
-  "uv.lock",
-  "yarn.lock",
+  "shrinkwrap.yaml",
 ]);
 
 const GENERATED_DIRECTORIES = new Set([
@@ -88,6 +77,14 @@ function isManifest(name: string): boolean {
   );
 }
 
+function isLock(name: string): boolean {
+  return (
+    LOCK_NAME_EXCEPTIONS.has(name) ||
+    /\.(?:lock|lockb|lockfile)$/u.test(name) ||
+    /(?:^|[._-])lock\.(?:json|ya?ml)$/u.test(name)
+  );
+}
+
 function isGeneratorSource(pathSegments: readonly string[], name: string): boolean {
   return (
     pathSegments.some((segment) => segment === "generator" || segment === "generators") ||
@@ -103,7 +100,7 @@ export function classifyReviewFile(path: string): ReviewFileClassification {
   if (isManifest(name)) {
     return classification(path, "manifest", true);
   }
-  if (LOCK_NAMES.has(name)) {
+  if (isLock(name)) {
     return classification(path, "lock", false, true);
   }
   if (segments.some((segment) => VENDORED_DIRECTORIES.has(segment))) {
