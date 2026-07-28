@@ -11,7 +11,10 @@ import type {
   GitHubReviewSession,
   ReviewReaction,
 } from "../src/review/github.js";
-import { ReviewSubmissionUncertainError } from "../src/review/github.js";
+import {
+  PendingReviewUncertainError,
+  ReviewSubmissionUncertainError,
+} from "../src/review/github.js";
 import { FileReviewLock, ReviewInProgressError, type ReviewLock } from "../src/review/lock.js";
 import { CleanReviewOrchestrator, ReviewTimeoutError } from "../src/review/orchestrator.js";
 import {
@@ -124,6 +127,7 @@ function harness(
     pendingCreationError?: Error;
     pendingDeletionGate?: Promise<void>;
     pendingDeletionError?: Error;
+    pendingDeletionErrorAttempts?: number;
     pendingSubmissionRace?: boolean;
     pendingSubmissionStarted?: () => void;
     pendingSubmissionError?: Error;
@@ -153,6 +157,10 @@ function harness(
     options.workspaceCleanupError === undefined
       ? 0
       : (options.workspaceCleanupErrorAttempts ?? Number.POSITIVE_INFINITY);
+  let pendingDeletionFailures =
+    options.pendingDeletionError === undefined
+      ? 0
+      : (options.pendingDeletionErrorAttempts ?? Number.POSITIVE_INFINITY);
   const ownedReactions = new Set<ReviewReaction>();
   const session: GitHubReviewSession = {
     installationToken: "installation-secret",
@@ -247,7 +255,8 @@ function harness(
         async delete() {
           events.push("delete-review-20");
           await options.pendingDeletionGate;
-          if (options.pendingDeletionError !== undefined) {
+          if (options.pendingDeletionError !== undefined && pendingDeletionFailures > 0) {
+            pendingDeletionFailures -= 1;
             throw options.pendingDeletionError;
           }
           options.pendingReviewState?.delete(20);
@@ -548,6 +557,30 @@ describe("clean review orchestrator", () => {
       await waitFor(() => fileIsMissing(lockPath), "test cleanup did not release the process lock");
       await rm(stateDirectory, { recursive: true, force: true });
     }
+  });
+
+  it("disarms uncertain exact-review cleanup and releases the lease for a second run", async (context) => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-pending-fence-lock-"));
+    context.after(async () => {
+      await rm(stateDirectory, { recursive: true, force: true });
+    });
+    const first = harness({
+      lock: new FileReviewLock(stateDirectory),
+      mutateHeadDuring: "review-creation",
+      pendingDeletionError: new PendingReviewUncertainError(),
+      pendingDeletionErrorAttempts: 1,
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+    const lockPath = join(stateDirectory, "manual-review.lock");
+
+    await assert.rejects(() => first.orchestrator.review(reference), PendingReviewUncertainError);
+    await waitFor(
+      () => fileIsMissing(lockPath),
+      "uncertain exact-review cleanup retained the process lock",
+    );
+    assert.equal(first.events.filter((event) => event === "delete-review-20").length, 1);
+    assert.equal((await second.orchestrator.review(reference)).status, "clean");
   });
 
   it("removes the active reaction and publishes no completion for stale output", async () => {

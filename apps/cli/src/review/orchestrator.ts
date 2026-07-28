@@ -2,6 +2,7 @@ import type { RevoirConfiguration } from "../config/schema.js";
 import type { FindingDiagnostic } from "./findings.js";
 import {
   GitHubAppReviewGateway,
+  PendingReviewUncertainError,
   ReviewSubmissionUncertainError,
   type GitHubReviewGateway,
 } from "./github.js";
@@ -139,6 +140,39 @@ async function completeTerminal(operation: TerminalHandle): Promise<Error[]> {
       // eslint-disable-next-line no-await-in-loop
       await terminalBackoff(attempts);
     }
+  }
+}
+
+async function completePendingReview(operation: TerminalHandle): Promise<Error[]> {
+  const failures: Error[] = [];
+  let attempts = 0;
+  for (;;) {
+    try {
+      // Pending-review attempts remain serialized, but typed uncertainty is terminal.
+      // eslint-disable-next-line no-await-in-loop
+      await operation();
+      return failures;
+    } catch (error) {
+      const failure = asError(error);
+      if (failure instanceof PendingReviewUncertainError) {
+        return [failure];
+      }
+      if (failures.length === 0) {
+        failures.push(failure);
+      }
+      attempts += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await terminalBackoff(attempts);
+    }
+  }
+}
+
+function throwCleanupFailures(failures: readonly Error[], message: string): void {
+  if (failures.length === 1 && failures[0] instanceof PendingReviewUncertainError) {
+    throw failures[0];
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, message);
   }
 }
 
@@ -339,14 +373,9 @@ export class CleanReviewOrchestrator implements ManualReviewService {
               diagnostics: engineResult.diagnostics,
             };
           } else {
-            const pendingReviewFailures = await completeTerminal(pendingReviewCleanup);
+            const pendingReviewFailures = await completePendingReview(pendingReviewCleanup);
             pendingReviewCleanup = undefined;
-            if (pendingReviewFailures.length > 0) {
-              throw new AggregateError(
-                pendingReviewFailures,
-                "Pending review cleanup required retries.",
-              );
-            }
+            throwCleanupFailures(pendingReviewFailures, "Pending review cleanup required retries.");
             result = {
               status: "stale",
               reviewedSha: pullRequest.headSha,
@@ -404,7 +433,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       workspaceCleanup = undefined;
     }
     if (pendingReviewCleanup !== undefined) {
-      cleanupFailures.push(...(await completeTerminal(pendingReviewCleanup)));
+      cleanupFailures.push(...(await completePendingReview(pendingReviewCleanup)));
       pendingReviewCleanup = undefined;
     }
     if (activeReaction !== undefined) {
@@ -419,9 +448,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
         "Review failed and cleanup also encountered errors.",
       );
     }
-    if (cleanupFailures.length > 0) {
-      throw new AggregateError(cleanupFailures, "Review cleanup failed.");
-    }
+    throwCleanupFailures(cleanupFailures, "Review cleanup failed.");
     if (result === undefined) {
       throw new Error("Review ended without a result.");
     }
