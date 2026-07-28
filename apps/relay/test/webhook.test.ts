@@ -58,9 +58,7 @@ function signedRequest(
     "X-GitHub-Event": options.event ?? "pull_request",
   });
   const deliveryId =
-    options.deliveryId === undefined
-      ? "2f5f7475-33ee-4f91-9b68-0f8af72f6640"
-      : options.deliveryId;
+    options.deliveryId === undefined ? "2f5f7475-33ee-4f91-9b68-0f8af72f6640" : options.deliveryId;
   if (deliveryId !== null) {
     headers.set("X-GitHub-Delivery", deliveryId);
   }
@@ -138,6 +136,8 @@ describe("GitHub webhook relay", () => {
     ];
 
     for (const request of cases) {
+      // Keep each single-use request and its assertion together.
+      // eslint-disable-next-line no-await-in-loop
       assert.equal((await worker.fetch(request, environment(messages))).status, 401);
     }
     assert.deepEqual(messages, []);
@@ -148,15 +148,13 @@ describe("GitHub webhook relay", () => {
     const worker = createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z"));
     const payload = await fixture();
     for (const action of ["opened", "reopened", "ready_for_review", "synchronize"]) {
-      assert.equal(
-        (
-          await worker.fetch(
-            signedRequest(JSON.stringify({ ...payload, action })),
-            environment(messages),
-          )
-        ).status,
-        202,
+      // Preserve action enqueue order in the shared fixture queue.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await worker.fetch(
+        signedRequest(JSON.stringify({ ...payload, action })),
+        environment(messages),
       );
+      assert.equal(response.status, 202);
     }
     assert.deepEqual(
       messages.map((message) => message.action),
@@ -172,6 +170,8 @@ describe("GitHub webhook relay", () => {
       new Request("https://relay.example/other", { method: "POST" }),
     ];
     for (const request of ignored) {
+      // Consume each single-use request against the same observed queue.
+      // eslint-disable-next-line no-await-in-loop
       await worker.fetch(request, environment(messages));
     }
     assert.equal(messages.length, 4);
@@ -226,15 +226,13 @@ describe("GitHub webhook relay", () => {
 
     for (const payload of rejected) {
       const messages: ReviewJobV1[] = [];
-      assert.equal(
-        (
-          await worker.fetch(
-            signedRequest(JSON.stringify(payload)),
-            environment(messages),
-          )
-        ).status,
-        202,
+      // Isolate one policy violation per request and queue.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await worker.fetch(
+        signedRequest(JSON.stringify(payload)),
+        environment(messages),
       );
+      assert.equal(response.status, 202);
       assert.deepEqual(messages, []);
     }
   });

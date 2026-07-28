@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "revoir-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-22",
+  "queues": {
+    "producers": [
+      {
+        "binding": "REVIEW_QUEUE",
+        "queue": "revoir-review-jobs",
+      },
+    ],
+  },
+  "vars": {
+    "GITHUB_USER_ID": "replace-with-github-user-id",
+    "GITHUB_REPOSITORIES": "[]",
+  },
+}

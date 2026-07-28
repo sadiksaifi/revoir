@@ -157,10 +157,7 @@ function createReviewJob(
   }
 
   const action = payload.action;
-  if (
-    typeof action !== "string" ||
-    !(REVIEW_JOB_ACTIONS as readonly string[]).includes(action)
-  ) {
+  if (typeof action !== "string" || !(REVIEW_JOB_ACTIONS as readonly string[]).includes(action)) {
     return undefined;
   }
   const configuredRepository = repositoryPolicy(repository, policy);

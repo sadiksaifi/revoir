@@ -22,7 +22,10 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "esbuild": "0.28.1",
+    "miniflare": "4.20260722.0",
     "tsx": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "wrangler": "4.114.0"
   }
 }
