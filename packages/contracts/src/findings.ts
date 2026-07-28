@@ -59,25 +59,37 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], path
   }
 }
 
+function contractString(value: unknown, path: string): string {
+  if (typeof value !== "string") {
+    throw new FindingSchemaError(`${path} must be a string.`);
+  }
+  if (!hasOnlyUnicodeScalarValues(value)) {
+    throw new FindingSchemaError(`${path} must contain only Unicode scalar values.`);
+  }
+  return value;
+}
+
 function boundedString(
   value: unknown,
   path: string,
   maximum: number,
   options: { singleLine?: boolean } = {},
 ): string {
-  if (typeof value !== "string") {
-    throw new FindingSchemaError(`${path} must be a string.`);
-  }
-  if (value.length === 0 || value.length > maximum || value.trim() !== value) {
+  const stringValue = contractString(value, path);
+  if (
+    stringValue.length === 0 ||
+    stringValue.length > maximum ||
+    stringValue.trim() !== stringValue
+  ) {
     throw new FindingSchemaError(`${path} must contain 1-${maximum} trimmed characters.`);
   }
-  if (options.singleLine && /[\r\n]/u.test(value)) {
+  if (options.singleLine && /[\r\n]/u.test(stringValue)) {
     throw new FindingSchemaError(`${path} must be a single line.`);
   }
-  if (value.includes("\u0000")) {
+  if (stringValue.includes("\u0000")) {
     throw new FindingSchemaError(`${path} contains an unsupported null byte.`);
   }
-  return value;
+  return stringValue;
 }
 
 function hasOnlyUnicodeScalarValues(value: string): boolean {
@@ -97,19 +109,17 @@ function hasOnlyUnicodeScalarValues(value: string): boolean {
 }
 
 function findingPath(value: unknown, path: string): string {
-  if (typeof value !== "string") {
-    throw new FindingSchemaError(`${path} must be a string.`);
-  }
-  if (value.length === 0 || value.length > 1024) {
+  const stringValue = contractString(value, path);
+  if (stringValue.length === 0 || stringValue.length > 1024) {
     throw new FindingSchemaError(`${path} must contain 1-1024 characters.`);
   }
-  if (value.includes("\u0000")) {
+  if (stringValue.includes("\u0000")) {
     throw new FindingSchemaError(`${path} contains an unsupported null byte.`);
   }
-  if (/[\r\n]/u.test(value) || !hasOnlyUnicodeScalarValues(value)) {
+  if (/[\r\n]/u.test(stringValue)) {
     throw new FindingSchemaError(`${path} contains unsupported path characters.`);
   }
-  return value;
+  return stringValue;
 }
 
 function positiveInteger(value: unknown, path: string): number {
@@ -133,10 +143,11 @@ function parseRange(value: unknown, path: string): FindingRangeV1 | null {
   if (end - start > 49) {
     throw new FindingSchemaError(`${path} may span at most 50 lines.`);
   }
-  if (range.side !== "LEFT" && range.side !== "RIGHT") {
+  const side = contractString(range.side, `${path}.side`);
+  if (side !== "LEFT" && side !== "RIGHT") {
     throw new FindingSchemaError(`${path}.side must be LEFT or RIGHT.`);
   }
-  return { start, end, side: range.side };
+  return { start, end, side };
 }
 
 export function parseModelReviewOutput(value: string): ModelReviewOutputV1 {
@@ -148,6 +159,9 @@ export function parseModelReviewOutput(value: string): ModelReviewOutputV1 {
   }
   const envelope = record(parsed, "review output");
   exactKeys(envelope, ["version", "findings"], "review output");
+  if (typeof envelope.version === "string") {
+    contractString(envelope.version, "review output.version");
+  }
   if (envelope.version !== FINDING_CONTRACT_VERSION) {
     throw new FindingSchemaError(
       `Finding contract version is unsupported; expected version ${FINDING_CONTRACT_VERSION}.`,
@@ -170,11 +184,12 @@ export function parseModelFinding(value: unknown, index: number): ModelFindingV1
     ["priority", "title", "path", "range", "issue", "impact", "evidence", "fixDirection"],
     path,
   );
-  if (!PRIORITIES.has(finding.priority as FindingPriority)) {
+  const priority = contractString(finding.priority, `${path}.priority`);
+  if (!PRIORITIES.has(priority as FindingPriority)) {
     throw new FindingSchemaError(`${path}.priority must be one of P0, P1, P2, or P3.`);
   }
   return {
-    priority: finding.priority as FindingPriority,
+    priority: priority as FindingPriority,
     title: boundedString(finding.title, `${path}.title`, 120, { singleLine: true }),
     path: findingPath(finding.path, `${path}.path`),
     range: parseRange(finding.range, `${path}.range`),

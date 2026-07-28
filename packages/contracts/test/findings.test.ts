@@ -152,4 +152,63 @@ describe("finding contract v1", () => {
       assert.throws(() => parseModelFinding(candidate, 0), FindingSchemaError);
     }
   });
+
+  it("rejects unpaired UTF-16 surrogates in every contract string before field rules", () => {
+    const malformed = ["leading\ud800tail", "leading\ud800X", "leading\udc00tail"];
+    const fields = [
+      "priority",
+      "title",
+      "path",
+      "issue",
+      "impact",
+      "evidence",
+      "fixDirection",
+    ] as const;
+
+    for (const field of fields) {
+      for (const value of malformed) {
+        assert.throws(
+          () => parseModelFinding({ ...finding(), [field]: value }, 0),
+          /must contain only Unicode scalar values/u,
+        );
+      }
+    }
+    for (const value of malformed) {
+      assert.throws(
+        () =>
+          parseModelFinding(
+            { ...finding(), range: { start: 1, end: 1, side: value } },
+            0,
+          ),
+        /must contain only Unicode scalar values/u,
+      );
+      assert.throws(
+        () => parseModelReviewOutput(JSON.stringify({ version: value, findings: [] })),
+        /must contain only Unicode scalar values/u,
+      );
+    }
+  });
+
+  it("round-trips valid astral characters in every finding string", () => {
+    const astral = "queue-\u{1f680}";
+    const parsed = parseModelFinding(
+      {
+        ...finding(),
+        title: astral,
+        path: `${astral}.ts`,
+        issue: `${astral} drops cancellation.`,
+        impact: `${astral} retains resources.`,
+        evidence: `${astral} omits the signal.`,
+        fixDirection: `Pass the signal to ${astral}.`,
+      },
+      0,
+    );
+
+    assert.equal(parsed.title, astral);
+    assert.equal(parsed.path, `${astral}.ts`);
+    assert.equal(parsed.issue, `${astral} drops cancellation.`);
+    assert.equal(parsed.impact, `${astral} retains resources.`);
+    assert.equal(parsed.evidence, `${astral} omits the signal.`);
+    assert.equal(parsed.fixDirection, `Pass the signal to ${astral}.`);
+  });
 });
