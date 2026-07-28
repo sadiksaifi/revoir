@@ -19,6 +19,7 @@ export interface PullRequestRepository {
 
 export interface PullRequestSnapshot {
   number: number;
+  description?: string;
   state: string;
   draft: boolean;
   authorId: number;

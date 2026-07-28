@@ -80,7 +80,7 @@ function isManifest(name: string): boolean {
     MANIFEST_NAMES.has(name) ||
     /^requirements(?:[._-].+)?\.txt$/u.test(name) ||
     /^build\.gradle(?:\.kts)?$/u.test(name) ||
-    /\.csproj$/u.test(name)
+    name.endsWith(".csproj")
   );
 }
 
