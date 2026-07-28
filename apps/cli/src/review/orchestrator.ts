@@ -10,6 +10,7 @@ import { FileReviewLock, type ReviewLock } from "./lock.js";
 import { PiReviewEngine, type ReviewEngine } from "./pi.js";
 import { createReviewPublication } from "./publication.js";
 import { assertPullRequestEligible, type PullRequestReference } from "./pull-request.js";
+import { planFindingReconciliation } from "./reconciliation.js";
 import { createTerminalHandle, type TerminalHandle } from "./terminal-handle.js";
 import {
   GitWorkspacePreparer,
@@ -290,138 +291,206 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       assertPullRequestEligible(reference, pullRequest, this.#configuration.github);
       throwIfAborted(signal);
 
-      await github.removeOwnCompletionReaction(reference, signal);
+      const startingSha = await github.getHeadSha(reference, signal);
       throwIfAborted(signal);
-      activeReaction = createTerminalHandle(() =>
-        github.removeOwnReaction(reference, "eyes", terminalSignal),
-      );
-      const reactionId = await github.addReaction(reference, "eyes", signal);
-      activeReaction = createTerminalHandle(() =>
-        github.deleteReaction(reference, reactionId, terminalSignal),
-      );
-      throwIfAborted(signal);
-
-      let workspace;
-      try {
-        workspace = await this.#workspaces.prepare(
-          reference,
-          pullRequest,
-          github.installationToken,
-          signal,
-        );
-      } catch (error) {
-        if (error instanceof WorkspacePreparationError) {
-          workspaceCleanup = createTerminalHandle(error.cleanup);
-        }
-        throw error;
-      }
-      workspaceCleanup = createTerminalHandle(workspace.cleanup);
-      throwIfAborted(signal);
-      const engineResult = (await this.#reviewEngine.review(
-        { reference, pullRequest, workspace },
-        signal,
-      )) ?? {
-        findings: [],
-        diagnostics: [],
-      };
-      throwIfAborted(signal);
-
-      const workspaceFailures = await completeTerminal(workspaceCleanup);
-      workspaceCleanup = undefined;
-      if (workspaceFailures.length > 0) {
-        throw new AggregateError(workspaceFailures, "Workspace cleanup required retries.");
-      }
-      const reactionFailures = await completeTerminal(activeReaction);
-      activeReaction = undefined;
-      if (reactionFailures.length > 0) {
-        throw new AggregateError(reactionFailures, "Reaction cleanup required retries.");
-      }
-
-      const currentSha = await github.getHeadSha(reference, signal);
-      throwIfAborted(signal);
-      await github.removeOwnPendingReview(reference, signal);
-      throwIfAborted(signal);
-      if (currentSha === pullRequest.headSha) {
-        if (engineResult.findings.length > 0) {
-          const publication = createReviewPublication(pullRequest.headSha, engineResult.findings);
-          pendingReviewCleanup = createTerminalHandle(() =>
-            github.removeOwnPendingReview(reference, terminalSignal),
-          );
-          const pendingReview = await github.createPendingReview(reference, publication, signal);
-          pendingReviewCleanup = createTerminalHandle(() => pendingReview.delete(terminalSignal));
-          throwIfAborted(signal);
-          const postDraftSha = await github.getHeadSha(reference, signal);
-          throwIfAborted(signal);
-          if (postDraftSha === pullRequest.headSha) {
-            try {
-              await pendingReview.submit(signal, terminalSignal);
-            } catch (error) {
-              if (error instanceof ReviewSubmissionUncertainError) {
-                // Deleting after an ambiguous submit can target a review GitHub already
-                // published. A later run reconciles any draft that actually remained.
-                pendingReviewCleanup = undefined;
-              }
-              throw error;
-            }
-            pendingReviewCleanup = undefined;
-            result = {
-              status: "findings",
-              reviewedSha: pullRequest.headSha,
-              currentSha: postDraftSha,
-              publishedFindings: engineResult.findings.length,
-              rejectedFindings: engineResult.diagnostics.length,
-              diagnostics: engineResult.diagnostics,
-            };
-          } else {
-            const pendingReviewFailures = await completePendingReview(pendingReviewCleanup);
-            pendingReviewCleanup = undefined;
-            throwCleanupFailures(pendingReviewFailures, "Pending review cleanup required retries.");
-            result = {
-              status: "stale",
-              reviewedSha: pullRequest.headSha,
-              currentSha: postDraftSha,
-            };
-          }
-        } else {
-          activeReaction = createTerminalHandle(() =>
-            github.removeOwnReaction(reference, "+1", terminalSignal),
-          );
-          const completionReactionId = await github.addReaction(reference, "+1", signal);
-          activeReaction = createTerminalHandle(() =>
-            github.deleteReaction(reference, completionReactionId, terminalSignal),
-          );
-          throwIfAborted(signal);
-          const postCompletionSha = await github.getHeadSha(reference, signal);
-          throwIfAborted(signal);
-          if (postCompletionSha === pullRequest.headSha) {
-            activeReaction = undefined;
-            result = {
-              status: "clean",
-              reviewedSha: pullRequest.headSha,
-              currentSha: postCompletionSha,
-            };
-          } else {
-            const completionCleanupFailures = await completeTerminal(activeReaction);
-            activeReaction = undefined;
-            if (completionCleanupFailures.length > 0) {
-              throw new AggregateError(
-                completionCleanupFailures,
-                "Completion reaction cleanup required retries.",
-              );
-            }
-            result = {
-              status: "stale",
-              reviewedSha: pullRequest.headSha,
-              currentSha: postCompletionSha,
-            };
-          }
-        }
-      } else {
+      if (startingSha !== pullRequest.headSha) {
         result = {
           status: "stale",
           reviewedSha: pullRequest.headSha,
-          currentSha,
+          currentSha: startingSha,
         };
+      } else {
+        await github.removeOwnCompletionReaction(reference, signal);
+        throwIfAborted(signal);
+        activeReaction = createTerminalHandle(() =>
+          github.removeOwnReaction(reference, "eyes", terminalSignal),
+        );
+        const reactionId = await github.addReaction(reference, "eyes", signal);
+        activeReaction = createTerminalHandle(() =>
+          github.deleteReaction(reference, reactionId, terminalSignal),
+        );
+        throwIfAborted(signal);
+
+        let workspace;
+        try {
+          workspace = await this.#workspaces.prepare(
+            reference,
+            pullRequest,
+            github.installationToken,
+            signal,
+          );
+        } catch (error) {
+          if (error instanceof WorkspacePreparationError) {
+            workspaceCleanup = createTerminalHandle(error.cleanup);
+          }
+          throw error;
+        }
+        workspaceCleanup = createTerminalHandle(workspace.cleanup);
+        throwIfAborted(signal);
+        const preReviewSha = await github.getHeadSha(reference, signal);
+        throwIfAborted(signal);
+        if (preReviewSha !== pullRequest.headSha) {
+          result = {
+            status: "stale",
+            reviewedSha: pullRequest.headSha,
+            currentSha: preReviewSha,
+          };
+        } else {
+          const engineResult = (await this.#reviewEngine.review(
+            { reference, pullRequest, workspace },
+            signal,
+          )) ?? {
+            findings: [],
+            diagnostics: [],
+          };
+          throwIfAborted(signal);
+
+          const workspaceFailures = await completeTerminal(workspaceCleanup);
+          workspaceCleanup = undefined;
+          if (workspaceFailures.length > 0) {
+            throw new AggregateError(workspaceFailures, "Workspace cleanup required retries.");
+          }
+          const reactionFailures = await completeTerminal(activeReaction);
+          activeReaction = undefined;
+          if (reactionFailures.length > 0) {
+            throw new AggregateError(reactionFailures, "Reaction cleanup required retries.");
+          }
+
+          const priorReviewState = await github.getPriorReviewState(reference, signal);
+          throwIfAborted(signal);
+          const currentSha = await github.getHeadSha(reference, signal);
+          throwIfAborted(signal);
+          if (currentSha !== pullRequest.headSha) {
+            result = {
+              status: "stale",
+              reviewedSha: pullRequest.headSha,
+              currentSha,
+            };
+          } else {
+            const reconciliation = planFindingReconciliation(
+              engineResult.findings,
+              priorReviewState,
+            );
+            await github.removeOwnPendingReview(reference, signal);
+            throwIfAborted(signal);
+            if (reconciliation.obsoleteThreadIds.length > 0) {
+              await github.resolveReviewThreads(
+                reference,
+                reconciliation.obsoleteThreadIds,
+                signal,
+              );
+              throwIfAborted(signal);
+            }
+            const postReconciliationSha =
+              reconciliation.obsoleteThreadIds.length === 0
+                ? currentSha
+                : await github.getHeadSha(reference, signal);
+            throwIfAborted(signal);
+            if (postReconciliationSha !== pullRequest.headSha) {
+              result = {
+                status: "stale",
+                reviewedSha: pullRequest.headSha,
+                currentSha: postReconciliationSha,
+              };
+            } else if (engineResult.findings.length > 0) {
+              if (reconciliation.netNewFindings.length === 0) {
+                result = {
+                  status: "findings",
+                  reviewedSha: pullRequest.headSha,
+                  currentSha: postReconciliationSha,
+                  publishedFindings: 0,
+                  rejectedFindings: engineResult.diagnostics.length,
+                  diagnostics: engineResult.diagnostics,
+                };
+              } else {
+                const publication = createReviewPublication(
+                  pullRequest.headSha,
+                  reconciliation.netNewFindings,
+                );
+                pendingReviewCleanup = createTerminalHandle(() =>
+                  github.removeOwnPendingReview(reference, terminalSignal),
+                );
+                const pendingReview = await github.createPendingReview(
+                  reference,
+                  publication,
+                  signal,
+                );
+                pendingReviewCleanup = createTerminalHandle(() =>
+                  pendingReview.delete(terminalSignal),
+                );
+                throwIfAborted(signal);
+                const postDraftSha = await github.getHeadSha(reference, signal);
+                throwIfAborted(signal);
+                if (postDraftSha === pullRequest.headSha) {
+                  try {
+                    await pendingReview.submit(signal, terminalSignal);
+                  } catch (error) {
+                    if (error instanceof ReviewSubmissionUncertainError) {
+                      // Deleting after an ambiguous submit can target a review GitHub already
+                      // published. A later run reconciles any draft that actually remained.
+                      pendingReviewCleanup = undefined;
+                    }
+                    throw error;
+                  }
+                  pendingReviewCleanup = undefined;
+                  result = {
+                    status: "findings",
+                    reviewedSha: pullRequest.headSha,
+                    currentSha: postDraftSha,
+                    publishedFindings: reconciliation.netNewFindings.length,
+                    rejectedFindings: engineResult.diagnostics.length,
+                    diagnostics: engineResult.diagnostics,
+                  };
+                } else {
+                  const pendingReviewFailures = await completePendingReview(pendingReviewCleanup);
+                  pendingReviewCleanup = undefined;
+                  throwCleanupFailures(
+                    pendingReviewFailures,
+                    "Pending review cleanup required retries.",
+                  );
+                  result = {
+                    status: "stale",
+                    reviewedSha: pullRequest.headSha,
+                    currentSha: postDraftSha,
+                  };
+                }
+              }
+            } else {
+              activeReaction = createTerminalHandle(() =>
+                github.removeOwnReaction(reference, "+1", terminalSignal),
+              );
+              const completionReactionId = await github.addReaction(reference, "+1", signal);
+              activeReaction = createTerminalHandle(() =>
+                github.deleteReaction(reference, completionReactionId, terminalSignal),
+              );
+              throwIfAborted(signal);
+              const postCompletionSha = await github.getHeadSha(reference, signal);
+              throwIfAborted(signal);
+              if (postCompletionSha === pullRequest.headSha) {
+                activeReaction = undefined;
+                result = {
+                  status: "clean",
+                  reviewedSha: pullRequest.headSha,
+                  currentSha: postCompletionSha,
+                };
+              } else {
+                const completionCleanupFailures = await completeTerminal(activeReaction);
+                activeReaction = undefined;
+                if (completionCleanupFailures.length > 0) {
+                  throw new AggregateError(
+                    completionCleanupFailures,
+                    "Completion reaction cleanup required retries.",
+                  );
+                }
+                result = {
+                  status: "stale",
+                  reviewedSha: pullRequest.headSha,
+                  currentSha: postCompletionSha,
+                };
+              }
+            }
+          }
+        }
       }
     } catch (error) {
       failure = error;

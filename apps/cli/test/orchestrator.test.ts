@@ -23,6 +23,7 @@ import {
   type PiSessionFactory,
   type ReviewEngine,
 } from "../src/review/pi.js";
+import type { ReviewPublication } from "../src/review/publication.js";
 import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pull-request.js";
 import type { PriorReviewState } from "../src/review/reconciliation.js";
 import type { PreparedWorkspace, WorkspacePreparer } from "../src/review/workspace.js";
@@ -123,6 +124,7 @@ function harness(
     headNeverSettles?: boolean;
     mutateHeadDuring?:
       | "workspace-cleanup"
+      | "workspace-prepare"
       | "reaction-removal"
       | "completion-creation"
       | "review-creation";
@@ -147,6 +149,7 @@ function harness(
   } = {},
 ) {
   const events: string[] = [];
+  const createdPublications: ReviewPublication[] = [];
   const snapshot = options.pullRequest ?? pullRequest();
   let currentSha = options.currentSha ?? snapshot.headSha;
   let headRequests = 0;
@@ -173,13 +176,13 @@ function harness(
     async getHeadSha(_reference, signal?: AbortSignal) {
       events.push("get-head");
       headRequests += 1;
-      if (options.headError !== undefined) {
+      if (headRequests === 3 && options.headError !== undefined) {
         throw options.headError;
       }
-      if (headRequests === 2 && options.postcheckError !== undefined) {
+      if (headRequests === 4 && options.postcheckError !== undefined) {
         throw options.postcheckError;
       }
-      if (options.headNeverSettles) {
+      if (options.headNeverSettles && headRequests === 3) {
         return new Promise<string>((_resolve, reject) => {
           signal?.addEventListener(
             "abort",
@@ -256,8 +259,9 @@ function harness(
         currentSha = "3".repeat(40);
       }
     },
-    async createPendingReview() {
+    async createPendingReview(_reference, publication) {
       events.push("create-review");
+      createdPublications.push(publication);
       if (options.pendingCreationError !== undefined) {
         throw options.pendingCreationError;
       }
@@ -319,6 +323,9 @@ function harness(
       if (options.prepareError !== undefined) {
         throw options.prepareError;
       }
+      if (options.mutateHeadDuring === "workspace-prepare") {
+        currentSha = "3".repeat(40);
+      }
       const workspace: PreparedWorkspace = {
         root: "/tmp/review",
         checkout: "/tmp/review/repository",
@@ -347,6 +354,7 @@ function harness(
       }),
   };
   return {
+    createdPublications,
     events,
     ownedReactions,
     orchestrator: new CleanReviewOrchestrator(configuration(options.reviewMs), {
@@ -394,12 +402,15 @@ describe("clean review orchestrator", () => {
     assert.deepEqual(events, [
       "authenticate",
       "get-pr",
+      "get-head",
       "remove-old-thumb",
       "add-eyes",
       "prepare-installation-secret",
+      "get-head",
       "review",
       "cleanup",
       "delete-10",
+      "get-prior-review-state",
       "get-head",
       "remove-pending-review",
       "add-+1",
@@ -434,8 +445,9 @@ describe("clean review orchestrator", () => {
         },
       ],
     });
-    assert.deepEqual(events.slice(-6), [
+    assert.deepEqual(events.slice(-7), [
       "delete-10",
+      "get-prior-review-state",
       "get-head",
       "remove-pending-review",
       "create-review",
@@ -443,6 +455,118 @@ describe("clean review orchestrator", () => {
       "submit-review-20",
     ]);
     assert.equal(events.filter((event) => event === "create-review").length, 1);
+    assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("skips Pi and lifecycle reactions when queued work is stale before review starts", async () => {
+    const { events, orchestrator } = harness({ currentSha: "3".repeat(40) });
+
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "stale",
+      reviewedSha: "2".repeat(40),
+      currentSha: "3".repeat(40),
+    });
+    assert.deepEqual(events, ["authenticate", "get-pr", "get-head"]);
+  });
+
+  it("skips Pi when the head changes while preparing the complete current diff", async () => {
+    const { events, orchestrator } = harness({ mutateHeadDuring: "workspace-prepare" });
+
+    assert.equal((await orchestrator.review(reference)).status, "stale");
+    assert.equal(events.includes("review"), false);
+    assert.equal(events.includes("create-review"), false);
+    assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("publishes only net-new findings and resolves only obsolete owned threads", async () => {
+    const unchanged = validatedFinding();
+    const netNew = {
+      ...validatedFinding(),
+      fingerprint: "b".repeat(64),
+      anchor: "otherSignal",
+    };
+    const { createdPublications, events, orchestrator } = harness({
+      priorReviewState: {
+        activeFingerprints: [unchanged.fingerprint],
+        ownedOpenThreads: [
+          { id: "THREAD_OLD", fingerprint: "c".repeat(64) },
+          { id: "THREAD_CURRENT", fingerprint: unchanged.fingerprint },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      },
+      review: async () => ({ findings: [unchanged, netNew], diagnostics: [] }),
+    });
+
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "findings",
+      reviewedSha: "2".repeat(40),
+      currentSha: "2".repeat(40),
+      publishedFindings: 1,
+      rejectedFindings: 0,
+      diagnostics: [],
+    });
+    assert.equal(events.includes("resolve-threads-THREAD_OLD"), true);
+    assert.equal(createdPublications.length, 1);
+    assert.equal(createdPublications[0]?.payload.comments?.length, 1);
+    assert.match(
+      createdPublications[0]?.payload.comments?.[0]?.body ?? "",
+      new RegExp(netNew.fingerprint, "u"),
+    );
+    assert.doesNotMatch(
+      createdPublications[0]?.payload.comments?.[0]?.body ?? "",
+      new RegExp(unchanged.fingerprint, "u"),
+    );
+  });
+
+  it("does not repost an unchanged finding on a repeated review", async () => {
+    const unchanged = validatedFinding();
+    const { createdPublications, events, orchestrator } = harness({
+      priorReviewState: {
+        activeFingerprints: [unchanged.fingerprint],
+        ownedOpenThreads: [{ id: "THREAD_CURRENT", fingerprint: unchanged.fingerprint }],
+        runHeadShas: ["1".repeat(40)],
+      },
+      review: async () => ({ findings: [unchanged], diagnostics: [] }),
+    });
+
+    assert.equal((await orchestrator.review(reference)).status, "findings");
+    assert.equal(createdPublications.length, 0);
+    assert.equal(events.includes("resolve-threads-THREAD_CURRENT"), false);
+    assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("resolves a disappeared owned finding before completing the clean review", async () => {
+    const { events, orchestrator } = harness({
+      priorReviewState: {
+        activeFingerprints: ["c".repeat(64)],
+        ownedOpenThreads: [{ id: "THREAD_FIXED", fingerprint: "c".repeat(64) }],
+        runHeadShas: ["1".repeat(40)],
+      },
+    });
+
+    assert.equal((await orchestrator.review(reference)).status, "clean");
+    assert.equal(events.includes("create-review"), false);
+    assert.ok(
+      events.indexOf("resolve-threads-THREAD_FIXED") < events.indexOf("add-+1"),
+      JSON.stringify(events),
+    );
+  });
+
+  it("discards stale reviewed output before any reconciliation or publication mutation", async () => {
+    const { events, orchestrator } = harness({
+      mutateHeadDuring: "workspace-cleanup",
+      priorReviewState: {
+        activeFingerprints: [],
+        ownedOpenThreads: [{ id: "THREAD_OLD", fingerprint: "c".repeat(64) }],
+        runHeadShas: [],
+      },
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+
+    assert.equal((await orchestrator.review(reference)).status, "stale");
+    assert.equal(events.includes("resolve-threads-THREAD_OLD"), false);
+    assert.equal(events.includes("remove-pending-review"), false);
+    assert.equal(events.includes("create-review"), false);
     assert.equal(events.includes("add-+1"), false);
   });
 
@@ -600,12 +724,7 @@ describe("clean review orchestrator", () => {
   it("removes the active reaction and publishes no completion for stale output", async () => {
     const { events, orchestrator } = harness({ currentSha: "3".repeat(40) });
     assert.equal((await orchestrator.review(reference)).status, "stale");
-    assert.deepEqual(events.slice(-4), [
-      "cleanup",
-      "delete-10",
-      "get-head",
-      "remove-pending-review",
-    ]);
+    assert.deepEqual(events, ["authenticate", "get-pr", "get-head"]);
     assert.equal(events.includes("add-+1"), false);
   });
 
@@ -621,8 +740,8 @@ describe("clean review orchestrator", () => {
         assert.deepEqual(events.slice(-4), [
           "cleanup",
           "delete-10",
+          "get-prior-review-state",
           "get-head",
-          "remove-pending-review",
         ]);
         assert.equal(events.includes("add-+1"), false);
       }),
@@ -689,7 +808,12 @@ describe("clean review orchestrator", () => {
 
     const shaFailure = harness({ headError: new Error("SHA lookup failed") });
     await assert.rejects(() => shaFailure.orchestrator.review(reference), /SHA lookup failed/u);
-    assert.deepEqual(shaFailure.events.slice(-3), ["cleanup", "delete-10", "get-head"]);
+    assert.deepEqual(shaFailure.events.slice(-4), [
+      "cleanup",
+      "delete-10",
+      "get-prior-review-state",
+      "get-head",
+    ]);
   });
 
   it("cleans after preparation and completion failures", async () => {
@@ -703,8 +827,8 @@ describe("clean review orchestrator", () => {
       /reaction failed/u,
     );
     assert.deepEqual(completionFailure.events.slice(-6), [
-      "cleanup",
       "delete-10",
+      "get-prior-review-state",
       "get-head",
       "remove-pending-review",
       "add-+1",
@@ -1310,7 +1434,12 @@ describe("clean review orchestrator", () => {
       ]),
       ReviewTimeoutError,
     );
-    assert.deepEqual(timedOut.events.slice(-3), ["cleanup", "delete-10", "get-head"]);
+    assert.deepEqual(timedOut.events.slice(-4), [
+      "cleanup",
+      "delete-10",
+      "get-prior-review-state",
+      "get-head",
+    ]);
   });
 
   it("bounds non-settling workspace cleanup by the original deadline and continues cleanup", async () => {
