@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  REVIEW_JOB_ACTIONS,
-  ReviewJobSchemaError,
-  parseReviewJob,
-} from "../src/review-job.js";
+import { REVIEW_JOB_ACTIONS, ReviewJobSchemaError, parseReviewJob } from "../src/review-job.js";
 
 function reviewJob() {
   return {
@@ -42,10 +38,7 @@ describe("review job contract v1", () => {
     for (const action of REVIEW_JOB_ACTIONS) {
       assert.equal(parseReviewJob({ ...reviewJob(), action }).action, action);
     }
-    assert.throws(
-      () => parseReviewJob({ ...reviewJob(), action: "closed" }),
-      ReviewJobSchemaError,
-    );
+    assert.throws(() => parseReviewJob({ ...reviewJob(), action: "closed" }), ReviewJobSchemaError);
   });
 
   it("requires every field and rejects unknown contract fields", () => {
@@ -65,10 +58,7 @@ describe("review job contract v1", () => {
       assert.throws(() => parseReviewJob(candidate), ReviewJobSchemaError);
     }
 
-    assert.throws(
-      () => parseReviewJob({ ...reviewJob(), retryCount: 1 }),
-      ReviewJobSchemaError,
-    );
+    assert.throws(() => parseReviewJob({ ...reviewJob(), retryCount: 1 }), ReviewJobSchemaError);
     assert.throws(
       () =>
         parseReviewJob({
