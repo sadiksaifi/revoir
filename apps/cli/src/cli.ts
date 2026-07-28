@@ -12,6 +12,15 @@ import {
   runDiagnostics,
 } from "./diagnostics.js";
 import { SecretRedactor } from "./redaction.js";
+import {
+  createDefaultManualReviewService,
+  type ManualReviewService,
+} from "./review/orchestrator.js";
+import {
+  parsePullRequestUrl,
+  PullRequestEligibilityError,
+  PullRequestUrlError,
+} from "./review/pull-request.js";
 import { collectSetupConfiguration, parseSetupOptions, type PromptFunction } from "./setup.js";
 
 export const CLI_VERSION = "0.0.0";
@@ -21,12 +30,14 @@ const HELP = `Revoir ${CLI_VERSION}
 Usage:
   revoir setup [options]
   revoir diagnose [--config <path>] [--json] [--verbose]
+  revoir review <GitHub PR URL> [--config <path>] [--verbose]
   revoir --help
   revoir --version
 
 Commands:
   setup       Create the protected local configuration and validate the installation.
   diagnose    Non-interactively validate an existing installation.
+  review      Review one eligible pull request and publish a clean result.
 
 Setup options:
   --non-interactive
@@ -61,6 +72,7 @@ export interface CliIo {
 export interface CliDependencies {
   io: CliIo;
   gateway?: DiagnosticGateway;
+  reviewService?: ManualReviewService;
   prompt?: PromptFunction;
 }
 
@@ -179,7 +191,7 @@ export async function runCli(
     return 0;
   }
   if (
-    (arguments_[0] === "setup" || arguments_[0] === "diagnose") &&
+    (arguments_[0] === "setup" || arguments_[0] === "diagnose" || arguments_[0] === "review") &&
     (arguments_[1] === "--help" || arguments_[1] === "-h")
   ) {
     write(io.stdout, HELP);
@@ -260,6 +272,53 @@ export async function runCli(
     } catch (error) {
       write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
       return 2;
+    }
+  }
+
+  if (command === "review") {
+    if (common.json) {
+      write(io.stderr, "Error: --json is not supported by the review command.\n");
+      return 2;
+    }
+    if (common.arguments.length !== 1 || common.arguments[0] === undefined) {
+      write(io.stderr, "Error: review requires exactly one canonical GitHub pull-request URL.\n");
+      return 2;
+    }
+
+    let reference;
+    try {
+      reference = parsePullRequestUrl(common.arguments[0]);
+    } catch (error) {
+      write(io.stderr, `Error: ${new SecretRedactor().error(error, common.verbose)}\n`);
+      return 2;
+    }
+
+    let configuration;
+    try {
+      configuration = await loadConfiguration(configFile);
+    } catch (error) {
+      write(io.stderr, `Error: ${new SecretRedactor().error(error, common.verbose)}\n`);
+      return 2;
+    }
+    const redactor = new SecretRedactor(configuration);
+    try {
+      const result = await (
+        dependencies.reviewService ?? createDefaultManualReviewService(configuration)
+      ).review(reference);
+      if (result.status === "clean") {
+        write(io.stdout, `Clean review completed for ${reference.url} at ${result.reviewedSha}.\n`);
+      } else {
+        write(
+          io.stdout,
+          `Review discarded because ${reference.url} moved from ${result.reviewedSha} to ${result.currentSha}.\n`,
+        );
+      }
+      return 0;
+    } catch (error) {
+      write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
+      return error instanceof PullRequestEligibilityError || error instanceof PullRequestUrlError
+        ? 2
+        : 1;
     }
   }
 
