@@ -31,6 +31,7 @@ const REASONS: Readonly<Record<ReviewFailureCategory, string>> = {
   filesystem: "A local filesystem operation failed while running the review.",
   unknown: "An unexpected operational error interrupted the review.",
 };
+const CATEGORIES = Object.keys(REASONS) as ReviewFailureCategory[];
 
 const FILESYSTEM_CODES = new Set([
   "EACCES",
@@ -101,6 +102,15 @@ function categoryFor(error: Error): ReviewFailureCategory | undefined {
 }
 
 export function classifyReviewFailure(error: unknown): ReviewFailure {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "category" in error &&
+    typeof error.category === "string" &&
+    CATEGORIES.includes(error.category as ReviewFailureCategory)
+  ) {
+    return reviewFailureForCategory(error.category as ReviewFailureCategory);
+  }
   for (const candidate of errorCandidates(error)) {
     const category = categoryFor(candidate);
     if (category !== undefined) {
@@ -108,6 +118,10 @@ export function classifyReviewFailure(error: unknown): ReviewFailure {
     }
   }
   return { category: "unknown", reason: REASONS.unknown };
+}
+
+export function reviewFailureForCategory(category: ReviewFailureCategory): ReviewFailure {
+  return { category, reason: REASONS[category] };
 }
 
 export function renderReviewFailureComment(

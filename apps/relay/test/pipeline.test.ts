@@ -9,13 +9,39 @@ import {
   QueueReviewRunner,
   type ManualReviewResult,
   type ManualReviewService,
+  type OperationalFailureState,
+  type OperationalFailureStore,
   type QueueClient,
+  type ReviewFailureReporter,
   type RevoirConfiguration,
 } from "cli";
 
 import { createWebhookRelay, type RelayEnvironment } from "../src/index.js";
 
 const WEBHOOK_SECRET = "pipeline-webhook-secret";
+const silentFailureReporter: ReviewFailureReporter = {
+  async report() {},
+};
+
+function memoryFailureStore(): OperationalFailureStore {
+  const states = new Map<string, OperationalFailureState>();
+  return {
+    async load(deliveryId) {
+      return (
+        states.get(deliveryId) ?? {
+          failures: 0,
+          terminalReport: { status: "not-required" },
+        }
+      );
+    },
+    async save(deliveryId, state) {
+      states.set(deliveryId, state);
+    },
+    async clear(deliveryId) {
+      states.delete(deliveryId);
+    },
+  };
+}
 
 const configuration: RevoirConfiguration = {
   version: 1,
@@ -127,7 +153,13 @@ describe("webhook-to-review pipeline", () => {
       };
 
       assert.equal(
-        await new QueueReviewRunner(configuration, queue, reviewService).consumeOne(),
+        await new QueueReviewRunner(
+          configuration,
+          queue,
+          reviewService,
+          silentFailureReporter,
+          memoryFailureStore(),
+        ).consumeOne(),
         "settled",
       );
       assert.deepEqual(reviews, [
@@ -172,7 +204,13 @@ describe("webhook-to-review pipeline", () => {
     };
 
     assert.equal(
-      await new QueueReviewRunner(configuration, queue, reviewService).consumeOne(),
+      await new QueueReviewRunner(
+        configuration,
+        queue,
+        reviewService,
+        silentFailureReporter,
+        memoryFailureStore(),
+      ).consumeOne(),
       "settled",
     );
     assert.deepEqual(reviews, [
@@ -219,7 +257,13 @@ describe("webhook-to-review pipeline", () => {
     };
 
     assert.equal(
-      await new QueueReviewRunner(configuration, queue, reviewService).consumeOne(),
+      await new QueueReviewRunner(
+        configuration,
+        queue,
+        reviewService,
+        silentFailureReporter,
+        memoryFailureStore(),
+      ).consumeOne(),
       "settled",
     );
     assert.deepEqual(reviews, [

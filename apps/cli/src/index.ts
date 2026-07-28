@@ -26,6 +26,8 @@ export { CloudflareQueueClient, type QueueDelivery } from "./queue/client.js";
 export {
   createDefaultQueueRunService,
   QueueReviewRunner,
+  type OperationalFailureState,
+  type OperationalFailureStore,
   type QueueClient,
   type QueueConsumption,
   type QueueRunService,
