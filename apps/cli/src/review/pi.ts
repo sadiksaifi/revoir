@@ -1,10 +1,18 @@
 import {
   createAgentSession,
+  createBashToolDefinition,
   createExtensionRuntime,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLocalBashOperations,
+  createLsToolDefinition,
+  createReadToolDefinition,
   ModelRuntime,
+  type BashOperations,
   type ResourceLoader,
   SessionManager,
   SettingsManager,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
 import type { ReasoningLevel, RevoirConfiguration } from "../config/schema.js";
@@ -56,6 +64,7 @@ export interface PiSessionOptions {
   cwd: string;
   model: string;
   reasoning: ReasoningLevel;
+  shellCommandMs: number;
   systemPrompt: string;
 }
 
@@ -73,7 +82,7 @@ function throwIfAborted(signal: AbortSignal): void {
   }
 }
 
-function emptyResourceLoader(systemPrompt: string): ResourceLoader {
+export function createReviewResourceLoader(systemPrompt: string): ResourceLoader {
   return {
     getExtensions: () => ({
       extensions: [],
@@ -89,6 +98,73 @@ function emptyResourceLoader(systemPrompt: string): ResourceLoader {
     extendResources: () => {},
     reload: async () => {},
   };
+}
+
+const REVIEW_TOOL_NAMES = ["read", "grep", "find", "ls", "bash"];
+
+const DENIED_REVIEW_COMMANDS = [
+  /(?:^|[;&|()\n])\s*(?:(?:command|env|sudo)\s+)*(?:[^\s;&|()]+\/)*(?:npm|pnpm|yarn|bun|npx|corepack)(?:\s|$)/u,
+  /(?:^|[;&|()\n])\s*(?:(?:command|env|sudo)\s+)*(?:(?:python(?:3(?:\.[0-9]+)?)?\s+-m\s+pip)|pip[0-9.]*)(?:\s+install)(?:\s|$)/u,
+  /(?:^|[;&|()\n])\s*(?:(?:command|env|sudo)\s+)*(?:uv\s+(?:add|pip|sync)|cargo\s+install|gem\s+install|bundle\s+(?:install|update)|composer\s+(?:install|require|update)|go\s+get)(?:\s|$)/u,
+  /(?:^|[;&|()\n])\s*(?:(?:command|env|sudo)\s+)*(?:[^\s;&|()]+\/)*gh(?:\s|$)/u,
+];
+
+function reviewCommandAllowed(command: string): boolean {
+  return DENIED_REVIEW_COMMANDS.every((pattern) => !pattern.test(command));
+}
+
+function reviewCommandEnvironment(environment: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+  const sanitized = { ...environment };
+  for (const name of Object.keys(sanitized)) {
+    if (
+      name === "NODE_AUTH_TOKEN" ||
+      name === "NPM_TOKEN" ||
+      name.startsWith("GH_") ||
+      name.startsWith("GITHUB_") ||
+      name.startsWith("REVOIR_GIT_")
+    ) {
+      delete sanitized[name];
+    }
+  }
+  return sanitized;
+}
+
+export function createReviewBashOperations(
+  checkout: string,
+  shellCommandMs: number,
+  delegate: BashOperations = createLocalBashOperations(),
+): BashOperations {
+  const maximumTimeoutSeconds = shellCommandMs / 1000;
+  return {
+    async exec(command, _cwd, options) {
+      if (!reviewCommandAllowed(command)) {
+        throw new Error(
+          "Revoir review policy denies dependency installation, package lifecycle execution, and GitHub mutations.",
+        );
+      }
+      return delegate.exec(command, checkout, {
+        ...options,
+        timeout: Math.min(options.timeout ?? maximumTimeoutSeconds, maximumTimeoutSeconds),
+        env: reviewCommandEnvironment(options.env),
+      });
+    },
+  };
+}
+
+export function createReviewToolDefinitions(
+  checkout: string,
+  shellCommandMs: number,
+): ToolDefinition[] {
+  return [
+    createReadToolDefinition(checkout),
+    createGrepToolDefinition(checkout),
+    createFindToolDefinition(checkout),
+    createLsToolDefinition(checkout),
+    createBashToolDefinition(checkout, {
+      operations: createReviewBashOperations(checkout, shellCommandMs),
+      exposeSessionEnvironment: false,
+    }),
+  ] as unknown as ToolDefinition[];
 }
 
 function assistantText(message: unknown): string | undefined {
@@ -135,14 +211,15 @@ export class SdkPiSessionFactory implements PiSessionFactory {
       throw new Error(`Configured Pi model "${options.model}" is unavailable.`);
     }
 
-    const resourceLoader = emptyResourceLoader(options.systemPrompt);
+    const resourceLoader = createReviewResourceLoader(options.systemPrompt);
     const { session } = await createAgentSession({
       cwd: options.cwd,
       model,
       thinkingLevel: options.reasoning,
       modelRuntime,
       resourceLoader,
-      tools: ["read", "bash", "grep", "find", "ls"],
+      tools: REVIEW_TOOL_NAMES,
+      customTools: createReviewToolDefinitions(options.cwd, options.shellCommandMs),
       sessionManager: SessionManager.inMemory(options.cwd),
       settingsManager: SettingsManager.inMemory({
         compaction: { enabled: false },
@@ -209,13 +286,16 @@ ${input.workspace.diff}`;
 export class PiReviewEngine implements ReviewEngine {
   readonly #model: RevoirConfiguration["model"];
   readonly #sessionFactory: PiSessionFactory;
+  readonly #shellCommandMs: number;
 
   constructor(
     model: RevoirConfiguration["model"],
     sessionFactory: PiSessionFactory = new SdkPiSessionFactory(),
+    shellCommandMs = 120_000,
   ) {
     this.#model = model;
     this.#sessionFactory = sessionFactory;
+    this.#shellCommandMs = shellCommandMs;
   }
 
   async review(input: ReviewEngineInput, signal: AbortSignal): Promise<ReviewEngineResult> {
@@ -225,6 +305,7 @@ export class PiReviewEngine implements ReviewEngine {
         cwd: input.workspace.checkout,
         model: this.#model.id,
         reasoning: this.#model.reasoning,
+        shellCommandMs: this.#shellCommandMs,
         systemPrompt: REVIEW_SYSTEM_PROMPT,
       },
       signal,

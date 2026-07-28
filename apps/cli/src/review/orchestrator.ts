@@ -462,7 +462,11 @@ export function createDefaultManualReviewService(
   return new CleanReviewOrchestrator(configuration, {
     github: new GitHubAppReviewGateway(),
     lock: new FileReviewLock(configuration.paths.stateDir),
-    reviewEngine: new PiReviewEngine(configuration.model),
+    reviewEngine: new PiReviewEngine(
+      configuration.model,
+      undefined,
+      configuration.timeouts.shellCommandMs,
+    ),
     workspaces: new GitWorkspacePreparer(
       configuration.paths.cacheDir,
       configuration.timeouts.shellCommandMs,
