@@ -68,6 +68,42 @@ function ownedReviewThreadResponse(id: string, fingerprint: string) {
   };
 }
 
+function reviewFileFinding(fingerprint: string, path: string): ReviewFindingV1 {
+  return {
+    version: 1,
+    fingerprint,
+    priority: "P1",
+    path,
+    range: null,
+    defectKind: "correctness",
+    impactKind: "incorrect-result",
+    fixAction: "restore",
+    anchor: path,
+    attachment: { kind: "file", path },
+  };
+}
+
+function ownReview(id: number, body: string | null, state = "COMMENTED") {
+  return {
+    id,
+    state,
+    body,
+    user: { login: "revoir-test[bot]" },
+  };
+}
+
+function legacyReviewBody(candidate: ReviewFindingV1): string {
+  return renderFileFinding(candidate);
+}
+
+function explicitReviewBody(candidates: readonly ReviewFindingV1[]): string {
+  return createReviewPublication("2".repeat(40), [], candidates).payload.body!;
+}
+
+function markerOnlyExplicitReviewBody(candidate: ReviewFindingV1): string {
+  return `<!-- revoir:body-state:v1 -->\n<!-- revoir:body-finding:v1:${candidate.fingerprint} -->`;
+}
+
 describe("GitHub App review gateway", () => {
   it("signs a short-lived RS256 GitHub App JWT", () => {
     const jwt = createGitHubAppJwt(7, TEST_PRIVATE_KEY, 1_000);
@@ -650,6 +686,271 @@ describe("GitHub App review gateway", () => {
       );
       assert.equal(planFindingReconciliation([latestFinding], prior).bodyStateChanged, true);
     }
+  });
+
+  it("folds submitted App review bodies into the latest authoritative snapshot", async () => {
+    const fingerprints = {
+      older: "a".repeat(64),
+      latest: "b".repeat(64),
+      ignored: "c".repeat(64),
+      other: "d".repeat(64),
+    };
+    const findings = {
+      older: reviewFileFinding(fingerprints.older, "older.ts"),
+      latest: reviewFileFinding(fingerprints.latest, "latest.ts"),
+      ignored: reviewFileFinding(fingerprints.ignored, "ignored.ts"),
+      other: reviewFileFinding(fingerprints.other, "other.ts"),
+    };
+    const scenarios = [
+      {
+        name: "latest legacy marker set",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(202, legacyReviewBody(findings.latest)),
+        ],
+        expectedBodyFingerprints: [fingerprints.latest],
+        migrationRequired: true,
+        candidate: findings.latest,
+        expectedNetNew: [],
+        bodyStateChanged: true,
+        runHeadShas: [],
+      },
+      {
+        name: "empty legacy body",
+        reviews: [ownReview(201, legacyReviewBody(findings.older)), ownReview(202, "")],
+        expectedBodyFingerprints: [],
+        migrationRequired: true,
+        candidate: findings.older,
+        expectedNetNew: [fingerprints.older],
+        bodyStateChanged: true,
+        runHeadShas: [],
+      },
+      {
+        name: "null inline-only legacy body",
+        reviews: [ownReview(201, legacyReviewBody(findings.older)), ownReview(202, null)],
+        expectedBodyFingerprints: [],
+        migrationRequired: true,
+        candidate: findings.older,
+        expectedNetNew: [fingerprints.older],
+        bodyStateChanged: true,
+        runHeadShas: [],
+      },
+      {
+        name: "run-only legacy body",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(202, `<!-- revoir:run:v1:${"3".repeat(40)} -->`),
+        ],
+        expectedBodyFingerprints: [],
+        migrationRequired: true,
+        candidate: findings.older,
+        expectedNetNew: [fingerprints.older],
+        bodyStateChanged: true,
+        runHeadShas: ["3".repeat(40)],
+      },
+      {
+        name: "pending and non-App reviews are ignored",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.latest)),
+          ownReview(202, legacyReviewBody(findings.ignored), "PENDING"),
+          {
+            id: 203,
+            state: "COMMENTED",
+            body: legacyReviewBody(findings.other),
+            user: { login: "human" },
+          },
+        ],
+        expectedBodyFingerprints: [fingerprints.latest],
+        migrationRequired: true,
+        candidate: findings.latest,
+        expectedNetNew: [],
+        bodyStateChanged: true,
+        runHeadShas: [],
+      },
+      {
+        name: "legacy cannot override an explicit snapshot",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(202, explicitReviewBody([findings.latest])),
+          ownReview(203, legacyReviewBody(findings.ignored)),
+        ],
+        expectedBodyFingerprints: [fingerprints.latest],
+        migrationRequired: false,
+        candidate: findings.latest,
+        expectedNetNew: [],
+        bodyStateChanged: false,
+        runHeadShas: ["2".repeat(40)],
+      },
+      {
+        name: "explicit state without a run marker remains authoritative",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(202, markerOnlyExplicitReviewBody(findings.latest)),
+          ownReview(203, legacyReviewBody(findings.ignored)),
+        ],
+        expectedBodyFingerprints: [fingerprints.latest],
+        migrationRequired: false,
+        candidate: findings.latest,
+        expectedNetNew: [],
+        bodyStateChanged: false,
+        runHeadShas: [],
+      },
+      {
+        name: "latest explicit empty snapshot wins",
+        reviews: [
+          ownReview(201, explicitReviewBody([findings.latest])),
+          ownReview(202, explicitReviewBody([])),
+          ownReview(203, legacyReviewBody(findings.ignored)),
+        ],
+        expectedBodyFingerprints: [],
+        migrationRequired: false,
+        candidate: findings.latest,
+        expectedNetNew: [fingerprints.latest],
+        bodyStateChanged: true,
+        runHeadShas: ["2".repeat(40)],
+      },
+    ];
+
+    await Promise.all(
+      scenarios.map(async (scenario) => {
+        const fetchImplementation: FetchLike = async (input) => {
+          const url = String(input);
+          if (url.endsWith("/app")) {
+            return json({ slug: "revoir-test" });
+          }
+          if (url.endsWith("/app/installations/8/access_tokens")) {
+            return json({ token: "installation-secret" });
+          }
+          if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+            return json(scenario.reviews);
+          }
+          if (url.endsWith("/graphql")) {
+            return json({
+              data: {
+                repository: {
+                  pullRequest: {
+                    reviewThreads: {
+                      nodes: [],
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                    },
+                  },
+                },
+              },
+            });
+          }
+          throw new Error(`Unexpected request ${url}`);
+        };
+        const session = await new GitHubAppReviewGateway(
+          fetchImplementation,
+          "https://api.test",
+          () => 1_000,
+        ).authenticate(configuration.github, reference, new AbortController().signal);
+        const prior = await session.getPriorReviewState(reference, new AbortController().signal);
+        const plan = planFindingReconciliation([scenario.candidate], prior);
+
+        assert.deepEqual(
+          prior.bodyFindings?.map(({ fingerprint }) => fingerprint),
+          scenario.expectedBodyFingerprints,
+          scenario.name,
+        );
+        assert.equal(
+          prior.bodyStateMigrationRequired === true,
+          scenario.migrationRequired,
+          scenario.name,
+        );
+        assert.deepEqual(
+          plan.netNewFindings.map(({ fingerprint }) => fingerprint),
+          scenario.expectedNetNew,
+          scenario.name,
+        );
+        assert.equal(plan.bodyStateChanged, scenario.bodyStateChanged, scenario.name);
+        assert.deepEqual(prior.runHeadShas, scenario.runHeadShas, scenario.name);
+      }),
+    );
+  });
+
+  it("folds legacy snapshots across a review-page boundary and unions open App threads", async () => {
+    const retiredFingerprint = "a".repeat(64);
+    const threadFingerprint = "b".repeat(64);
+    const ignoredFingerprint = "c".repeat(64);
+    const retiredFinding = reviewFileFinding(retiredFingerprint, "returned.ts");
+    const threadFinding = reviewFileFinding(threadFingerprint, "unchanged.ts");
+    const firstPage = [
+      ...Array.from({ length: 99 }, (_, index) => ({
+        id: index + 1,
+        state: "COMMENTED",
+        body: "",
+        user: { login: "human" },
+      })),
+      {
+        id: 100,
+        state: "COMMENTED",
+        body: renderFileFinding(retiredFinding),
+        user: { login: "revoir-test[bot]" },
+      },
+    ];
+    const fetchImplementation: FetchLike = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+        return json(firstPage);
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=2")) {
+        return json([
+          {
+            id: 101,
+            state: "COMMENTED",
+            body: null,
+            user: { login: "revoir-test[bot]" },
+          },
+          {
+            id: 102,
+            state: "PENDING",
+            body: renderFileFinding(reviewFileFinding(ignoredFingerprint, "pending.ts")),
+            user: { login: "revoir-test[bot]" },
+          },
+        ]);
+      }
+      if (url.endsWith("/graphql")) {
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  nodes: [ownedReviewThreadResponse("THREAD_OPEN", threadFingerprint)],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const prior = await session.getPriorReviewState(reference, new AbortController().signal);
+    const plan = planFindingReconciliation([retiredFinding, threadFinding], prior);
+
+    assert.deepEqual(prior.bodyFindings, []);
+    assert.equal(prior.bodyStateMigrationRequired, true);
+    assert.deepEqual(prior.activeFingerprints, [threadFingerprint]);
+    assert.deepEqual(prior.ownedOpenThreads, [
+      { id: "THREAD_OPEN", fingerprint: threadFingerprint },
+    ]);
+    assert.deepEqual(
+      plan.netNewFindings.map(({ fingerprint }) => fingerprint),
+      [retiredFingerprint],
+    );
+    assert.equal(plan.bodyStateChanged, true);
   });
 
   it("discovers full body snapshots across delta, retirement, and clean runs", async () => {

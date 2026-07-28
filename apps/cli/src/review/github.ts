@@ -434,7 +434,7 @@ class InstallationSession implements GitHubReviewSession {
     const runHeadShas = new Set<string>();
     let latestBodyFindings: readonly PriorFindingIdentity[] = [];
     let bodyStateMigrationRequired = false;
-    let foundBodyState = false;
+    let foundExplicitBodyState = false;
     let reviewPage = 1;
     for (;;) {
       throwIfAborted(signal);
@@ -459,25 +459,14 @@ class InstallationSession implements GitHubReviewSession {
           for (const headSha of reviewHeadShas) {
             runHeadShas.add(headSha);
           }
-          if (reviewHeadShas.length > 0) {
-            const bodyState = bodyStateFindingIdentities(review.body);
-            if (bodyState !== undefined) {
-              latestBodyFindings = bodyState;
-              bodyStateMigrationRequired = false;
-              foundBodyState = true;
-            } else if (!foundBodyState) {
-              const legacyBodyFindings = findingMarkerIdentities(review.body);
-              if (legacyBodyFindings.length > 0) {
-                latestBodyFindings = legacyBodyFindings;
-                bodyStateMigrationRequired = true;
-              }
-            }
-          } else if (!foundBodyState) {
-            const legacyBodyFindings = findingMarkerIdentities(review.body);
-            if (legacyBodyFindings.length > 0) {
-              latestBodyFindings = legacyBodyFindings;
-              bodyStateMigrationRequired = true;
-            }
+          const bodyState = bodyStateFindingIdentities(review.body);
+          if (bodyState !== undefined) {
+            latestBodyFindings = bodyState;
+            bodyStateMigrationRequired = false;
+            foundExplicitBodyState = true;
+          } else if (!foundExplicitBodyState) {
+            latestBodyFindings = findingMarkerIdentities(review.body);
+            bodyStateMigrationRequired = true;
           }
         }
       }
