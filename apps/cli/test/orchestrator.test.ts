@@ -468,12 +468,12 @@ describe("clean review orchestrator", () => {
     const lockPath = join(stateDirectory, "manual-review.lock");
 
     try {
-      const firstReview = first.orchestrator.review(reference);
+      const firstReview = assert.rejects(first.orchestrator.review(reference), ReviewTimeoutError);
       await waitFor(
         () => first.events.includes("submit-review-20"),
         "review submission did not start",
       );
-      await assert.rejects(firstReview, ReviewTimeoutError);
+      await firstReview;
       await waitFor(
         () => fileIsMissing(lockPath),
         "submitted-review reconciliation did not release the process lock",
