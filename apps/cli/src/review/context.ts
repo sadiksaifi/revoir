@@ -52,6 +52,30 @@ function isInsideCheckout(checkout: string, candidate: string): boolean {
   return path === "" || (!path.startsWith(`..${sep}`) && path !== "..");
 }
 
+async function readCheckoutFileWithoutSymlinks(
+  checkout: string,
+  relativePath: string,
+): Promise<string | undefined> {
+  const components = relativePath.split("/");
+  let candidate = checkout;
+  for (const [index, component] of components.entries()) {
+    candidate = join(candidate, component);
+    // eslint-disable-next-line no-await-in-loop
+    const status = await lstat(candidate);
+    if (status.isSymbolicLink()) {
+      return undefined;
+    }
+    if (index < components.length - 1 && !status.isDirectory()) {
+      return undefined;
+    }
+    if (index === components.length - 1) {
+      // eslint-disable-next-line no-await-in-loop
+      return status.isFile() ? await readFile(candidate, "utf8") : undefined;
+    }
+  }
+  return undefined;
+}
+
 export async function loadApplicableRepositoryGuidance(
   checkout: string,
   diff: string,
@@ -81,19 +105,19 @@ export async function loadApplicableRepositoryGuidance(
       continue;
     }
     try {
-      // Guidance must be authored in the checkout; symlinks are not followed.
+      // Every component must be authored in the checkout; symlinked ancestors are not followed.
       // eslint-disable-next-line no-await-in-loop
-      const status = await lstat(candidate);
-      if (!status.isFile()) {
+      const content = await readCheckoutFileWithoutSymlinks(checkout, path);
+      if (content === undefined) {
         continue;
       }
-      // eslint-disable-next-line no-await-in-loop
-      guidance.push({ path, content: await readFile(candidate, "utf8") });
+      guidance.push({ path, content });
     } catch (error) {
       if (
         error instanceof Error &&
         "code" in error &&
-        (error as NodeJS.ErrnoException).code === "ENOENT"
+        ((error as NodeJS.ErrnoException).code === "ENOENT" ||
+          (error as NodeJS.ErrnoException).code === "ENOTDIR")
       ) {
         continue;
       }

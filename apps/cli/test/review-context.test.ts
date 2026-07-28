@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -71,6 +71,30 @@ describe("review context", () => {
       ]);
     } finally {
       await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("does not load guidance through a symlinked changed-path ancestor", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "revoir-guidance-checkout-"));
+    const external = await mkdtemp(join(tmpdir(), "revoir-guidance-external-"));
+    const deletedPathDiff = `diff --git a/apps/file.ts b/apps/file.ts
+deleted file mode 100644
+index 1111111..0000000
+--- a/apps/file.ts
++++ /dev/null
+@@ -1 +0,0 @@
+-export const value = 1;
+`;
+    try {
+      await writeFile(join(external, "AGENTS.md"), "must not load");
+      await symlink(external, join(checkout, "apps"), "dir");
+
+      assert.deepEqual(await loadApplicableRepositoryGuidance(checkout, deletedPathDiff), []);
+    } finally {
+      await Promise.all([
+        rm(checkout, { recursive: true, force: true }),
+        rm(external, { recursive: true, force: true }),
+      ]);
     }
   });
 
