@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
+import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const LOCK_FILE = "manual-review.lock";
@@ -10,7 +10,22 @@ interface LockOwner {
   owner: string;
 }
 
+interface StaleClaim {
+  format: "revoir-stale-claim-v1";
+  target: LockOwner;
+  claimant: LockOwner;
+}
+
+interface FileReviewLockHooks {
+  afterStaleClaim?(): Promise<void>;
+}
+
 type LockState = { kind: "missing" } | { kind: "invalid" } | { kind: "owned"; owner: LockOwner };
+
+type LockSnapshot =
+  | { kind: "missing" }
+  | { kind: "invalid"; device: number; inode: number }
+  | { kind: "owned"; owner: LockOwner; device: number; inode: number };
 
 export interface ReviewLockLease {
   release(): Promise<void>;
@@ -33,22 +48,48 @@ function isFileSystemError(error: unknown, code: string): boolean {
   );
 }
 
+function toLockOwner(value: unknown): LockOwner | undefined {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("pid" in value) ||
+    !Number.isSafeInteger(value.pid) ||
+    (value.pid as number) <= 0 ||
+    !("owner" in value) ||
+    typeof value.owner !== "string" ||
+    value.owner.length === 0
+  ) {
+    return undefined;
+  }
+  return { pid: value.pid as number, owner: value.owner };
+}
+
 function parseLockOwner(value: string): LockOwner | undefined {
+  try {
+    return toLockOwner(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+}
+
+function parseStaleClaim(value: string): StaleClaim | undefined {
   try {
     const parsed = JSON.parse(value) as unknown;
     if (
       typeof parsed !== "object" ||
       parsed === null ||
-      !("pid" in parsed) ||
-      !Number.isSafeInteger(parsed.pid) ||
-      (parsed.pid as number) <= 0 ||
-      !("owner" in parsed) ||
-      typeof parsed.owner !== "string" ||
-      parsed.owner.length === 0
+      !("format" in parsed) ||
+      parsed.format !== "revoir-stale-claim-v1" ||
+      !("target" in parsed) ||
+      !("claimant" in parsed)
     ) {
       return undefined;
     }
-    return { pid: parsed.pid as number, owner: parsed.owner };
+    const target = toLockOwner(parsed.target);
+    const claimant = toLockOwner(parsed.claimant);
+    return target === undefined || claimant === undefined
+      ? undefined
+      : { format: parsed.format, target, claimant };
   } catch {
     return undefined;
   }
@@ -63,6 +104,28 @@ async function readLockState(path: string): Promise<LockState> {
       return { kind: "missing" };
     }
     throw error;
+  }
+}
+
+async function readLockSnapshot(path: string): Promise<LockSnapshot> {
+  let handle;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (isFileSystemError(error, "ENOENT")) {
+      return { kind: "missing" };
+    }
+    throw error;
+  }
+
+  try {
+    const [value, stats] = await Promise.all([handle.readFile("utf8"), handle.stat()]);
+    const owner = parseLockOwner(value);
+    return owner === undefined
+      ? { kind: "invalid", device: stats.dev, inode: stats.ino }
+      : { kind: "owned", owner, device: stats.dev, inode: stats.ino };
+  } finally {
+    await handle.close();
   }
 }
 
@@ -81,9 +144,11 @@ function sameOwner(left: LockOwner, right: LockOwner): boolean {
 
 export class FileReviewLock implements ReviewLock {
   readonly #lockPath: string;
+  readonly #hooks: FileReviewLockHooks;
 
-  constructor(stateDirectory: string) {
+  constructor(stateDirectory: string, hooks: FileReviewLockHooks = {}) {
     this.#lockPath = join(stateDirectory, LOCK_FILE);
+    this.#hooks = hooks;
   }
 
   async acquire(): Promise<ReviewLockLease> {
@@ -110,7 +175,7 @@ export class FileReviewLock implements ReviewLock {
       if (!isFileSystemError(error, "EEXIST")) {
         throw error;
       }
-      if (attemptsRemaining <= 1 || !(await this.#removeStaleOwner())) {
+      if (attemptsRemaining <= 1 || !(await this.#removeStaleOwner(owner))) {
         throw new ReviewInProgressError();
       }
       return this.#tryAcquire(attemptsRemaining - 1);
@@ -137,8 +202,8 @@ export class FileReviewLock implements ReviewLock {
     };
   }
 
-  async #removeStaleOwner(): Promise<boolean> {
-    const observed = await readLockState(this.#lockPath);
+  async #removeStaleOwner(claimant: LockOwner): Promise<boolean> {
+    const observed = await readLockSnapshot(this.#lockPath);
     if (observed.kind === "missing") {
       return true;
     }
@@ -149,38 +214,24 @@ export class FileReviewLock implements ReviewLock {
     const ownerKey = createHash("sha256")
       .update(`${observed.owner.pid}\0${observed.owner.owner}`)
       .digest("hex");
-    const quarantinePath = `${this.#lockPath}.${ownerKey}.stale`;
-    try {
-      await link(this.#lockPath, quarantinePath);
-    } catch (error) {
-      if (isFileSystemError(error, "ENOENT")) {
-        return true;
-      }
-      if (isFileSystemError(error, "EEXIST")) {
-        return false;
-      }
-      throw error;
+    const claimRootPath = `${this.#lockPath}.${ownerKey}.reclaim`;
+    const claim = await this.#claimStaleOwner(claimRootPath, observed.owner, claimant);
+    if (claim === undefined) {
+      return false;
     }
 
     try {
-      const quarantined = await readLockState(quarantinePath);
-      if (quarantined.kind !== "owned" || !sameOwner(quarantined.owner, observed.owner)) {
-        return false;
-      }
-
-      const current = await readLockState(this.#lockPath);
+      await this.#hooks.afterStaleClaim?.();
+      const current = await readLockSnapshot(this.#lockPath);
       if (current.kind === "missing") {
         return true;
       }
-      if (current.kind !== "owned" || !sameOwner(current.owner, observed.owner)) {
-        return false;
-      }
-
-      const [quarantinedStats, currentStats] = await Promise.all([
-        stat(quarantinePath),
-        stat(this.#lockPath),
-      ]);
-      if (quarantinedStats.dev !== currentStats.dev || quarantinedStats.ino !== currentStats.ino) {
+      if (
+        current.kind !== "owned" ||
+        !sameOwner(current.owner, observed.owner) ||
+        current.device !== observed.device ||
+        current.inode !== observed.inode
+      ) {
         return false;
       }
 
@@ -194,11 +245,80 @@ export class FileReviewLock implements ReviewLock {
         throw error;
       }
     } finally {
-      await unlink(quarantinePath).catch((error: unknown) => {
-        if (!isFileSystemError(error, "ENOENT")) {
+      await Promise.all(
+        claim.paths.map((path) =>
+          unlink(path).catch((error: unknown) => {
+            if (!isFileSystemError(error, "ENOENT")) {
+              throw error;
+            }
+          }),
+        ),
+      );
+    }
+  }
+
+  async #claimStaleOwner(
+    claimRootPath: string,
+    target: LockOwner,
+    claimant: LockOwner,
+  ): Promise<{ paths: string[] } | undefined> {
+    const candidatePath = `${claimRootPath}.${claimant.pid}.${claimant.owner}.tmp`;
+    const claim: StaleClaim = {
+      format: "revoir-stale-claim-v1",
+      target,
+      claimant,
+    };
+    const paths: string[] = [];
+
+    try {
+      const handle = await open(candidatePath, "wx", LOCK_MODE);
+      try {
+        await handle.writeFile(`${JSON.stringify(claim)}\n`, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+
+      let generation = 0;
+      for (;;) {
+        const claimPath = generation === 0 ? claimRootPath : `${claimRootPath}.${generation}`;
+        try {
+          // Claim generations must be inspected and created in order.
+          // eslint-disable-next-line no-await-in-loop
+          await link(candidatePath, claimPath);
+          paths.push(claimPath);
+          return { paths };
+        } catch (error) {
+          if (!isFileSystemError(error, "EEXIST")) {
+            throw error;
+          }
+        }
+
+        let value: string;
+        try {
+          // A later generation is safe only after this claimant is known to have exited.
+          // eslint-disable-next-line no-await-in-loop
+          value = await readFile(claimPath, "utf8");
+        } catch (error) {
+          if (isFileSystemError(error, "ENOENT")) {
+            continue;
+          }
           throw error;
         }
-      });
+
+        const existing = parseStaleClaim(value);
+        if (
+          existing === undefined ||
+          !sameOwner(existing.target, target) ||
+          isProcessAlive(existing.claimant.pid)
+        ) {
+          return undefined;
+        }
+        paths.push(claimPath);
+        generation += 1;
+      }
+    } finally {
+      await unlink(candidatePath).catch(() => {});
     }
   }
 }
