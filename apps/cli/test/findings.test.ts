@@ -661,6 +661,75 @@ index 1111111..3333333 100644
     );
   });
 
+  it("keeps a surviving same-anchor occurrence matched when a new peer appears", async () => {
+    const withoutPeer = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,4 @@
+ const retained = true;
++guard();
++targetAnchor();
++tail();
+`;
+    const withPeer = `diff --git a/source.ts b/source.ts
+index 1111111..3333333 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,7 @@
+ const retained = true;
++guard();
++targetAnchor();
++tail();
++guard();
++targetAnchor();
++tail();
+`;
+    const survivor = finding({
+      range: { start: 3, end: 3, side: "RIGHT" },
+      defectKind: "correctness",
+      impactKind: "operation-failure",
+      fixAction: "guard",
+      anchor: "targetAnchor();",
+    });
+    const addedPeer = finding({
+      range: { start: 6, end: 6, side: "RIGHT" },
+      defectKind: "correctness",
+      impactKind: "operation-failure",
+      fixAction: "guard",
+      anchor: "targetAnchor();",
+    });
+    const firstRun = await validateModelReviewOutput(output([survivor]), {
+      checkout,
+      diff: withoutPeer,
+    });
+    const secondRun = await validateModelReviewOutput(output([survivor, addedPeer]), {
+      checkout,
+      diff: withPeer,
+    });
+    const survivingThread = firstRun.findings[0]!;
+
+    assert.deepEqual(
+      planFindingReconciliation(secondRun.findings, {
+        activeFingerprints: [survivingThread.fingerprint],
+        ownedOpenThreads: [
+          {
+            id: "THREAD_SURVIVOR",
+            fingerprint: survivingThread.fingerprint,
+            aliases: survivingThread.fingerprintAliases!,
+          },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [secondRun.findings[1]],
+        obsoleteThreadIds: [],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
+      },
+    );
+  });
+
   it("keeps occurrence identity stable when unrelated changed text is inserted beside it", async () => {
     const beforeEdit = `diff --git a/source.ts b/source.ts
 index 1111111..2222222 100644

@@ -189,6 +189,9 @@ function matchFindingIdentities(
     .map((_identity, index) => index)
     .toSorted(
       (left, right) =>
+        Number(candidates[right]![0]?.exact ?? false) -
+          Number(candidates[left]![0]?.exact ?? false) ||
+        (candidates[right]![0]?.intersection ?? 0) - (candidates[left]![0]?.intersection ?? 0) ||
         candidates[left]!.length - candidates[right]!.length ||
         current[left]!.fingerprint.localeCompare(current[right]!.fingerprint),
     );
