@@ -336,11 +336,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
             currentSha: preReviewSha,
           };
         } else {
-          const evidence = await github.getReviewEvidence(
-            reference,
-            pullRequest.headSha,
-            signal,
-          );
+          const evidence = await github.getReviewEvidence(reference, pullRequest.headSha, signal);
           throwIfAborted(signal);
           const engineResult = (await this.#reviewEngine.review(
             { reference, pullRequest, workspace, evidence },
