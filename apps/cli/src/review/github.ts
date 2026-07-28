@@ -56,6 +56,13 @@ export interface GitHubReviewGateway {
   ): Promise<GitHubReviewSession>;
 }
 
+export class ReviewSubmissionUncertainError extends Error {
+  constructor(options?: ErrorOptions) {
+    super("GitHub review submission state could not be confirmed.", options);
+    this.name = "ReviewSubmissionUncertainError";
+  }
+}
+
 export type FetchLike = (
   input: string | URL | globalThis.Request,
   init?: RequestInit,
@@ -542,14 +549,43 @@ class InstallationSession implements GitHubReviewSession {
           failure = error;
         }
 
-        const liveReview = await this.#getReview(reference, id, reconciliationSignal);
-        if (
-          liveReview.state.toUpperCase() !== "PENDING" &&
-          liveReview.userLogin.toLowerCase() === this.#botLogin
-        ) {
-          return;
+        const reconciliationFailures: Error[] = [];
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          let liveReview: GitHubReviewResponse;
+          try {
+            // Reconciliation is intentionally bounded; an unknown state must not trigger
+            // deletion of a review that GitHub may already have submitted.
+            // eslint-disable-next-line no-await-in-loop
+            liveReview = await this.#getReview(reference, id, reconciliationSignal);
+          } catch (error) {
+            reconciliationFailures.push(asError(error));
+            if (attempt === 0) {
+              // Keep retries interruptible without adding a fixed delay.
+              // eslint-disable-next-line no-await-in-loop
+              await yieldToEventLoop(reconciliationSignal);
+            }
+            continue;
+          }
+          if (
+            liveReview.state.toUpperCase() !== "PENDING" &&
+            liveReview.userLogin.toLowerCase() === this.#botLogin
+          ) {
+            return;
+          }
+          if (
+            liveReview.state.toUpperCase() === "PENDING" &&
+            liveReview.userLogin.toLowerCase() === this.#botLogin
+          ) {
+            throw failure;
+          }
+          throw new ReviewSubmissionUncertainError();
         }
-        throw failure;
+        throw new ReviewSubmissionUncertainError({
+          cause: new AggregateError(
+            reconciliationFailures,
+            "GitHub review reconciliation reads failed.",
+          ),
+        });
       },
     };
   }

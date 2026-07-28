@@ -11,6 +11,7 @@ import type {
   GitHubReviewSession,
   ReviewReaction,
 } from "../src/review/github.js";
+import { ReviewSubmissionUncertainError } from "../src/review/github.js";
 import { FileReviewLock, ReviewInProgressError, type ReviewLock } from "../src/review/lock.js";
 import { CleanReviewOrchestrator, ReviewTimeoutError } from "../src/review/orchestrator.js";
 import {
@@ -125,6 +126,7 @@ function harness(
     pendingDeletionError?: Error;
     pendingSubmissionRace?: boolean;
     pendingSubmissionError?: Error;
+    pendingSubmissionUncertain?: boolean;
     reactionDeletionGate?: Promise<void>;
     reactionDeletionError?: Error;
     reactionDeletionErrorAttempts?: number;
@@ -247,6 +249,14 @@ function harness(
         },
         async submit(submitSignal, reconciliationSignal) {
           events.push("submit-review-20");
+          if (options.pendingSubmissionUncertain === true) {
+            if (!submitSignal.aborted) {
+              await new Promise<void>((resolve) => {
+                submitSignal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            }
+            throw new ReviewSubmissionUncertainError();
+          }
           if (options.pendingSubmissionRace === true) {
             if (!submitSignal.aborted) {
               await new Promise<void>((resolve) => {
@@ -473,6 +483,38 @@ describe("clean review orchestrator", () => {
       assert.equal((await second.orchestrator.review(reference)).status, "clean");
     } finally {
       allowSubmittedDeletion?.();
+      await waitFor(() => fileIsMissing(lockPath), "test cleanup did not release the process lock");
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("releases the process lock without deleting an ambiguously submitted review", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-submit-unknown-lock-"));
+    let allowPendingDeletion: (() => void) | undefined;
+    const pendingDeletionGate = new Promise<void>((resolve) => {
+      allowPendingDeletion = resolve;
+    });
+    const first = harness({
+      reviewMs: 20,
+      lock: new FileReviewLock(stateDirectory),
+      pendingDeletionGate,
+      pendingSubmissionUncertain: true,
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+    const lockPath = join(stateDirectory, "manual-review.lock");
+
+    try {
+      await assert.rejects(first.orchestrator.review(reference), ReviewTimeoutError);
+      await waitFor(
+        () => fileIsMissing(lockPath),
+        "ambiguous review submission retained the process lock",
+      );
+
+      assert.equal(first.events.includes("delete-review-20"), false);
+      assert.equal((await second.orchestrator.review(reference)).status, "clean");
+    } finally {
+      allowPendingDeletion?.();
       await waitFor(() => fileIsMissing(lockPath), "test cleanup did not release the process lock");
       await rm(stateDirectory, { recursive: true, force: true });
     }

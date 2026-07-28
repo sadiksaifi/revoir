@@ -1,6 +1,10 @@
 import type { RevoirConfiguration } from "../config/schema.js";
 import type { FindingDiagnostic } from "./findings.js";
-import { GitHubAppReviewGateway, type GitHubReviewGateway } from "./github.js";
+import {
+  GitHubAppReviewGateway,
+  ReviewSubmissionUncertainError,
+  type GitHubReviewGateway,
+} from "./github.js";
 import { FileReviewLock, type ReviewLock } from "./lock.js";
 import { PiReviewEngine, type ReviewEngine } from "./pi.js";
 import { createReviewPublication } from "./publication.js";
@@ -315,7 +319,16 @@ export class CleanReviewOrchestrator implements ManualReviewService {
           const postDraftSha = await github.getHeadSha(reference, signal);
           throwIfAborted(signal);
           if (postDraftSha === pullRequest.headSha) {
-            await pendingReview.submit(signal, terminalSignal);
+            try {
+              await pendingReview.submit(signal, terminalSignal);
+            } catch (error) {
+              if (error instanceof ReviewSubmissionUncertainError) {
+                // Deleting after an ambiguous submit can target a review GitHub already
+                // published. A later run reconciles any draft that actually remained.
+                pendingReviewCleanup = undefined;
+              }
+              throw error;
+            }
             pendingReviewCleanup = undefined;
             result = {
               status: "findings",

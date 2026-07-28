@@ -423,6 +423,58 @@ describe("GitHub App review gateway", () => {
     await pending.submit(submitController.signal, reconciliationController.signal);
   });
 
+  it("retries a transient read while reconciling an ambiguous submission", async () => {
+    const submitController = new AbortController();
+    const reconciliationController = new AbortController();
+    let reconciliationReads = 0;
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
+        return json({ id: 112 });
+      }
+      if (url.endsWith("/reviews/112/events") && init?.method === "POST") {
+        submitController.abort(new Error("deadline elapsed after submission"));
+        return json({ id: 112, state: "COMMENTED" });
+      }
+      if (url.endsWith("/reviews/112") && init?.method === undefined) {
+        assert.equal(init?.signal, reconciliationController.signal);
+        reconciliationReads += 1;
+        if (reconciliationReads === 1) {
+          throw new Error("transient reconciliation failure");
+        }
+        return json({
+          id: 112,
+          state: "COMMENTED",
+          user: { login: "revoir-test[bot]" },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const publication = {
+      payload: { commit_id: "2".repeat(40), body: "finding" },
+      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
+    };
+    const pending = await session.createPendingReview(
+      reference,
+      publication,
+      new AbortController().signal,
+    );
+
+    await pending.submit(submitController.signal, reconciliationController.signal);
+    assert.equal(reconciliationReads, 2);
+  });
+
   it("treats only deleted and already-absent reaction responses as successful", async () => {
     const statuses = [200, 201, 202, 206, 401, 403, 429, 500];
     let deleteAttempt = 0;
