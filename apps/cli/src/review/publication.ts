@@ -128,14 +128,34 @@ export function renderRunMarker(commitId: string): string {
   return `<!-- revoir:run:v1:${commitId} -->`;
 }
 
+function bodyState(findings: readonly ReviewFindingV1[]): string {
+  const identities = new Map<string, Set<string>>();
+  for (const finding of findings) {
+    const aliases = identities.get(finding.fingerprint) ?? new Set<string>();
+    for (const alias of finding.fingerprintAliases ?? []) {
+      aliases.add(alias);
+    }
+    identities.set(finding.fingerprint, aliases);
+  }
+  const markers = ["<!-- revoir:body-state:v1 -->"];
+  for (const [fingerprint, aliases] of [...identities].toSorted(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    markers.push(`<!-- revoir:body-finding:v1:${fingerprint} -->`);
+    for (const alias of [...aliases].toSorted()) {
+      markers.push(`<!-- revoir:body-finding-alias:v1:${fingerprint}:${alias} -->`);
+    }
+  }
+  return markers.join("\n");
+}
+
 export function createReviewPublication(
   commitId: string,
   findings: readonly ReviewFindingV1[],
+  currentBodyFindings: readonly ReviewFindingV1[] = findings.filter(
+    (finding) => finding.attachment.kind === "file",
+  ),
 ): ReviewPublication {
-  if (findings.length === 0) {
-    throw new Error("A findings review requires at least one validated finding.");
-  }
-
   const comments: GitHubInlineReviewComment[] = [];
   const bodyFindings: ReviewFindingV1[] = [];
   for (const finding of findings) {
@@ -158,11 +178,19 @@ export function createReviewPublication(
   }
 
   const marker = renderRunMarker(commitId);
-  const body =
-    bodyFindings.length === 0
-      ? marker
-      : `${bodyFindings.map(renderFileFinding).join("\n\n")}\n\n${marker}`;
-  const fallbackBody = `${findings.map(renderFileFinding).join("\n\n")}\n\n${marker}`;
+  const body = [
+    ...(bodyFindings.length === 0 ? [] : [bodyFindings.map(renderFileFinding).join("\n\n")]),
+    bodyState(currentBodyFindings),
+    marker,
+  ].join("\n\n");
+  const fallbackBodyFindings = new Map(
+    currentBodyFindings.concat(findings).map((finding) => [finding.fingerprint, finding]),
+  );
+  const fallbackBody = [
+    ...(findings.length === 0 ? [] : [findings.map(renderFileFinding).join("\n\n")]),
+    bodyState([...fallbackBodyFindings.values()]),
+    marker,
+  ].join("\n\n");
   return {
     payload: {
       commit_id: commitId,

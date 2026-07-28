@@ -399,7 +399,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
                 currentSha: postReconciliationSha,
               };
             } else if (engineResult.findings.length > 0) {
-              if (reconciliation.netNewFindings.length === 0) {
+              if (reconciliation.netNewFindings.length === 0 && !reconciliation.bodyStateChanged) {
                 result = {
                   status: "findings",
                   reviewedSha: pullRequest.headSha,
@@ -412,6 +412,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
                 const publication = createReviewPublication(
                   pullRequest.headSha,
                   reconciliation.netNewFindings,
+                  reconciliation.currentBodyFindings,
                 );
                 pendingReviewCleanup = createTerminalHandle(() =>
                   github.removeOwnPendingReview(reference, terminalSignal),

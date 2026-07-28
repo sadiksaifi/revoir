@@ -40,6 +40,8 @@ describe("finding reconciliation", () => {
       {
         netNewFindings: [],
         obsoleteThreadIds: [],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
       },
     );
   });
@@ -61,6 +63,8 @@ describe("finding reconciliation", () => {
       {
         netNewFindings: [changed],
         obsoleteThreadIds: ["THREAD_B", "THREAD_Z"],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
       },
     );
   });
@@ -80,7 +84,50 @@ describe("finding reconciliation", () => {
       {
         netNewFindings: [],
         obsoleteThreadIds: ["THREAD_1", "THREAD_2"],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
       },
     );
+  });
+
+  it("tracks body findings as a complete snapshot across delta and retirement runs", () => {
+    const retained = {
+      ...finding("a".repeat(64), 7),
+      range: null,
+      attachment: { kind: "file", path: "source.ts" } as const,
+    };
+    const netNew = {
+      ...retained,
+      fingerprint: "b".repeat(64),
+      anchor: "otherValue",
+    };
+    const deltaPlan = planFindingReconciliation([retained, netNew], {
+      activeFingerprints: [retained.fingerprint],
+      bodyFindings: [{ fingerprint: retained.fingerprint }],
+      ownedOpenThreads: [],
+      runHeadShas: ["1".repeat(40)],
+    });
+    assert.deepEqual(deltaPlan.netNewFindings, [netNew]);
+    assert.deepEqual(deltaPlan.currentBodyFindings, [retained, netNew]);
+    assert.equal(deltaPlan.bodyStateChanged, true);
+
+    const unchangedInline = finding("c".repeat(64), 9);
+    const retirementPlan = planFindingReconciliation([unchangedInline], {
+      activeFingerprints: [retained.fingerprint, unchangedInline.fingerprint],
+      bodyFindings: [{ fingerprint: retained.fingerprint }],
+      ownedOpenThreads: [{ id: "THREAD_CURRENT", fingerprint: unchangedInline.fingerprint }],
+      runHeadShas: ["2".repeat(40)],
+    });
+    assert.deepEqual(retirementPlan.netNewFindings, []);
+    assert.deepEqual(retirementPlan.currentBodyFindings, []);
+    assert.equal(retirementPlan.bodyStateChanged, true);
+
+    const returnPlan = planFindingReconciliation([retained], {
+      activeFingerprints: [],
+      bodyFindings: [],
+      ownedOpenThreads: [],
+      runHeadShas: ["3".repeat(40)],
+    });
+    assert.deepEqual(returnPlan.netNewFindings, [retained]);
   });
 });

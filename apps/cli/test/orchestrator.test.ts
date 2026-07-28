@@ -545,6 +545,39 @@ describe("clean review orchestrator", () => {
     assert.equal(events.includes("add-+1"), false);
   });
 
+  it("publishes a state-only review when a body finding disappears", async () => {
+    const unchangedInline = validatedFinding();
+    const disappearedBody = {
+      ...validatedFinding(),
+      fingerprint: "b".repeat(64),
+      range: null,
+      anchor: "source.ts",
+      attachment: { kind: "file", path: "source.ts" } as const,
+    };
+    const { createdPublications, orchestrator } = harness({
+      priorReviewState: {
+        activeFingerprints: [unchangedInline.fingerprint, disappearedBody.fingerprint],
+        bodyFindings: [{ fingerprint: disappearedBody.fingerprint }],
+        ownedOpenThreads: [{ id: "THREAD_CURRENT", fingerprint: unchangedInline.fingerprint }],
+        runHeadShas: ["1".repeat(40)],
+      },
+      review: async () => ({ findings: [unchangedInline], diagnostics: [] }),
+    });
+
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "findings",
+      reviewedSha: "2".repeat(40),
+      currentSha: "2".repeat(40),
+      publishedFindings: 0,
+      rejectedFindings: 0,
+      diagnostics: [],
+    });
+    assert.equal(createdPublications.length, 1);
+    assert.equal(createdPublications[0]?.payload.comments, undefined);
+    assert.match(createdPublications[0]?.payload.body ?? "", /<!-- revoir:body-state:v1 -->/u);
+    assert.doesNotMatch(createdPublications[0]?.payload.body ?? "", /revoir:body-finding/u);
+  });
+
   it("refreshes prior state after an uncertain pending review becomes submitted", async () => {
     const unchanged = validatedFinding();
     const publishedState: PriorReviewState = {

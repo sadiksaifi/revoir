@@ -7,6 +7,10 @@ import {
 const FINDING_MARKER = /^<!-- revoir:finding:v1:([0-9a-f]{64}) -->\r?$/gmu;
 const FINDING_ALIAS_MARKER =
   /^<!-- revoir:finding-alias:v1:([0-9a-f]{64}):([0-9a-f]{64}) -->\r?$/gmu;
+const BODY_STATE_MARKER = /^<!-- revoir:body-state:v1 -->\r?$/mu;
+const BODY_FINDING_MARKER = /^<!-- revoir:body-finding:v1:([0-9a-f]{64}) -->\r?$/gmu;
+const BODY_FINDING_ALIAS_MARKER =
+  /^<!-- revoir:body-finding-alias:v1:([0-9a-f]{64}):([0-9a-f]{64}) -->\r?$/gmu;
 const RUN_MARKER = /^<!-- revoir:run:v1:([0-9a-f]{40,64}) -->\r?$/gmu;
 
 export interface PriorFindingIdentity {
@@ -28,6 +32,8 @@ export interface PriorReviewState {
 export interface FindingReconciliationPlan {
   readonly netNewFindings: readonly ReviewFindingV1[];
   readonly obsoleteThreadIds: readonly string[];
+  readonly currentBodyFindings: readonly ReviewFindingV1[];
+  readonly bodyStateChanged: boolean;
 }
 
 function markerValues(value: string, pattern: RegExp): string[] {
@@ -39,15 +45,23 @@ export function findingMarkerFingerprints(value: string): string[] {
 }
 
 export function findingMarkerIdentities(value: string): PriorFindingIdentity[] {
+  return markerIdentities(value, FINDING_MARKER, FINDING_ALIAS_MARKER);
+}
+
+function markerIdentities(
+  value: string,
+  marker: RegExp,
+  aliasMarker: RegExp,
+): PriorFindingIdentity[] {
   const aliasesByFingerprint = new Map<string, Set<string>>();
-  for (const match of value.matchAll(FINDING_ALIAS_MARKER)) {
+  for (const match of value.matchAll(aliasMarker)) {
     const aliases = aliasesByFingerprint.get(match[1]!) ?? new Set<string>();
     aliases.add(match[2]!);
     aliasesByFingerprint.set(match[1]!, aliases);
   }
   const seen = new Set<string>();
   const identities: PriorFindingIdentity[] = [];
-  for (const fingerprint of findingMarkerFingerprints(value)) {
+  for (const fingerprint of markerValues(value, marker)) {
     if (seen.has(fingerprint)) {
       continue;
     }
@@ -59,6 +73,15 @@ export function findingMarkerIdentities(value: string): PriorFindingIdentity[] {
     });
   }
   return identities;
+}
+
+export function bodyStateFindingIdentities(
+  value: string,
+): readonly PriorFindingIdentity[] | undefined {
+  if (!BODY_STATE_MARKER.test(value)) {
+    return undefined;
+  }
+  return markerIdentities(value, BODY_FINDING_MARKER, BODY_FINDING_ALIAS_MARKER);
 }
 
 export function runMarkerHeadShas(value: string): string[] {
@@ -83,23 +106,31 @@ function currentFindingIdentity(finding: ReviewFindingV1): PriorFindingIdentity 
 }
 
 interface MatchablePriorIdentity extends PriorFindingIdentity {
+  readonly source: "body" | "thread" | "legacy";
   readonly threadId?: string;
 }
 
 function priorFindingIdentities(prior: PriorReviewState): MatchablePriorIdentity[] {
-  const identities: MatchablePriorIdentity[] = [
-    ...(prior.bodyFindings ?? []),
-    ...prior.ownedOpenThreads.map(({ id, fingerprint, aliases }) => ({
-      fingerprint,
-      ...(aliases === undefined ? {} : { aliases }),
-      threadId: id,
-    })),
-  ];
+  const identities: MatchablePriorIdentity[] = [];
+  for (const { fingerprint, aliases } of prior.bodyFindings ?? []) {
+    identities.push(
+      aliases === undefined
+        ? { fingerprint, source: "body" }
+        : { fingerprint, aliases, source: "body" },
+    );
+  }
+  for (const { id, fingerprint, aliases } of prior.ownedOpenThreads) {
+    identities.push(
+      aliases === undefined
+        ? { fingerprint, source: "thread", threadId: id }
+        : { fingerprint, aliases, source: "thread", threadId: id },
+    );
+  }
   for (const fingerprint of prior.activeFingerprints) {
     if (identities.some((identity) => identity.fingerprint === fingerprint)) {
       continue;
     }
-    identities.push({ fingerprint });
+    identities.push({ fingerprint, source: "legacy" });
   }
   return identities;
 }
@@ -118,7 +149,11 @@ function intersectionSize(left: PriorFindingIdentity, right: PriorFindingIdentit
 function matchFindingIdentities(
   current: readonly PriorFindingIdentity[],
   prior: readonly MatchablePriorIdentity[],
-): { readonly currentMatches: ReadonlySet<number>; readonly priorMatches: ReadonlySet<number> } {
+): {
+  readonly currentMatches: ReadonlySet<number>;
+  readonly priorMatches: ReadonlySet<number>;
+  readonly priorByCurrent: ReadonlyMap<number, number>;
+} {
   const candidates = current.map((identity) =>
     prior
       .map((priorIdentity, index) => ({
@@ -160,9 +195,14 @@ function matchFindingIdentities(
   for (const currentIndex of currentOrder) {
     assign(currentIndex, new Set());
   }
+  const priorByCurrent = new Map<number, number>();
+  for (const [priorIndex, currentIndex] of matchedCurrentByPrior) {
+    priorByCurrent.set(currentIndex, priorIndex);
+  }
   return {
     currentMatches: new Set(matchedCurrentByPrior.values()),
     priorMatches: new Set(matchedCurrentByPrior.keys()),
+    priorByCurrent,
   };
 }
 
@@ -173,6 +213,26 @@ export function planFindingReconciliation(
   const current = findings.map((finding) => currentFindingIdentity(finding));
   const previous = priorFindingIdentities(prior);
   const matches = matchFindingIdentities(current, previous);
+  const currentBodyFindings = findings.filter((finding, index) => {
+    if (finding.attachment.kind === "file") {
+      return true;
+    }
+    const priorIndex = matches.priorByCurrent.get(index);
+    return priorIndex !== undefined && previous[priorIndex]?.source === "body";
+  });
+  const priorBodyFindings = prior.bodyFindings ?? [];
+  const bodyMatches = matchFindingIdentities(
+    currentBodyFindings.map((finding) => currentFindingIdentity(finding)),
+    priorBodyFindings.map(({ fingerprint, aliases }) => ({
+      fingerprint,
+      ...(aliases === undefined ? {} : { aliases }),
+      source: "body",
+    })),
+  );
+  const bodyStateChanged =
+    prior.bodyFindings !== undefined &&
+    (bodyMatches.currentMatches.size !== currentBodyFindings.length ||
+      bodyMatches.priorMatches.size !== priorBodyFindings.length);
 
   return {
     netNewFindings: findings.filter((_finding, index) => !matches.currentMatches.has(index)),
@@ -185,5 +245,7 @@ export function planFindingReconciliation(
         ),
       ),
     ].toSorted(),
+    currentBodyFindings,
+    bodyStateChanged,
   };
 }

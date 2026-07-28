@@ -9,6 +9,7 @@ import type {
   PullRequestSnapshot,
 } from "./pull-request.js";
 import {
+  bodyStateFindingIdentities,
   findingMarkerIdentities,
   runMarkerHeadShas,
   type PriorFindingIdentity,
@@ -427,6 +428,7 @@ class InstallationSession implements GitHubReviewSession {
     const activeFingerprints = new Set<string>();
     const runHeadShas = new Set<string>();
     let latestBodyFindings: readonly PriorFindingIdentity[] = [];
+    let foundBodyState = false;
     let reviewPage = 1;
     for (;;) {
       throwIfAborted(signal);
@@ -452,7 +454,13 @@ class InstallationSession implements GitHubReviewSession {
             runHeadShas.add(headSha);
           }
           if (reviewHeadShas.length > 0) {
-            latestBodyFindings = findingMarkerIdentities(review.body);
+            const bodyState = bodyStateFindingIdentities(review.body);
+            if (bodyState !== undefined) {
+              latestBodyFindings = bodyState;
+              foundBodyState = true;
+            } else if (!foundBodyState) {
+              latestBodyFindings = findingMarkerIdentities(review.body);
+            }
           }
         }
       }

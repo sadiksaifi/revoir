@@ -437,7 +437,7 @@ describe("GitHub App review gateway", () => {
     assert.deepEqual(mutations, ["THREAD_OWN_OPEN"]);
   });
 
-  it("retires historical body fingerprints after later findings and clean runs", async () => {
+  it("discovers full body snapshots across delta, retirement, and clean runs", async () => {
     const historicalFingerprint = "a".repeat(64);
     const latestFingerprint = "b".repeat(64);
     const fileFinding: ReviewFindingV1 = {
@@ -463,6 +463,13 @@ describe("GitHub App review gateway", () => {
         side: "RIGHT",
       },
     };
+    const latestFinding: ReviewFindingV1 = {
+      ...fileFinding,
+      fingerprint: latestFingerprint,
+      path: "latest.ts",
+      anchor: "latest.ts",
+      attachment: { kind: "file", path: "latest.ts" },
+    };
     const historicalBodies = [
       createReviewPublication("1".repeat(40), [fileFinding]).payload.body!,
       createReviewPublication("1".repeat(40), [fallbackFinding]).fallbackPayload.body!,
@@ -470,8 +477,16 @@ describe("GitHub App review gateway", () => {
 
     await Promise.all(
       historicalBodies.flatMap((historicalBody, index) =>
-        (["findings", "clean"] as const).map(async (priorRun) => {
+        (["findings", "retired", "clean"] as const).map(async (priorRun) => {
           const returnedFinding = index === 0 ? fileFinding : fallbackFinding;
+          const laterBody =
+            priorRun === "findings"
+              ? createReviewPublication(
+                  "2".repeat(40),
+                  [latestFinding],
+                  [returnedFinding, latestFinding],
+                ).payload.body!
+              : createReviewPublication("2".repeat(40), [], []).payload.body!;
           const fetchImplementation: FetchLike = async (input, init) => {
             const url = String(input);
             if (url.endsWith("/app")) {
@@ -504,16 +519,16 @@ describe("GitHub App review gateway", () => {
                   body: historicalBody,
                   user: { login: "revoir-test[bot]" },
                 },
-                ...(priorRun === "findings"
-                  ? [
+                ...(priorRun === "clean"
+                  ? []
+                  : [
                       {
                         id: 202,
                         state: "COMMENTED",
-                        body: `<!-- revoir:finding:v1:${latestFingerprint} -->\n<!-- revoir:run:v1:${"2".repeat(40)} -->`,
+                        body: laterBody,
                         user: { login: "revoir-test[bot]" },
                       },
-                    ]
-                  : []),
+                    ]),
               ]);
             }
             if (url.endsWith("/graphql")) {
@@ -542,11 +557,12 @@ describe("GitHub App review gateway", () => {
           const prior = await session.getPriorReviewState(reference, new AbortController().signal);
           assert.deepEqual(
             prior.activeFingerprints,
-            priorRun === "findings" ? [latestFingerprint] : [],
+            priorRun === "findings" ? [historicalFingerprint, latestFingerprint] : [],
           );
-          assert.deepEqual(planFindingReconciliation([returnedFinding], prior).netNewFindings, [
-            returnedFinding,
-          ]);
+          assert.deepEqual(
+            planFindingReconciliation([returnedFinding], prior).netNewFindings,
+            priorRun === "findings" ? [] : [returnedFinding],
+          );
         }),
       ),
     );

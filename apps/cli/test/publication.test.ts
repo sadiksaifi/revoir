@@ -54,7 +54,7 @@ describe("findings-only review publication", () => {
     const publication = createReviewPublication("1".repeat(40), [single, multiline]);
     assert.deepEqual(publication.payload, {
       commit_id: "1".repeat(40),
-      body: renderRunMarker("1".repeat(40)),
+      body: `<!-- revoir:body-state:v1 -->\n\n${renderRunMarker("1".repeat(40))}`,
       comments: [
         {
           path: "src/review.ts",
@@ -91,16 +91,44 @@ describe("findings-only review publication", () => {
     const publication = createReviewPublication("2".repeat(40), [inline, file]);
     assert.equal(
       publication.payload.body,
-      `${renderFileFinding(file)}\n\n${renderRunMarker("2".repeat(40))}`,
+      `${renderFileFinding(file)}\n\n<!-- revoir:body-state:v1 -->\n<!-- revoir:body-finding:v1:${file.fingerprint} -->\n\n${renderRunMarker(
+        "2".repeat(40),
+      )}`,
     );
     assert.equal(publication.payload.comments?.length, 1);
     assert.equal(
       publication.fallbackPayload.body,
-      `${renderFileFinding(inline)}\n\n${renderFileFinding(file)}\n\n${renderRunMarker(
-        "2".repeat(40),
-      )}`,
+      `${renderFileFinding(inline)}\n\n${renderFileFinding(file)}\n\n<!-- revoir:body-state:v1 -->\n<!-- revoir:body-finding:v1:${inline.fingerprint} -->\n<!-- revoir:body-finding:v1:${file.fingerprint} -->\n\n${renderRunMarker("2".repeat(40))}`,
     );
     assert.equal("comments" in publication.fallbackPayload, false);
+  });
+
+  it("publishes the complete body-finding state with a delta review", () => {
+    const retained = finding({
+      fingerprint: "c".repeat(64),
+      path: "retained.ts",
+      range: null,
+      anchor: "retained.ts",
+      attachment: { kind: "file", path: "retained.ts" },
+    });
+    const netNew = finding({
+      fingerprint: "d".repeat(64),
+      path: "new.ts",
+      range: null,
+      anchor: "new.ts",
+      attachment: { kind: "file", path: "new.ts" },
+    });
+    const publication = createReviewPublication("4".repeat(40), [netNew], [retained, netNew]);
+
+    assert.doesNotMatch(publication.payload.body ?? "", /### P1[\s\S]*retained\.ts/u);
+    assert.match(
+      publication.payload.body ?? "",
+      new RegExp(`<!-- revoir:body-finding:v1:${retained.fingerprint} -->`, "u"),
+    );
+    assert.match(
+      publication.payload.body ?? "",
+      new RegExp(`<!-- revoir:body-finding:v1:${netNew.fingerprint} -->`, "u"),
+    );
   });
 
   it("publishes required prose, explicit fallback locations, and stable metadata only", () => {
@@ -142,10 +170,9 @@ describe("findings-only review publication", () => {
     }
   });
 
-  it("rejects an empty findings review", () => {
-    assert.throws(
-      () => createReviewPublication("3".repeat(40), []),
-      /requires at least one validated finding/u,
-    );
+  it("publishes an empty body-state transition without visible finding prose", () => {
+    const publication = createReviewPublication("3".repeat(40), [], []);
+    assert.doesNotMatch(publication.payload.body ?? "", /### P[0-3]/u);
+    assert.match(publication.payload.body ?? "", /<!-- revoir:body-state:v1 -->/u);
   });
 });

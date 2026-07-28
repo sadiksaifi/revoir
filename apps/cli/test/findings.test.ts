@@ -655,6 +655,8 @@ index 1111111..3333333 100644
       {
         netNewFindings: [],
         obsoleteThreadIds: ["THREAD_PEER"],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
       },
     );
   });
