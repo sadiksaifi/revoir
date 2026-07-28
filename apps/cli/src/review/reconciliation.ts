@@ -25,6 +25,7 @@ export interface OwnedFindingThread extends PriorFindingIdentity {
 export interface PriorReviewState {
   readonly activeFingerprints: readonly string[];
   readonly bodyFindings?: readonly PriorFindingIdentity[];
+  readonly bodyStateMigrationRequired?: boolean;
   readonly ownedOpenThreads: readonly OwnedFindingThread[];
   readonly runHeadShas: readonly string[];
 }
@@ -245,8 +246,9 @@ export function planFindingReconciliation(
     ...(fingerprintAliases === undefined ? {} : { aliases: fingerprintAliases }),
   }));
   const bodyStateChanged =
-    prior.bodyFindings !== undefined &&
-    identitySnapshot(currentBodyState) !== identitySnapshot(priorBodyFindings);
+    prior.bodyStateMigrationRequired === true ||
+    (prior.bodyFindings !== undefined &&
+      identitySnapshot(currentBodyState) !== identitySnapshot(priorBodyFindings));
 
   return {
     netNewFindings: findings.filter((_finding, index) => !matches.currentMatches.has(index)),

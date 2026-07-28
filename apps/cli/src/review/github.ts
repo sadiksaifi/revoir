@@ -428,6 +428,7 @@ class InstallationSession implements GitHubReviewSession {
     const activeFingerprints = new Set<string>();
     const runHeadShas = new Set<string>();
     let latestBodyFindings: readonly PriorFindingIdentity[] = [];
+    let bodyStateMigrationRequired = false;
     let foundBodyState = false;
     let reviewPage = 1;
     for (;;) {
@@ -457,9 +458,20 @@ class InstallationSession implements GitHubReviewSession {
             const bodyState = bodyStateFindingIdentities(review.body);
             if (bodyState !== undefined) {
               latestBodyFindings = bodyState;
+              bodyStateMigrationRequired = false;
               foundBodyState = true;
             } else if (!foundBodyState) {
-              latestBodyFindings = findingMarkerIdentities(review.body);
+              const legacyBodyFindings = findingMarkerIdentities(review.body);
+              if (legacyBodyFindings.length > 0) {
+                latestBodyFindings = legacyBodyFindings;
+                bodyStateMigrationRequired = true;
+              }
+            }
+          } else if (!foundBodyState) {
+            const legacyBodyFindings = findingMarkerIdentities(review.body);
+            if (legacyBodyFindings.length > 0) {
+              latestBodyFindings = legacyBodyFindings;
+              bodyStateMigrationRequired = true;
             }
           }
         }
@@ -477,6 +489,7 @@ class InstallationSession implements GitHubReviewSession {
       }
     } else {
       latestBodyFindings = [];
+      bodyStateMigrationRequired = false;
     }
 
     const ownedOpenThreads: Array<{
@@ -575,6 +588,7 @@ class InstallationSession implements GitHubReviewSession {
     return {
       activeFingerprints: [...activeFingerprints].toSorted(),
       bodyFindings: latestBodyFindings,
+      ...(bodyStateMigrationRequired ? { bodyStateMigrationRequired: true } : {}),
       ownedOpenThreads: sortedThreads,
       runHeadShas: [...runHeadShas].toSorted(),
     };

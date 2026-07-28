@@ -437,6 +437,108 @@ describe("GitHub App review gateway", () => {
     assert.deepEqual(mutations, ["THREAD_OWN_OPEN"]);
   });
 
+  it("migrates the latest legacy body-marker review until a versioned snapshot exists", async () => {
+    const olderFingerprint = "a".repeat(64);
+    const latestFingerprint = "b".repeat(64);
+    const ignoredFingerprint = "c".repeat(64);
+    const latestFinding: ReviewFindingV1 = {
+      version: 1,
+      fingerprint: latestFingerprint,
+      priority: "P1",
+      path: "source.ts",
+      range: null,
+      defectKind: "correctness",
+      impactKind: "incorrect-result",
+      fixAction: "restore",
+      anchor: "source.ts",
+      attachment: { kind: "file", path: "source.ts" },
+    };
+    const legacyBody = (fingerprint: string): string =>
+      renderFileFinding({ ...latestFinding, fingerprint });
+
+    for (const hasVersionedSnapshot of [false, true]) {
+      const fetchImplementation: FetchLike = async (input) => {
+        const url = String(input);
+        if (url.endsWith("/app")) {
+          return json({ slug: "revoir-test" });
+        }
+        if (url.endsWith("/app/installations/8/access_tokens")) {
+          return json({ token: "installation-secret" });
+        }
+        if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+          return json([
+            {
+              id: 201,
+              state: "COMMENTED",
+              body: legacyBody(olderFingerprint),
+              user: { login: "revoir-test[bot]" },
+            },
+            {
+              id: 202,
+              state: "COMMENTED",
+              body: legacyBody(latestFingerprint),
+              user: { login: "revoir-test[bot]" },
+            },
+            ...(hasVersionedSnapshot
+              ? [
+                  {
+                    id: 203,
+                    state: "COMMENTED",
+                    body: createReviewPublication("2".repeat(40), [], []).payload.body!,
+                    user: { login: "revoir-test[bot]" },
+                  },
+                  {
+                    id: 204,
+                    state: "COMMENTED",
+                    body: legacyBody(ignoredFingerprint),
+                    user: { login: "revoir-test[bot]" },
+                  },
+                ]
+              : []),
+          ]);
+        }
+        if (url.endsWith("/graphql")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [],
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                  },
+                },
+              },
+            },
+          });
+        }
+        throw new Error(`Unexpected request ${url}`);
+      };
+      // Sequential cases reuse no gateway state.
+      // eslint-disable-next-line no-await-in-loop
+      const session = await new GitHubAppReviewGateway(
+        fetchImplementation,
+        "https://api.test",
+        () => 1_000,
+      ).authenticate(configuration.github, reference, new AbortController().signal);
+      // eslint-disable-next-line no-await-in-loop
+      const prior = await session.getPriorReviewState(reference, new AbortController().signal);
+
+      assert.deepEqual(
+        prior.bodyFindings,
+        hasVersionedSnapshot ? [] : [{ fingerprint: latestFingerprint }],
+      );
+      assert.equal(prior.bodyStateMigrationRequired === true, !hasVersionedSnapshot);
+      assert.deepEqual(
+        planFindingReconciliation([latestFinding], prior).netNewFindings,
+        hasVersionedSnapshot ? [latestFinding] : [],
+      );
+      assert.equal(
+        planFindingReconciliation([latestFinding], prior).bodyStateChanged,
+        true,
+      );
+    }
+  });
+
   it("discovers full body snapshots across delta, retirement, and clean runs", async () => {
     const historicalFingerprint = "a".repeat(64);
     const latestFingerprint = "b".repeat(64);
