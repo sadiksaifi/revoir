@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -19,6 +19,8 @@ import {
 
 const executeFile = promisify(execFile);
 const temporaryDirectories: string[] = [];
+const NFD_OLD_PATH = "cafe\u0301-old.ts";
+const NFD_NEW_PATH = "cafe\u0301-new.ts";
 
 async function temporaryDirectory(prefix: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), prefix));
@@ -40,12 +42,37 @@ async function repositoryFixture(): Promise<{
   await git(root, "init", "-b", "main");
   await git(root, "config", "user.email", "test@example.com");
   await git(root, "config", "user.name", "Revoir Test");
-  await writeFile(join(root, "file with spaces.txt"), "base\n");
-  await git(root, "add", "--", "file with spaces.txt");
+  await git(root, "config", "core.precomposeUnicode", "false");
+  await Promise.all([
+    writeFile(join(root, "file with spaces.txt"), "base\n"),
+    writeFile(join(root, "old-name.ts"), "keep one\nkeep two\nold value\nkeep four\n"),
+    writeFile(join(root, NFD_OLD_PATH), "keep one\nkeep two\nold value\nkeep four\n"),
+    writeFile(join(root, ".gitattributes"), "attribute.bin binary\n"),
+    writeFile(join(root, "attribute.bin"), Buffer.from([0x00, 0x01])),
+  ]);
+  await git(
+    root,
+    "add",
+    "--",
+    "file with spaces.txt",
+    "old-name.ts",
+    NFD_OLD_PATH,
+    ".gitattributes",
+    "attribute.bin",
+  );
   await git(root, "commit", "-m", "base");
   const baseSha = await git(root, "rev-parse", "HEAD");
+  await Promise.all([
+    rename(join(root, "old-name.ts"), join(root, "new-name.ts")),
+    rename(join(root, NFD_OLD_PATH), join(root, NFD_NEW_PATH)),
+  ]);
   await writeFile(join(root, "file with spaces.txt"), "base\nhead\n");
-  await git(root, "add", "--", "file with spaces.txt");
+  await Promise.all([
+    writeFile(join(root, "new-name.ts"), "keep one\nkeep two\nnew value\nkeep four\n"),
+    writeFile(join(root, NFD_NEW_PATH), "keep one\nkeep two\nnew value\nkeep four\n"),
+    writeFile(join(root, "attribute.bin"), Buffer.from([0x00, 0x02])),
+  ]);
+  await git(root, "add", "--all");
   await git(root, "commit", "-m", "head");
   return { root, baseSha, headSha: await git(root, "rev-parse", "HEAD") };
 }
@@ -79,11 +106,12 @@ class CapturingRunner implements CommandRunner {
 }
 
 class HostileGitConfigRunner implements CommandRunner {
+  readonly calls: Array<{ arguments: readonly string[]; environment: NodeJS.ProcessEnv }> = [];
   readonly #delegate = new SystemCommandRunner();
-  readonly #globalConfig: string;
+  readonly #externalDiff: string;
 
-  constructor(globalConfig: string) {
-    this.#globalConfig = globalConfig;
+  constructor(externalDiff: string) {
+    this.#externalDiff = externalDiff;
   }
 
   async run(
@@ -91,21 +119,35 @@ class HostileGitConfigRunner implements CommandRunner {
     arguments_: readonly string[],
     options: CommandOptions,
   ): Promise<CommandResult> {
-    const environment = {
-      ...options.environment,
-      GIT_CONFIG_GLOBAL: this.#globalConfig,
-    };
     if (arguments_.includes("diff") && options.cwd !== undefined) {
-      await executeFile("git", ["config", "--local", "diff.noprefix", "true"], {
-        cwd: options.cwd,
-        env: environment,
-      });
-      await executeFile("git", ["config", "--local", "diff.mnemonicPrefix", "true"], {
-        cwd: options.cwd,
-        env: environment,
-      });
+      const hostileLocalValues = [
+        ["diff.noprefix", "true"],
+        ["diff.mnemonicPrefix", "true"],
+        ["diff.renames", "false"],
+        ["diff.algorithm", "histogram"],
+        ["diff.indentHeuristic", "true"],
+        ["diff.context", "0"],
+        ["diff.suppressBlankEmpty", "true"],
+        ["diff.external", this.#externalDiff],
+        ["diff.submodule", "log"],
+        ["color.ui", "always"],
+        ["color.diff", "always"],
+        ["core.quotePath", "false"],
+      ] as const;
+      for (const [key, value] of hostileLocalValues) {
+        // Keep each hostile local setting explicit so the authoritative command must override it.
+        // eslint-disable-next-line no-await-in-loop
+        await executeFile("git", ["config", "--local", key, value], {
+          cwd: options.cwd,
+          env: options.environment,
+        });
+      }
     }
-    return this.#delegate.run(command, arguments_, { ...options, environment });
+    this.calls.push({
+      arguments: [...arguments_],
+      environment: { ...options.environment },
+    });
+    return this.#delegate.run(command, arguments_, options);
   }
 }
 
@@ -169,18 +211,48 @@ describe("Git review workspace", () => {
     }
   });
 
-  it("forces conventional diff prefixes despite hostile global and checkout-local Git config", async () => {
+  it("produces one hermetic rename-aware diff despite hostile Git config and environment", async () => {
     try {
       const origin = await repositoryFixture();
       const cache = await temporaryDirectory("revoir-cache-hostile-git-config-");
       const configDirectory = await temporaryDirectory("revoir-git-config-");
       const globalConfig = join(configDirectory, "config");
-      await writeFile(globalConfig, "[diff]\n\tnoprefix = true\n\tmnemonicPrefix = true\n");
-      const preparer = new GitWorkspacePreparer(
-        cache,
-        10_000,
-        new HostileGitConfigRunner(globalConfig),
+      const marker = join(configDirectory, "external-diff-ran");
+      const externalDiff = join(configDirectory, "external-diff.sh");
+      await writeFile(
+        externalDiff,
+        `#!/bin/sh\ntouch "${marker}"\nprintf '\\033[31mhelper\\033[0m\\n'\n`,
       );
+      await chmod(externalDiff, 0o700);
+      await writeFile(
+        globalConfig,
+        `[diff]
+\tnoprefix = true
+\tmnemonicPrefix = true
+\trenames = false
+\talgorithm = patience
+\tindentHeuristic = true
+\tcontext = 0
+\tsuppressBlankEmpty = true
+\texternal = ${externalDiff}
+\tsubmodule = log
+[color]
+\tui = always
+\tdiff = always
+[core]
+\tquotePath = false
+`,
+      );
+      const previousEnvironment = {
+        GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+        GIT_EXTERNAL_DIFF: process.env.GIT_EXTERNAL_DIFF,
+        GIT_DIFF_OPTS: process.env.GIT_DIFF_OPTS,
+      };
+      process.env.GIT_CONFIG_GLOBAL = globalConfig;
+      process.env.GIT_EXTERNAL_DIFF = externalDiff;
+      process.env.GIT_DIFF_OPTS = "--unified=0";
+      const runner = new HostileGitConfigRunner(externalDiff);
+      const preparer = new GitWorkspacePreparer(cache, 10_000, runner);
       const snapshot: PullRequestSnapshot = {
         number: 17,
         state: "open",
@@ -200,20 +272,102 @@ describe("Git review workspace", () => {
         },
       };
 
-      const workspace = await preparer.prepare(
-        parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
-        snapshot,
-        "installation-token",
-        new AbortController().signal,
-      );
-      assert.match(
-        workspace.diff,
-        /^diff --git a\/file with spaces\.txt b\/file with spaces\.txt/mu,
-      );
-      assert.match(workspace.diff, /^--- a\/file with spaces\.txt\t?$/mu);
-      assert.match(workspace.diff, /^\+\+\+ b\/file with spaces\.txt\t?$/mu);
-      assert.equal(parseGitDiff(workspace.diff).files.has("file with spaces.txt"), true);
-      await workspace.cleanup();
+      try {
+        const workspace = await preparer.prepare(
+          parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+          snapshot,
+          "installation-token",
+          new AbortController().signal,
+        );
+        assert.match(
+          workspace.diff,
+          /^diff --git a\/file with spaces\.txt b\/file with spaces\.txt/mu,
+        );
+        assert.match(workspace.diff, /^--- a\/file with spaces\.txt\t?$/mu);
+        assert.match(workspace.diff, /^\+\+\+ b\/file with spaces\.txt\t?$/mu);
+        assert.equal(workspace.diff.includes(String.fromCharCode(27)), false);
+        await assert.rejects(() => lstat(marker), { code: "ENOENT" });
+        assert.equal(
+          await git(workspace.checkout, "status", "--porcelain", "--untracked-files=no"),
+          "",
+        );
+        assert.equal(await git(workspace.checkout, "diff", "--name-only", "HEAD", "--"), "");
+        assert.equal(await git(workspace.checkout, "config", "--local", "diff.renames"), "false");
+
+        const parsed = parseGitDiff(workspace.diff);
+        assert.equal(parsed.files.size, 4);
+        assert.equal(parsed.files.get("attribute.bin")?.binary, true);
+        const renamed = parsed.files.get("new-name.ts");
+        assert.ok(renamed);
+        assert.equal(renamed.oldPath, "old-name.ts");
+        assert.equal(renamed.newPath, "new-name.ts");
+        assert.deepEqual([...renamed.changedLines.keys()], ["LEFT:3", "RIGHT:3"]);
+        assert.equal(renamed.changedLines.has("RIGHT:1"), false);
+
+        const nfdRename = parsed.files.get(NFD_NEW_PATH);
+        assert.ok(nfdRename);
+        assert.equal(nfdRename.oldPath, NFD_OLD_PATH);
+        assert.equal(nfdRename.newPath, NFD_NEW_PATH);
+        assert.deepEqual([...nfdRename.changedLines.keys()], ["LEFT:3", "RIGHT:3"]);
+
+        const diffCall = runner.calls.find(({ arguments: arguments_ }) =>
+          arguments_.includes("diff"),
+        );
+        assert.ok(diffCall);
+        for (const argument of [
+          "--patch",
+          "--find-renames=50%",
+          "-l0",
+          "--no-color",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--diff-algorithm=myers",
+          "--no-indent-heuristic",
+          "--unified=3",
+          "--inter-hunk-context=0",
+          "--binary",
+          "--src-prefix=a/",
+          "--dst-prefix=b/",
+          "--output-indicator-new=+",
+          "--output-indicator-old=-",
+          "--output-indicator-context= ",
+          "--submodule=short",
+          "--ignore-submodules=none",
+          "color.ui=false",
+          "color.diff=false",
+          "diff.noprefix=false",
+          "diff.mnemonicPrefix=false",
+          "diff.renames=true",
+          "diff.renameLimit=0",
+          "diff.algorithm=myers",
+          "diff.indentHeuristic=false",
+          "diff.context=3",
+          "diff.interHunkContext=0",
+          "diff.suppressBlankEmpty=false",
+          "diff.submodule=short",
+          "core.quotePath=true",
+        ]) {
+          assert.ok(diffCall.arguments.includes(argument), `missing ${argument}`);
+        }
+        assert.equal(diffCall.environment.GIT_EXTERNAL_DIFF, undefined);
+        assert.equal(diffCall.environment.GIT_DIFF_OPTS, undefined);
+        assert.equal(diffCall.environment.GIT_CONFIG_NOSYSTEM, "1");
+        assert.notEqual(diffCall.environment.GIT_CONFIG_GLOBAL, globalConfig);
+        const cloneCall = runner.calls.find(({ arguments: arguments_ }) =>
+          arguments_.includes("clone"),
+        );
+        assert.equal(cloneCall?.environment.GIT_EXTERNAL_DIFF, externalDiff);
+        assert.equal(cloneCall?.environment.GIT_DIFF_OPTS, "--unified=0");
+        await workspace.cleanup();
+      } finally {
+        for (const [key, value] of Object.entries(previousEnvironment)) {
+          if (value === undefined) {
+            delete process.env[key];
+          } else {
+            process.env[key] = value;
+          }
+        }
+      }
     } finally {
       await cleanupTemporaryDirectories();
     }

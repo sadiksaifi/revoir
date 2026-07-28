@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { devNull } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -163,11 +164,15 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
       REVOIR_GIT_PASSWORD: installationToken,
       REVOIR_GIT_USERNAME: "x-access-token",
     };
-    const runGit = async (arguments_: readonly string[], cwd?: string): Promise<CommandResult> => {
+    const runGit = async (
+      arguments_: readonly string[],
+      cwd?: string,
+      commandEnvironment: NodeJS.ProcessEnv = environment,
+    ): Promise<CommandResult> => {
       throwIfAborted(signal);
       return this.#runner.run("git", arguments_, {
         ...(cwd === undefined ? {} : { cwd }),
-        environment,
+        environment: commandEnvironment,
         signal,
         timeoutMs: this.#shellTimeoutMs,
       });
@@ -190,21 +195,64 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
         checkout,
       );
       await runGit(["checkout", "--detach", pullRequest.headSha], checkout);
+      const diffEnvironment = { ...environment };
+      delete diffEnvironment.GIT_EXTERNAL_DIFF;
+      delete diffEnvironment.GIT_DIFF_OPTS;
+      diffEnvironment.GIT_CONFIG_NOSYSTEM = "1";
+      diffEnvironment.GIT_CONFIG_GLOBAL = devNull;
       const diff = await runGit(
         [
+          "-c",
+          "color.ui=false",
+          "-c",
+          "color.diff=false",
           "-c",
           "diff.noprefix=false",
           "-c",
           "diff.mnemonicPrefix=false",
+          "-c",
+          "diff.renames=true",
+          "-c",
+          "diff.renameLimit=0",
+          "-c",
+          "diff.algorithm=myers",
+          "-c",
+          "diff.indentHeuristic=false",
+          "-c",
+          "diff.context=3",
+          "-c",
+          "diff.interHunkContext=0",
+          "-c",
+          "diff.suppressBlankEmpty=false",
+          "-c",
+          "diff.submodule=short",
+          "-c",
+          "core.quotePath=true",
           "diff",
+          "--patch",
+          "--find-renames=50%",
+          "-l0",
+          "--no-color",
           "--no-ext-diff",
+          "--no-textconv",
+          "--diff-algorithm=myers",
+          "--no-indent-heuristic",
+          "--unified=3",
+          "--inter-hunk-context=0",
           "--binary",
+          "--no-relative",
           "--src-prefix=a/",
           "--dst-prefix=b/",
+          "--output-indicator-new=+",
+          "--output-indicator-old=-",
+          "--output-indicator-context= ",
+          "--submodule=short",
+          "--ignore-submodules=none",
           `${pullRequest.baseSha}...${pullRequest.headSha}`,
           "--",
         ],
         checkout,
+        diffEnvironment,
       );
       const remote = await runGit(["remote", "get-url", "origin"], checkout);
       const remoteUrl = remote.stdout.trim();
