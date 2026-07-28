@@ -224,7 +224,7 @@ export function findingFingerprint(
     ModelFindingV1,
     "path" | "range" | "defectKind" | "impactKind" | "fixAction" | "anchor"
   >,
-  anchorOccurrence?: number,
+  occurrenceIndex?: number,
 ): string {
   const identityParts: unknown[] = [
     FINDING_CONTRACT_VERSION,
@@ -233,8 +233,8 @@ export function findingFingerprint(
     finding.impactKind,
     finding.anchor,
   ];
-  if (anchorOccurrence !== undefined) {
-    identityParts.push(anchorOccurrence);
+  if (occurrenceIndex !== undefined) {
+    identityParts.push(occurrenceIndex);
   }
   return createHash("sha256").update(JSON.stringify(identityParts)).digest("hex");
 }

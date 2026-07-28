@@ -34,9 +34,7 @@ describe("finding reconciliation", () => {
     assert.deepEqual(
       planFindingReconciliation([unchanged], {
         activeFingerprints: [publishedV1Fingerprint],
-        ownedOpenThreads: [
-          { id: "THREAD_PUBLISHED_V1", fingerprint: publishedV1Fingerprint },
-        ],
+        ownedOpenThreads: [{ id: "THREAD_PUBLISHED_V1", fingerprint: publishedV1Fingerprint }],
         runHeadShas: ["1".repeat(40)],
       }),
       {
