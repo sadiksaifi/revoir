@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { promisify } from "node:util";
 
+import { parseGitDiff } from "../src/review/diff.js";
 import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pull-request.js";
 import {
   GitWorkspacePreparer,
@@ -77,6 +78,37 @@ class CapturingRunner implements CommandRunner {
   }
 }
 
+class HostileGitConfigRunner implements CommandRunner {
+  readonly #delegate = new SystemCommandRunner();
+  readonly #globalConfig: string;
+
+  constructor(globalConfig: string) {
+    this.#globalConfig = globalConfig;
+  }
+
+  async run(
+    command: string,
+    arguments_: readonly string[],
+    options: CommandOptions,
+  ): Promise<CommandResult> {
+    const environment = {
+      ...options.environment,
+      GIT_CONFIG_GLOBAL: this.#globalConfig,
+    };
+    if (arguments_.includes("diff") && options.cwd !== undefined) {
+      await executeFile("git", ["config", "--local", "diff.noprefix", "true"], {
+        cwd: options.cwd,
+        env: environment,
+      });
+      await executeFile("git", ["config", "--local", "diff.mnemonicPrefix", "true"], {
+        cwd: options.cwd,
+        env: environment,
+      });
+    }
+    return this.#delegate.run(command, arguments_, { ...options, environment });
+  }
+}
+
 describe("Git review workspace", () => {
   it("creates a fresh base-to-head checkout with system Git and no persisted token", async () => {
     try {
@@ -131,6 +163,56 @@ describe("Git review workspace", () => {
 
       await workspace.cleanup();
       await assert.rejects(() => lstat(workspace.root), { code: "ENOENT" });
+      await workspace.cleanup();
+    } finally {
+      await cleanupTemporaryDirectories();
+    }
+  });
+
+  it("forces conventional diff prefixes despite hostile global and checkout-local Git config", async () => {
+    try {
+      const origin = await repositoryFixture();
+      const cache = await temporaryDirectory("revoir-cache-hostile-git-config-");
+      const configDirectory = await temporaryDirectory("revoir-git-config-");
+      const globalConfig = join(configDirectory, "config");
+      await writeFile(globalConfig, "[diff]\n\tnoprefix = true\n\tmnemonicPrefix = true\n");
+      const preparer = new GitWorkspacePreparer(
+        cache,
+        10_000,
+        new HostileGitConfigRunner(globalConfig),
+      );
+      const snapshot: PullRequestSnapshot = {
+        number: 17,
+        state: "open",
+        draft: false,
+        authorId: 42,
+        baseSha: origin.baseSha,
+        headSha: origin.headSha,
+        baseRepository: {
+          id: 99,
+          fullName: "owner/repository",
+          cloneUrl: origin.root,
+        },
+        headRepository: {
+          id: 99,
+          fullName: "owner/repository",
+          cloneUrl: origin.root,
+        },
+      };
+
+      const workspace = await preparer.prepare(
+        parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+        snapshot,
+        "installation-token",
+        new AbortController().signal,
+      );
+      assert.match(
+        workspace.diff,
+        /^diff --git a\/file with spaces\.txt b\/file with spaces\.txt/mu,
+      );
+      assert.match(workspace.diff, /^--- a\/file with spaces\.txt\t?$/mu);
+      assert.match(workspace.diff, /^\+\+\+ b\/file with spaces\.txt\t?$/mu);
+      assert.equal(parseGitDiff(workspace.diff).files.has("file with spaces.txt"), true);
       await workspace.cleanup();
     } finally {
       await cleanupTemporaryDirectories();

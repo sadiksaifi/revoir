@@ -78,7 +78,9 @@ function patchPath(value: string): string | undefined {
   if (value === "/dev/null") {
     return undefined;
   }
-  const decoded = decodeGitQuotedPath(value);
+  const decoded = decodeGitQuotedPath(
+    value.startsWith('"') ? value : (value.split("\t", 1)[0] ?? value),
+  );
   if (!decoded.startsWith("a/") && !decoded.startsWith("b/")) {
     throw new Error("Git diff contains an invalid patch path.");
   }

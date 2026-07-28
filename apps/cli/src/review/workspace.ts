@@ -192,9 +192,15 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
       await runGit(["checkout", "--detach", pullRequest.headSha], checkout);
       const diff = await runGit(
         [
+          "-c",
+          "diff.noprefix=false",
+          "-c",
+          "diff.mnemonicPrefix=false",
           "diff",
           "--no-ext-diff",
           "--binary",
+          "--src-prefix=a/",
+          "--dst-prefix=b/",
           `${pullRequest.baseSha}...${pullRequest.headSha}`,
           "--",
         ],
