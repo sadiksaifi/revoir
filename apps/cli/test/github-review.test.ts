@@ -75,6 +75,7 @@ describe("GitHub App review gateway", () => {
 
   it("uses an installation token for PR lookup and exact reaction reconciliation", async () => {
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const abortController = new AbortController();
     const fetchImplementation: FetchLike = async (input, init) => {
       const url = String(input);
       requests.push({ url, init });
@@ -115,12 +116,19 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
     );
-    const session = await gateway.authenticate(configuration.github, reference);
+    const session = await gateway.authenticate(
+      configuration.github,
+      reference,
+      abortController.signal,
+    );
     assert.equal(session.installationToken, "installation-secret");
-    assert.equal((await session.getPullRequest(reference)).headSha, "2".repeat(40));
-    await session.removeOwnCompletionReaction(reference);
-    assert.equal(await session.addReaction(reference, "eyes"), 33);
-    await session.deleteReaction(reference, 33);
+    assert.equal(
+      (await session.getPullRequest(reference, abortController.signal)).headSha,
+      "2".repeat(40),
+    );
+    await session.removeOwnCompletionReaction(reference, abortController.signal);
+    assert.equal(await session.addReaction(reference, "eyes", abortController.signal), 33);
+    await session.deleteReaction(reference, 33, abortController.signal);
 
     const tokenRequest = requests.find((request) => request.url.endsWith("/access_tokens"));
     assert.ok(tokenRequest);
@@ -145,6 +153,33 @@ describe("GitHub App review gateway", () => {
     );
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/31")).length, 1);
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/32")).length, 0);
+    assert.ok(requests.every((request) => request.init?.signal === abortController.signal));
+  });
+
+  it("cancels non-settling authentication requests", async () => {
+    const abortController = new AbortController();
+    const gateway = new GitHubAppReviewGateway(
+      async () => new Promise<Response>(() => {}),
+      "https://api.test",
+      () => 1_000,
+    );
+    const cancellation = new Error("cancel HTTP");
+    const authentication = gateway.authenticate(
+      configuration.github,
+      reference,
+      abortController.signal,
+    );
+    abortController.abort(cancellation);
+
+    await assert.rejects(
+      Promise.race([
+        authentication,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("authentication did not cancel")), 100);
+        }),
+      ]),
+      cancellation,
+    );
   });
 
   it("rejects disallowed repositories before authentication", async () => {
@@ -158,6 +193,7 @@ describe("GitHub App review gateway", () => {
         gateway.authenticate(
           configuration.github,
           parsePullRequestUrl("https://github.com/owner/other/pull/17"),
+          new AbortController().signal,
         ),
       /allowlist/u,
     );
@@ -172,7 +208,7 @@ describe("GitHub App review gateway", () => {
       return json({ token: "server-secret" }, 403);
     });
     await assert.rejects(
-      () => gateway.authenticate(configuration.github, reference),
+      () => gateway.authenticate(configuration.github, reference, new AbortController().signal),
       (error: unknown) => {
         assert.match(String(error), /HTTP 403/u);
         assert.doesNotMatch(String(error), /server-secret|PRIVATE KEY/u);

@@ -7,6 +7,7 @@ import type {
   GitHubReviewSession,
   ReviewReaction,
 } from "../src/review/github.js";
+import type { ReviewLock } from "../src/review/lock.js";
 import { CleanReviewOrchestrator, ReviewTimeoutError } from "../src/review/orchestrator.js";
 import type { ReviewEngine } from "../src/review/pi.js";
 import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pull-request.js";
@@ -67,11 +68,15 @@ function harness(
     prepareError?: Error;
     completionError?: Error;
     headError?: Error;
+    headNeverSettles?: boolean;
+    mutateHeadDuring?: "workspace-cleanup" | "reaction-removal";
+    lock?: ReviewLock;
     reviewMs?: number;
   } = {},
 ) {
   const events: string[] = [];
   const snapshot = options.pullRequest ?? pullRequest();
+  let currentSha = options.currentSha ?? snapshot.headSha;
   let nextReactionId = 10;
   const session: GitHubReviewSession = {
     installationToken: "installation-secret",
@@ -79,12 +84,23 @@ function harness(
       events.push("get-pr");
       return snapshot;
     },
-    async getHeadSha() {
+    async getHeadSha(_reference, signal?: AbortSignal) {
       events.push("get-head");
       if (options.headError !== undefined) {
         throw options.headError;
       }
-      return options.currentSha ?? snapshot.headSha;
+      if (options.headNeverSettles) {
+        return new Promise<string>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      }
+      return currentSha;
     },
     async removeOwnCompletionReaction() {
       events.push("remove-old-thumb");
@@ -98,6 +114,9 @@ function harness(
     },
     async deleteReaction(_reference, id) {
       events.push(`delete-${id}`);
+      if (id === 10 && options.mutateHeadDuring === "reaction-removal") {
+        currentSha = "3".repeat(40);
+      }
     },
   };
   const github: GitHubReviewGateway = {
@@ -119,6 +138,9 @@ function harness(
         remoteUrl: "https://github.com/owner/repository.git",
         async cleanup() {
           events.push("cleanup");
+          if (options.mutateHeadDuring === "workspace-cleanup") {
+            currentSha = "3".repeat(40);
+          }
         },
       };
       return workspace;
@@ -135,6 +157,11 @@ function harness(
     events,
     orchestrator: new CleanReviewOrchestrator(configuration(options.reviewMs), {
       github,
+      lock: options.lock ?? {
+        async acquire() {
+          return { async release() {} };
+        },
+      },
       workspaces,
       reviewEngine,
     }),
@@ -156,9 +183,9 @@ describe("clean review orchestrator", () => {
       "add-eyes",
       "prepare-installation-secret",
       "review",
-      "get-head",
       "cleanup",
       "delete-10",
+      "get-head",
       "add-+1",
     ]);
   });
@@ -166,8 +193,23 @@ describe("clean review orchestrator", () => {
   it("removes the active reaction and publishes no completion for stale output", async () => {
     const { events, orchestrator } = harness({ currentSha: "3".repeat(40) });
     assert.equal((await orchestrator.review(reference)).status, "stale");
-    assert.deepEqual(events.slice(-3), ["get-head", "cleanup", "delete-10"]);
+    assert.deepEqual(events.slice(-3), ["cleanup", "delete-10", "get-head"]);
     assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("publishes no completion when the head changes during final cleanup", async () => {
+    await Promise.all(
+      (["workspace-cleanup", "reaction-removal"] as const).map(async (mutateHeadDuring) => {
+        const { events, orchestrator } = harness({ mutateHeadDuring });
+        assert.deepEqual(await orchestrator.review(reference), {
+          status: "stale",
+          reviewedSha: "2".repeat(40),
+          currentSha: "3".repeat(40),
+        });
+        assert.deepEqual(events.slice(-3), ["cleanup", "delete-10", "get-head"]);
+        assert.equal(events.includes("add-+1"), false);
+      }),
+    );
   });
 
   it("rejects ineligible work before checkout or any reaction", async () => {
@@ -204,7 +246,7 @@ describe("clean review orchestrator", () => {
 
     const shaFailure = harness({ headError: new Error("SHA lookup failed") });
     await assert.rejects(() => shaFailure.orchestrator.review(reference), /SHA lookup failed/u);
-    assert.deepEqual(shaFailure.events.slice(-2), ["cleanup", "delete-10"]);
+    assert.deepEqual(shaFailure.events.slice(-3), ["cleanup", "delete-10", "get-head"]);
   });
 
   it("cleans after preparation and completion failures", async () => {
@@ -217,7 +259,12 @@ describe("clean review orchestrator", () => {
       () => completionFailure.orchestrator.review(reference),
       /reaction failed/u,
     );
-    assert.deepEqual(completionFailure.events.slice(-3), ["cleanup", "delete-10", "add-+1"]);
+    assert.deepEqual(completionFailure.events.slice(-4), [
+      "cleanup",
+      "delete-10",
+      "get-head",
+      "add-+1",
+    ]);
   });
 
   it("aborts a timed-out review and still cleans every artifact", async () => {
@@ -237,5 +284,41 @@ describe("clean review orchestrator", () => {
     });
     await assert.rejects(() => timedOut.orchestrator.review(reference), ReviewTimeoutError);
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
+  });
+
+  it("aborts a non-settling head request and still cleans every artifact", async () => {
+    const timedOut = harness({ reviewMs: 5, headNeverSettles: true });
+    await assert.rejects(
+      Promise.race([
+        timedOut.orchestrator.review(reference),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("review did not cancel")), 100);
+        }),
+      ]),
+      ReviewTimeoutError,
+    );
+    assert.deepEqual(timedOut.events.slice(-3), ["cleanup", "delete-10", "get-head"]);
+  });
+
+  it("releases the process lock on every terminal path", async () => {
+    let releases = 0;
+    const lock: ReviewLock = {
+      async acquire() {
+        return {
+          async release() {
+            releases += 1;
+          },
+        };
+      },
+    };
+    const failed = harness({
+      lock,
+      review: async () => {
+        throw new Error("model failed");
+      },
+    });
+
+    await assert.rejects(() => failed.orchestrator.review(reference), /model failed/u);
+    assert.equal(releases, 1);
   });
 });

@@ -35,6 +35,12 @@ export {
   type ManualReviewService,
 } from "./review/orchestrator.js";
 export {
+  FileReviewLock,
+  ReviewInProgressError,
+  type ReviewLock,
+  type ReviewLockLease,
+} from "./review/lock.js";
+export {
   PiReviewEngine,
   SdkPiSessionFactory,
   type PiSession,

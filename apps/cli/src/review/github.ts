@@ -12,17 +12,29 @@ export type ReviewReaction = "eyes" | "+1";
 
 export interface GitHubReviewSession {
   readonly installationToken: string;
-  getPullRequest(reference: PullRequestReference): Promise<PullRequestSnapshot>;
-  getHeadSha(reference: PullRequestReference): Promise<string>;
-  removeOwnCompletionReaction(reference: PullRequestReference): Promise<void>;
-  addReaction(reference: PullRequestReference, reaction: ReviewReaction): Promise<number>;
-  deleteReaction(reference: PullRequestReference, reactionId: number): Promise<void>;
+  getPullRequest(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<PullRequestSnapshot>;
+  getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string>;
+  removeOwnCompletionReaction(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
+  addReaction(
+    reference: PullRequestReference,
+    reaction: ReviewReaction,
+    signal: AbortSignal,
+  ): Promise<number>;
+  deleteReaction(
+    reference: PullRequestReference,
+    reactionId: number,
+    signal: AbortSignal,
+  ): Promise<void>;
 }
 
 export interface GitHubReviewGateway {
   authenticate(
     configuration: RevoirConfiguration["github"],
     reference: PullRequestReference,
+    signal: AbortSignal,
   ): Promise<GitHubReviewSession>;
 }
 
@@ -69,13 +81,46 @@ export function createGitHubAppJwt(
   return `${unsigned}.${base64Url(signature)}`;
 }
 
-async function responseJson(response: Response, action: string): Promise<unknown> {
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled.");
+}
+
+async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    throw abortReason(signal);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function responseJson(
+  response: Response,
+  action: string,
+  signal: AbortSignal,
+): Promise<unknown> {
   if (!response.ok) {
     throw new Error(`GitHub ${action} failed with HTTP ${response.status}.`);
   }
   try {
-    return await response.json();
+    return await abortable(response.json(), signal);
   } catch (error) {
+    if (signal.aborted) {
+      throw abortReason(signal);
+    }
     throw new Error(`GitHub ${action} returned invalid JSON.`, { cause: error });
   }
 }
@@ -170,35 +215,47 @@ class InstallationSession implements GitHubReviewSession {
     this.#fetch = fetchImplementation;
   }
 
-  async #request(path: string, init: RequestInit = {}): Promise<Response> {
-    return this.#fetch(`${this.#apiBase}${path}`, {
-      ...init,
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${this.installationToken}`,
-        "User-Agent": "revoir",
-        "X-GitHub-Api-Version": "2022-11-28",
-        ...init.headers,
-      },
-    });
+  async #request(path: string, signal: AbortSignal, init: RequestInit = {}): Promise<Response> {
+    return abortable(
+      this.#fetch(`${this.#apiBase}${path}`, {
+        ...init,
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${this.installationToken}`,
+          "User-Agent": "revoir",
+          "X-GitHub-Api-Version": "2022-11-28",
+          ...init.headers,
+        },
+        signal,
+      }),
+      signal,
+    );
   }
 
-  async getPullRequest(reference: PullRequestReference): Promise<PullRequestSnapshot> {
+  async getPullRequest(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<PullRequestSnapshot> {
     const response = await this.#request(
       `/repos/${reference.owner}/${reference.repository}/pulls/${reference.number}`,
+      signal,
     );
-    return parsePullRequest(await responseJson(response, "pull request lookup"));
+    return parsePullRequest(await responseJson(response, "pull request lookup", signal));
   }
 
-  async getHeadSha(reference: PullRequestReference): Promise<string> {
-    return (await this.getPullRequest(reference)).headSha;
+  async getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string> {
+    return (await this.getPullRequest(reference, signal)).headSha;
   }
 
-  async removeOwnCompletionReaction(reference: PullRequestReference): Promise<void> {
+  async removeOwnCompletionReaction(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<void> {
     const response = await this.#request(
       `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/reactions?per_page=100`,
+      signal,
     );
-    const value = await responseJson(response, "reaction lookup");
+    const value = await responseJson(response, "reaction lookup", signal);
     if (!Array.isArray(value)) {
       throw new Error("GitHub reaction lookup returned an invalid response.");
     }
@@ -209,24 +266,37 @@ class InstallationSession implements GitHubReviewSession {
           reaction.content === "+1" && reaction.user.login.toLowerCase() === this.#botLogin,
       );
     await Promise.all(
-      ownedCompletionReactions.map((reaction) => this.deleteReaction(reference, reaction.id)),
+      ownedCompletionReactions.map((reaction) =>
+        this.deleteReaction(reference, reaction.id, signal),
+      ),
     );
   }
 
-  async addReaction(reference: PullRequestReference, reaction: ReviewReaction): Promise<number> {
+  async addReaction(
+    reference: PullRequestReference,
+    reaction: ReviewReaction,
+    signal: AbortSignal,
+  ): Promise<number> {
     const response = await this.#request(
       `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/reactions`,
+      signal,
       {
         method: "POST",
         body: JSON.stringify({ content: reaction }),
         headers: { "Content-Type": "application/json" },
       },
     );
-    return parseReaction(await responseJson(response, "reaction creation")).id;
+    return parseReaction(await responseJson(response, "reaction creation", signal)).id;
   }
 
-  async deleteReaction(_reference: PullRequestReference, reactionId: number): Promise<void> {
-    const response = await this.#request(`/reactions/${reactionId}`, { method: "DELETE" });
+  async deleteReaction(
+    _reference: PullRequestReference,
+    reactionId: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const response = await this.#request(`/reactions/${reactionId}`, signal, {
+      method: "DELETE",
+    });
     if (!response.ok) {
       throw new Error(`GitHub reaction removal failed with HTTP ${response.status}.`);
     }
@@ -251,6 +321,7 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
   async authenticate(
     configuration: RevoirConfiguration["github"],
     reference: PullRequestReference,
+    signal: AbortSignal,
   ): Promise<GitHubReviewSession> {
     const configuredRepository = configuration.repositories.find(
       (candidate) =>
@@ -271,19 +342,23 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
       "X-GitHub-Api-Version": "2022-11-28",
     };
     const [appResponse, tokenResponse] = await Promise.all([
-      this.#fetch(`${this.#apiBase}/app`, { headers }),
-      this.#fetch(
-        `${this.#apiBase}/app/installations/${configuration.installationId}/access_tokens`,
-        {
-          method: "POST",
-          body: JSON.stringify({ repository_ids: [configuredRepository.id] }),
-          headers: { ...headers, "Content-Type": "application/json" },
-        },
+      abortable(this.#fetch(`${this.#apiBase}/app`, { headers, signal }), signal),
+      abortable(
+        this.#fetch(
+          `${this.#apiBase}/app/installations/${configuration.installationId}/access_tokens`,
+          {
+            method: "POST",
+            body: JSON.stringify({ repository_ids: [configuredRepository.id] }),
+            headers: { ...headers, "Content-Type": "application/json" },
+            signal,
+          },
+        ),
+        signal,
       ),
     ]);
-    const app = parseApp(await responseJson(appResponse, "App authentication"));
+    const app = parseApp(await responseJson(appResponse, "App authentication", signal));
     const installation = parseInstallationToken(
-      await responseJson(tokenResponse, "installation authentication"),
+      await responseJson(tokenResponse, "installation authentication", signal),
     );
     return new InstallationSession(installation.token, app.slug, this.#fetch, this.#apiBase);
   }
