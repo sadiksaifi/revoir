@@ -524,6 +524,22 @@ describe("clean review orchestrator", () => {
     assert.deepEqual(events, ["authenticate", "get-pr", "get-head"]);
   });
 
+  it("settles an obsolete queued head before reading live lifecycle state", async () => {
+    const { events, orchestrator } = harness();
+
+    assert.deepEqual(
+      await orchestrator.review(reference, {
+        expectedHeadSha: "3".repeat(40),
+      }),
+      {
+        status: "stale",
+        reviewedSha: "3".repeat(40),
+        currentSha: "2".repeat(40),
+      },
+    );
+    assert.deepEqual(events, ["authenticate", "get-pr"]);
+  });
+
   it("skips Pi when the head changes while preparing the complete current diff", async () => {
     const { events, orchestrator } = harness({ mutateHeadDuring: "workspace-prepare" });
 
