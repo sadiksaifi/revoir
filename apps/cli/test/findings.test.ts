@@ -867,6 +867,85 @@ index 1111111..2222222 100644
     assert.notEqual(result.findings[0]?.fingerprint, result.findings[1]?.fingerprint);
   });
 
+  it("keeps identical shifted multiline blocks matched across input permutations", async () => {
+    const beforeShift = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,7 @@
+ const retained = true;
++guard();
++targetAnchor();
++tail();
++guard();
++targetAnchor();
++tail();
+`;
+    const afterShift = `diff --git a/source.ts b/source.ts
+index 1111111..3333333 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,8 @@
+ const retained = true;
++const unrelated = true;
++guard();
++targetAnchor();
++tail();
++guard();
++targetAnchor();
++tail();
+`;
+    const firstRun = await validateModelReviewOutput(
+      output([
+        finding({
+          range: { start: 3, end: 4, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+        finding({
+          range: { start: 6, end: 7, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+      ]),
+      { checkout, diff: beforeShift },
+    );
+    const secondRun = await validateModelReviewOutput(
+      output([
+        finding({
+          range: { start: 4, end: 5, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+        finding({
+          range: { start: 7, end: 8, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+      ]),
+      { checkout, diff: afterShift },
+    );
+    const threads = firstRun.findings.map(({ fingerprint, fingerprintAliases }, index) => ({
+      id: `THREAD_${index + 1}`,
+      fingerprint,
+      aliases: fingerprintAliases!,
+    }));
+
+    for (const findings of [secondRun.findings, secondRun.findings.toReversed()]) {
+      for (const ownedOpenThreads of [threads, threads.toReversed()]) {
+        assert.deepEqual(
+          planFindingReconciliation(findings, {
+            activeFingerprints: firstRun.findings.map(({ fingerprint }) => fingerprint),
+            ownedOpenThreads,
+            runHeadShas: ["1".repeat(40)],
+          }),
+          {
+            netNewFindings: [],
+            obsoleteThreadIds: [],
+            currentBodyFindings: [],
+            bodyStateChanged: false,
+          },
+        );
+      }
+    }
+  });
+
   it("keeps Unicode case-fold lookalikes as distinct exact anchors", async () => {
     const diff = `diff --git a/source.ts b/source.ts
 index 1111111..2222222 100644

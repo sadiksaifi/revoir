@@ -220,6 +220,215 @@ describe("finding reconciliation", () => {
     );
   });
 
+  it("matches repeated cohorts only to minimum multiplicity and preserves real transitions", () => {
+    const repeated = token("1");
+    const changedContext = token("2");
+    const semantic = findingFingerprint(finding(token("a"), 2));
+    const currentA = {
+      ...finding(token("a"), 2),
+      fingerprintAliases: [repeated],
+    };
+    const currentB = {
+      ...finding(token("b"), 5),
+      fingerprintAliases: [repeated],
+    };
+    const currentC = {
+      ...finding(token("c"), 8),
+      fingerprintAliases: [repeated],
+    };
+    const priorD = {
+      id: "THREAD_D",
+      fingerprint: token("d"),
+      aliases: [semantic, repeated],
+    };
+    const priorE = {
+      id: "THREAD_E",
+      fingerprint: token("e"),
+      aliases: [semantic, repeated],
+    };
+    const priorF = {
+      id: "THREAD_F",
+      fingerprint: token("f"),
+      aliases: [semantic, repeated],
+    };
+
+    for (const findings of [
+      [currentA, currentB, currentC],
+      [currentC, currentB, currentA],
+    ]) {
+      for (const ownedOpenThreads of [
+        [priorD, priorE],
+        [priorE, priorD],
+      ]) {
+        const expansion = planFindingReconciliation(findings, {
+          activeFingerprints: [token("d"), token("e")],
+          ownedOpenThreads,
+          runHeadShas: ["1".repeat(40)],
+        });
+        assert.deepEqual(expansion.netNewFindings, [currentC]);
+        assert.deepEqual(expansion.obsoleteThreadIds, []);
+      }
+    }
+
+    const contraction = planFindingReconciliation([currentB, currentA], {
+      activeFingerprints: [token("d"), token("e"), token("f")],
+      ownedOpenThreads: [priorF, priorD, priorE],
+      runHeadShas: ["2".repeat(40)],
+    });
+    assert.deepEqual(contraction.netNewFindings, []);
+    assert.deepEqual(contraction.obsoleteThreadIds, ["THREAD_F"]);
+
+    const contextReplacement = planFindingReconciliation(
+      [
+        { ...currentA, fingerprintAliases: [changedContext] },
+        { ...currentB, fingerprintAliases: [changedContext] },
+      ],
+      {
+        activeFingerprints: [token("d"), token("e")],
+        ownedOpenThreads: [priorD, priorE],
+        runHeadShas: ["3".repeat(40)],
+      },
+    );
+    assert.deepEqual(contextReplacement.netNewFindings, [
+      { ...currentA, fingerprintAliases: [changedContext] },
+      { ...currentB, fingerprintAliases: [changedContext] },
+    ]);
+    assert.deepEqual(contextReplacement.obsoleteThreadIds, ["THREAD_D", "THREAD_E"]);
+  });
+
+  it("partitions mixed cohorts by the full signature and fails closed across signatures", () => {
+    const signatureX = token("1");
+    const signatureY = token("2");
+    const semantic = findingFingerprint(finding(token("a"), 2));
+    const current = [
+      { ...finding(token("a"), 2), fingerprintAliases: [signatureX] },
+      { ...finding(token("b"), 5), fingerprintAliases: [signatureX] },
+      { ...finding(token("c"), 8), fingerprintAliases: [signatureY] },
+      { ...finding(token("d"), 11), fingerprintAliases: [signatureY] },
+    ];
+    const prior = [
+      {
+        id: "THREAD_E",
+        fingerprint: token("e"),
+        aliases: [semantic, signatureX],
+      },
+      {
+        id: "THREAD_F",
+        fingerprint: token("f"),
+        aliases: [semantic, signatureX],
+      },
+      {
+        id: "THREAD_G",
+        fingerprint: token("g"),
+        aliases: [semantic, signatureY],
+      },
+      {
+        id: "THREAD_H",
+        fingerprint: token("h"),
+        aliases: [semantic, signatureY],
+      },
+    ];
+
+    for (const findings of [current, current.toReversed()]) {
+      for (const ownedOpenThreads of [prior, prior.toReversed()]) {
+        const plan = planFindingReconciliation(findings, {
+          activeFingerprints: prior.map(({ fingerprint }) => fingerprint),
+          ownedOpenThreads,
+          runHeadShas: ["1".repeat(40)],
+        });
+        assert.deepEqual(plan.netNewFindings, []);
+        assert.deepEqual(plan.obsoleteThreadIds, []);
+      }
+    }
+
+    const crossSignatureCurrent = [
+      {
+        ...finding(token("a"), 2),
+        fingerprintAliases: [signatureX, signatureY],
+      },
+      {
+        ...finding(token("b"), 5),
+        fingerprintAliases: [signatureX, signatureY],
+      },
+    ];
+    const crossSignaturePlan = planFindingReconciliation(crossSignatureCurrent, {
+      activeFingerprints: prior.map(({ fingerprint }) => fingerprint),
+      ownedOpenThreads: prior,
+      runHeadShas: ["2".repeat(40)],
+    });
+    assert.deepEqual(crossSignaturePlan.netNewFindings, crossSignatureCurrent);
+    assert.deepEqual(crossSignaturePlan.obsoleteThreadIds, [
+      "THREAD_E",
+      "THREAD_F",
+      "THREAD_G",
+      "THREAD_H",
+    ]);
+  });
+
+  it("does not displace exact or unique matches while preserving body and thread counts", () => {
+    const repeated = token("1");
+    const unique = token("2");
+    const exact = {
+      ...finding(token("a"), 2),
+      fingerprintAliases: [repeated],
+    };
+    const body = {
+      ...finding(token("b"), 5),
+      fingerprintAliases: [repeated, unique],
+      range: null,
+      attachment: { kind: "file", path: "source.ts" } as const,
+    };
+    const cohortC = {
+      ...finding(token("c"), 8),
+      fingerprintAliases: [repeated],
+    };
+    const cohortD = {
+      ...finding(token("d"), 11),
+      fingerprintAliases: [repeated],
+    };
+    const semantic = findingFingerprint(exact);
+    const threads = [
+      {
+        id: "THREAD_EXACT",
+        fingerprint: token("a"),
+        aliases: [semantic, repeated],
+      },
+      {
+        id: "THREAD_G",
+        fingerprint: token("g"),
+        aliases: [semantic, repeated],
+      },
+      {
+        id: "THREAD_H",
+        fingerprint: token("h"),
+        aliases: [semantic, repeated],
+      },
+    ];
+
+    for (const findings of [
+      [body, cohortD, exact, cohortC],
+      [cohortC, exact, cohortD, body],
+    ]) {
+      for (const ownedOpenThreads of [threads, threads.toReversed()]) {
+        const plan = planFindingReconciliation(findings, {
+          activeFingerprints: [token("a"), token("f"), token("g"), token("h")],
+          bodyFindings: [
+            {
+              fingerprint: token("f"),
+              aliases: [semantic, repeated, unique],
+            },
+          ],
+          ownedOpenThreads,
+          runHeadShas: ["1".repeat(40)],
+        });
+        assert.deepEqual(plan.netNewFindings, []);
+        assert.deepEqual(plan.obsoleteThreadIds, []);
+        assert.deepEqual(plan.currentBodyFindings, [body]);
+        assert.equal(plan.bodyStateChanged, true);
+      }
+    }
+  });
+
   it("preserves legacy aliases, body migration, and thread identities within one group", () => {
     const legacyToken = token("1");
     const legacy = {

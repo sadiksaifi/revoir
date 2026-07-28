@@ -395,6 +395,64 @@ function matchFindingIdentities(
       remainingPrior.delete(priorEntry.index);
     }
 
+    const cohortCurrent = currentGroup.filter(({ index }) => remainingCurrent.has(index));
+    const cohortPrior = priorGroup.filter(({ index }) => remainingPrior.has(index));
+    const cohortCurrentTokenCounts = tokenCounts(cohortCurrent);
+    const cohortPriorTokenCounts = tokenCounts(cohortPrior);
+    const repeatedSharedTokens = new Set(
+      [...cohortCurrentTokenCounts]
+        .filter(
+          ([token, count]) =>
+            token !== semanticFingerprint &&
+            count > 1 &&
+            (cohortPriorTokenCounts.get(token) ?? 0) > 1,
+        )
+        .map(([token]) => token),
+    );
+    const cohortSignature = (identity: PriorFindingIdentity): string | undefined => {
+      const signature = [...identityFingerprints(identity)]
+        .filter((token) => repeatedSharedTokens.has(token))
+        .toSorted();
+      return signature.length === 0 ? undefined : JSON.stringify(signature);
+    };
+    const currentCohorts = new Map<string, Array<IndexedIdentity<CurrentFindingIdentity>>>();
+    const priorCohorts = new Map<string, Array<IndexedIdentity<MatchablePriorIdentity>>>();
+    for (const entry of cohortCurrent) {
+      const signature = cohortSignature(entry.identity);
+      if (signature !== undefined) {
+        const cohort = currentCohorts.get(signature) ?? [];
+        cohort.push(entry);
+        currentCohorts.set(signature, cohort);
+      }
+    }
+    for (const entry of cohortPrior) {
+      const signature = cohortSignature(entry.identity);
+      if (signature !== undefined) {
+        const cohort = priorCohorts.get(signature) ?? [];
+        cohort.push(entry);
+        priorCohorts.set(signature, cohort);
+      }
+    }
+
+    // A complete repeated non-semantic signature identifies an unchanged cohort even when line
+    // shifts invalidate every occurrence-specific token. Exact and unique matches above remain
+    // locked; empty semantic-only and unequal cross-signature cohorts deliberately stay unmatched.
+    for (const signature of [...currentCohorts.keys()].toSorted()) {
+      const currentCohort = currentCohorts.get(signature)!;
+      const priorCohort = priorCohorts.get(signature);
+      if (priorCohort === undefined) {
+        continue;
+      }
+      const pairCount = Math.min(currentCohort.length, priorCohort.length);
+      for (let offset = 0; offset < pairCount; offset += 1) {
+        const currentEntry = currentCohort[offset]!;
+        const priorEntry = priorCohort[offset]!;
+        recordMatch(currentEntry.index, priorEntry.index);
+        remainingCurrent.delete(currentEntry.index);
+        remainingPrior.delete(priorEntry.index);
+      }
+    }
+
     // A semantic alias alone proves continuity only when at least one original side is singular.
     // Residual many-to-many groups represent replacements unless another token discriminates them.
     if (currentGroup.length === 1 || priorGroup.length === 1) {
