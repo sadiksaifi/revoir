@@ -187,7 +187,7 @@ describe("GitHub App review gateway", () => {
         return json({ id: 81, state: "COMMENTED" });
       }
       if (url.endsWith("/reviews/82") && init?.method === "DELETE") {
-        return new Response(null, { status: 204 });
+        return json({ id: 82, state: "PENDING" });
       }
       throw new Error(`Unexpected request ${url}`);
     };
@@ -260,7 +260,7 @@ describe("GitHub App review gateway", () => {
       const reviewId = /\/reviews\/(\d+)$/u.exec(url)?.[1];
       if (reviewId !== undefined && init?.method === "DELETE") {
         deleted.push(Number(reviewId));
-        return new Response(null, { status: 204 });
+        return json({ id: Number(reviewId), state: "PENDING" });
       }
       throw new Error(`Unexpected request ${url}`);
     };
