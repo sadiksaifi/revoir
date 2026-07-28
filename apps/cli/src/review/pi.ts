@@ -112,10 +112,10 @@ export function createReviewResourceLoader(systemPrompt: string): ResourceLoader
 const REVIEW_TOOL_NAMES = ["read", "grep", "find", "ls", "bash"];
 
 const DENIED_REVIEW_COMMANDS = [
-  /(?:^|[;&|()\n])\s*(?:(?:command|env|sudo)\s+)*(?:[^\s;&|()]+\/)*(?:npm|pnpm|yarn|bun|npx|corepack)(?:\s|$)/u,
-  /(?:^|[;&|()\n])\s*(?:(?:command|env|sudo)\s+)*(?:(?:python(?:3(?:\.[0-9]+)?)?\s+-m\s+pip)|pip[0-9.]*)(?:\s+install)(?:\s|$)/u,
-  /(?:^|[;&|()\n])\s*(?:(?:command|env|sudo)\s+)*(?:uv\s+(?:add|pip|sync)|cargo\s+install|gem\s+install|bundle\s+(?:install|update)|composer\s+(?:install|require|update)|go\s+get)(?:\s|$)/u,
-  /(?:^|[;&|()\n])\s*(?:(?:command|env|sudo)\s+)*(?:[^\s;&|()]+\/)*gh(?:\s|$)/u,
+  /(?:^|[\s;&|()'"`])(?:[^\s;&|()'"`]+\/)*(?:npm|pnpm|yarn|bun|npx|corepack)(?=[\s;&|()'"`]|$)/u,
+  /(?:^|[\s;&|()'"`])(?:(?:python(?:3(?:\.[0-9]+)?)?\s+-m\s+pip)|pip[0-9.]*)(?:\s+install)(?=[\s;&|()'"`]|$)/u,
+  /(?:^|[\s;&|()'"`])(?:uv\s+(?:add|pip|sync)|cargo\s+install|gem\s+install|bundle\s+(?:install|update)|composer\s+(?:install|require|update)|go\s+get)(?=[\s;&|()'"`]|$)/u,
+  /(?:^|[\s;&|()'"`])(?:[^\s;&|()'"`]+\/)*gh(?=[\s;&|()'"`]|$)/u,
 ];
 
 function reviewCommandAllowed(command: string): boolean {

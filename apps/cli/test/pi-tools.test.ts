@@ -103,6 +103,12 @@ describe("Pi review isolation", () => {
       "git status && bundle install",
       "gh run rerun 123",
       "gh workflow run ci.yml",
+      "CI=1 pnpm install",
+      "env CI=1 pnpm install",
+      "command env CI=1 pnpm install",
+      "sh -c 'pnpm install'",
+      'bash -lc "npm ci"',
+      "nohup yarn test",
     ];
 
     for (const command of denied) {
