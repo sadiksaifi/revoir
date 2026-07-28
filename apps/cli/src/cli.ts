@@ -109,15 +109,29 @@ function parseCommonOptions(arguments_: readonly string[]): CommonOptions {
 function renderDiagnostics(
   results: readonly DiagnosticResult[],
   json: boolean,
+  verbose: boolean,
   redactor: SecretRedactor,
 ): string {
+  const renderedResults = results.map((result) => ({
+    id: result.id,
+    label: result.label,
+    status: result.status,
+    detail:
+      verbose && result.error !== undefined
+        ? redactor.error(result.error, true)
+        : redactor.text(result.detail),
+  }));
   if (json) {
-    return `${JSON.stringify(redactor.value({ ok: diagnosticsPassed(results), checks: results }), undefined, 2)}\n`;
+    return `${JSON.stringify(
+      redactor.value({ ok: diagnosticsPassed(results), checks: renderedResults }),
+      undefined,
+      2,
+    )}\n`;
   }
-  const checks = results
+  const checks = renderedResults
     .map((result) => {
       const indicator = result.status === "passed" ? "✓" : "✗";
-      return `${indicator} ${result.label}: ${redactor.text(result.detail)}`;
+      return `${indicator} ${result.label}: ${result.detail}`;
     })
     .join("\n");
   const passed = results.filter((result) => result.status === "passed").length;
@@ -213,7 +227,7 @@ export async function runCli(
         configuration,
         dependencies.gateway ?? createDefaultDiagnosticGateway(),
       );
-      write(io.stdout, renderDiagnostics(results, common.json, redactor));
+      write(io.stdout, renderDiagnostics(results, common.json, common.verbose, redactor));
       return diagnosticsPassed(results) ? 0 : 1;
     } catch (error) {
       write(io.stderr, `Error: ${new SecretRedactor().error(error, common.verbose)}\n`);
@@ -241,7 +255,7 @@ export async function runCli(
         configuration,
         dependencies.gateway ?? createDefaultDiagnosticGateway(),
       );
-      write(io.stdout, renderDiagnostics(results, common.json, redactor));
+      write(io.stdout, renderDiagnostics(results, common.json, common.verbose, redactor));
       return diagnosticsPassed(results) ? 0 : 1;
     } catch (error) {
       write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);

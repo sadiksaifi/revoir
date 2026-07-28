@@ -22,6 +22,7 @@ export interface DiagnosticResult {
   label: string;
   status: DiagnosticStatus;
   detail: string;
+  error?: unknown;
 }
 
 export interface DiagnosticGateway {
@@ -320,6 +321,7 @@ async function capture(
       label,
       status: "failed",
       detail: error instanceof Error ? error.message : String(error),
+      error,
     };
   }
 }
@@ -359,6 +361,7 @@ export async function runDiagnostics(
             label: "GitHub App and author",
             status: "failed",
             detail,
+            error,
           },
           {
             id: "repositories",

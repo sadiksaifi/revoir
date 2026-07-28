@@ -182,7 +182,7 @@ describe("CLI", () => {
     );
   });
 
-  it("returns a failed diagnostic result while redacting normal and verbose output", async () => {
+  it("keeps normal diagnostics concise and adds redacted stack detail in verbose mode", async () => {
     const { root, io, stdout, stderr } = await createIo();
     const { privateKeyFile, tokenFile } = await writeCredentials(root);
     assert.equal(
@@ -195,15 +195,38 @@ describe("CLI", () => {
     stdout.output = "";
     stderr.output = "";
 
+    const diagnosticError = new Error("rejected cli-cloudflare-secret");
+    diagnosticError.stack =
+      "Error: rejected cli-cloudflare-secret\n    at cloudflareDiagnostic (diagnostic-origin.ts:42:7)";
     const failingGateway: DiagnosticGateway = {
       ...passingGateway(),
-      async checkCloudflare(configuration) {
-        throw new Error(`rejected ${configuration.apiToken}`);
+      async checkCloudflare() {
+        throw diagnosticError;
       },
     };
+
+    assert.equal(await runCli(["diagnose"], { io, gateway: failingGateway }), 1);
+    assert.match(stdout.output, /rejected \[REDACTED\]/u);
+    assert.doesNotMatch(stdout.output, /diagnostic-origin/u);
+    assert.doesNotMatch(stdout.output + stderr.output, /cli-cloudflare-secret/u);
+
+    stdout.output = "";
     assert.equal(await runCli(["diagnose", "--verbose"], { io, gateway: failingGateway }), 1);
     assert.match(stdout.output, /Diagnostics failed/u);
+    assert.match(stdout.output, /diagnostic-origin\.ts:42:7/u);
     assert.match(stdout.output, /\[REDACTED\]/u);
+    assert.doesNotMatch(stdout.output + stderr.output, /cli-cloudflare-secret/u);
+
+    stdout.output = "";
+    assert.equal(await runCli(["diagnose", "--json"], { io, gateway: failingGateway }), 1);
+    assert.doesNotMatch(stdout.output, /diagnostic-origin/u);
+
+    stdout.output = "";
+    assert.equal(
+      await runCli(["diagnose", "--json", "--verbose"], { io, gateway: failingGateway }),
+      1,
+    );
+    assert.match(stdout.output, /diagnostic-origin\.ts:42:7/u);
     assert.doesNotMatch(stdout.output + stderr.output, /cli-cloudflare-secret/u);
   });
 
