@@ -21,6 +21,7 @@ import { CloudflareQueueClient, type QueueDelivery } from "./client.js";
 import {
   FileOperationalFailureStore,
   type OperationalAttemptSlot,
+  type OperationalFailureCount,
   type OperationalFailureState,
   type OperationalFailureStore,
 } from "./failure-store.js";
@@ -91,16 +92,12 @@ function throwIfCancelled(signal?: AbortSignal): void {
   }
 }
 
-function fallbackOperationalAttempt(transportAttempt: number): number {
-  return Math.min(MAX_OPERATIONAL_ATTEMPTS, Math.max(transportAttempt, 1));
-}
-
 function effectiveAttempt(state: OperationalFailureState): number {
   return state.reservation?.slot ?? state.committedFailures;
 }
 
 function committedState(
-  failures: OperationalAttemptSlot,
+  failures: OperationalFailureCount,
   category: ReviewFailureCategory = "unknown",
 ): OperationalFailureState {
   return failures === MAX_OPERATIONAL_ATTEMPTS
@@ -154,6 +151,24 @@ class StoreOperationTimeoutError extends Error {
   }
 }
 
+interface StoreOperationRecord<T> {
+  readonly operation: Promise<T>;
+  readonly operationSignal: AbortSignal;
+  readonly slotOnFailure: OperationalAttemptSlot;
+  counted: boolean;
+  reported: boolean;
+}
+
+class StoreOperationFailure extends Error {
+  readonly operationRecord: StoreOperationRecord<unknown>;
+
+  constructor(record: StoreOperationRecord<unknown>, cause: unknown) {
+    super("Operational review failure state is unavailable.", { cause });
+    this.name = "StoreOperationFailure";
+    this.operationRecord = record;
+  }
+}
+
 function waitForStoreOperation<T>(
   operation: Promise<T>,
   operationName: string,
@@ -198,9 +213,15 @@ export class QueueReviewRunner implements QueueRunService {
   readonly #configuration: RevoirConfiguration;
   readonly #failures: ReviewFailureReporter;
   readonly #knownStates = new Map<string, OperationalFailureState>();
+  // If the store is completely unavailable across a process restart, this floor
+  // cannot be recovered. Durable reservations cover every operation that reached
+  // the store; transport delivery attempts are intentionally audit-only.
+  readonly #outageFloors = new Map<string, OperationalFailureCount>();
   readonly #operationalFailures: OperationalFailureStore;
   readonly #ownerToken = randomUUID();
-  readonly #pendingSaves = new Map<string, Promise<void>>();
+  readonly #pendingLoads = new Map<string, StoreOperationRecord<OperationalFailureState>>();
+  readonly #pendingSaves = new Map<string, Set<StoreOperationRecord<void>>>();
+  readonly #pendingStoreSettlements = new Map<string, StoreOperationRecord<unknown>>();
   readonly #queue: QueueClient;
   readonly #reviews: ManualReviewService;
   #serializedConsumption: Promise<void> = Promise.resolve();
@@ -254,6 +275,11 @@ export class QueueReviewRunner implements QueueRunService {
       return "settled";
     }
 
+    const pendingSettlement = this.#pendingStoreSettlements.get(job.deliveryId);
+    if (pendingSettlement !== undefined) {
+      return this.#settleStoreFailure(delivery, job, pendingSettlement, signal);
+    }
+
     let operationalState: OperationalFailureState;
     try {
       operationalState = await this.#loadFailureState(job.deliveryId, signal);
@@ -284,7 +310,7 @@ export class QueueReviewRunner implements QueueRunService {
       ...(slot === MAX_OPERATIONAL_ATTEMPTS ? { terminalCategory: "unknown" as const } : {}),
     };
     try {
-      await this.#saveFailureState(job.deliveryId, reservedState, signal);
+      await this.#saveFailureState(job.deliveryId, reservedState, slot, signal);
       throwIfCancelled(signal);
     } catch (error) {
       if (isExactCallerCancellation(error, signal)) {
@@ -320,6 +346,7 @@ export class QueueReviewRunner implements QueueRunService {
           await this.#saveFailureState(
             job.deliveryId,
             nextState,
+            slot,
             signal?.aborted === true ? undefined : signal,
           );
         } catch (stateError) {
@@ -357,22 +384,76 @@ export class QueueReviewRunner implements QueueRunService {
     deliveryId: string,
     signal?: AbortSignal,
   ): Promise<OperationalFailureState> {
-    const pendingSave = this.#pendingSaves.get(deliveryId);
-    if (pendingSave !== undefined) {
-      await this.#boundStoreOperation(pendingSave, "save", signal);
+    const pendingSaves = this.#pendingSaves.get(deliveryId);
+    if (pendingSaves !== undefined) {
+      for (const pendingSave of pendingSaves) {
+        // Saves are joined before loading so a late completion cannot overwrite
+        // a reconciled state with an older reservation or committed count.
+        // eslint-disable-next-line no-await-in-loop
+        await this.#waitRecordedStoreOperation(pendingSave, "save", signal);
+      }
     }
-    const { operation, operationSignal } = this.#startStoreOperation(
-      (storeSignal) => this.#operationalFailures.load(deliveryId, storeSignal),
-      signal,
-    );
-    const loaded = await waitForStoreOperation(operation, "load", operationSignal, signal);
+
+    let loadRecord = this.#pendingLoads.get(deliveryId);
+    if (loadRecord === undefined) {
+      loadRecord = this.#startRecordedStoreOperation(
+        (storeSignal) => this.#operationalFailures.load(deliveryId, storeSignal),
+        this.#nextFailureSlot(deliveryId),
+        signal,
+      );
+      this.#pendingLoads.set(deliveryId, loadRecord);
+      void loadRecord.operation.then(
+        () => {
+          if (this.#pendingLoads.get(deliveryId) === loadRecord) {
+            this.#pendingLoads.delete(deliveryId);
+          }
+        },
+        () => {
+          if (this.#pendingLoads.get(deliveryId) === loadRecord) {
+            this.#pendingLoads.delete(deliveryId);
+          }
+        },
+      );
+    }
+    let loaded: OperationalFailureState;
+    try {
+      loaded = await this.#waitRecordedStoreOperation(loadRecord, "load", signal);
+    } catch (error) {
+      if (
+        isExactCallerCancellation(error, signal) &&
+        this.#pendingLoads.get(deliveryId) === loadRecord
+      ) {
+        this.#pendingLoads.delete(deliveryId);
+      }
+      throw error;
+    }
     const known = this.#knownStates.get(deliveryId);
-    const conservative = consumeReservation(
-      known === undefined ? loaded : moreConservativeState(loaded, known),
-    );
+    const outageFloor = this.#outageFloors.get(deliveryId) ?? 0;
+    const loadedCommitted = consumeReservation(loaded);
+    const knownCommitted = known === undefined ? undefined : consumeReservation(known);
+    const reconciledFailures = Math.max(
+      outageFloor,
+      loadedCommitted.committedFailures,
+      knownCommitted?.committedFailures ?? 0,
+    ) as OperationalFailureCount;
+    const terminalCategory =
+      reconciledFailures === MAX_OPERATIONAL_ATTEMPTS
+        ? outageFloor === MAX_OPERATIONAL_ATTEMPTS
+          ? "filesystem"
+          : this.#strongestTerminalCategory(loadedCommitted, knownCommitted)
+        : undefined;
+    const conservative = committedState(reconciledFailures, terminalCategory ?? "unknown");
     this.#rememberState(deliveryId, conservative);
-    if (!statesEqual(loaded, conservative)) {
-      await this.#saveFailureState(deliveryId, conservative, signal);
+    if (outageFloor > 0 || !statesEqual(loaded, conservative)) {
+      await this.#saveFailureState(
+        deliveryId,
+        conservative,
+        this.#nextFailureSlot(deliveryId, reconciledFailures),
+        signal,
+      );
+    }
+    if (outageFloor > 0 && reconciledFailures >= outageFloor) {
+      this.#outageFloors.delete(deliveryId);
     }
     return conservative;
   }
@@ -380,15 +461,43 @@ export class QueueReviewRunner implements QueueRunService {
   async #saveFailureState(
     deliveryId: string,
     state: OperationalFailureState,
+    slotOnFailure: OperationalAttemptSlot,
     signal?: AbortSignal,
   ): Promise<void> {
     this.#rememberState(deliveryId, state);
-    const { operation, operationSignal } = this.#startStoreOperation(
+    const record = this.#startRecordedStoreOperation(
       (storeSignal) => this.#operationalFailures.save(deliveryId, state, storeSignal),
+      slotOnFailure,
       signal,
     );
-    this.#trackPendingSave(deliveryId, operation);
-    await waitForStoreOperation(operation, "save", operationSignal, signal);
+    this.#trackPendingSave(deliveryId, record);
+    await this.#waitRecordedStoreOperation(record, "save", signal);
+  }
+
+  #strongestTerminalCategory(
+    loaded: OperationalFailureState,
+    known?: OperationalFailureState,
+  ): ReviewFailureCategory {
+    if (loaded.terminalCategory !== undefined && loaded.terminalCategory !== "unknown") {
+      return loaded.terminalCategory;
+    }
+    if (known?.terminalCategory !== undefined && known.terminalCategory !== "unknown") {
+      return known.terminalCategory;
+    }
+    return loaded.terminalCategory ?? known?.terminalCategory ?? "unknown";
+  }
+
+  #nextFailureSlot(
+    deliveryId: string,
+    observedFailures: OperationalFailureCount = 0,
+  ): OperationalAttemptSlot {
+    const known = this.#knownStates.get(deliveryId);
+    const floor = Math.max(
+      observedFailures,
+      this.#outageFloors.get(deliveryId) ?? 0,
+      known === undefined ? 0 : effectiveAttempt(known),
+    );
+    return Math.min(MAX_OPERATIONAL_ATTEMPTS, floor + 1) as OperationalAttemptSlot;
   }
 
   #rememberState(deliveryId: string, state: OperationalFailureState): void {
@@ -405,13 +514,18 @@ export class QueueReviewRunner implements QueueRunService {
     reservation: NonNullable<OperationalFailureState["reservation"]>,
   ): Promise<boolean> {
     try {
-      const pendingSave = this.#pendingSaves.get(deliveryId);
-      if (pendingSave !== undefined) {
-        try {
-          await this.#boundStoreOperation(pendingSave, "save");
-        } catch {
-          if (this.#pendingSaves.get(deliveryId) === pendingSave) {
-            return false;
+      const pendingSaves = this.#pendingSaves.get(deliveryId);
+      if (pendingSaves !== undefined) {
+        for (const pendingSave of pendingSaves) {
+          try {
+            // Cancellation rollback is compensating work, so its store failures
+            // are not reported during the cancelled delivery.
+            // eslint-disable-next-line no-await-in-loop
+            await this.#boundStoreOperation(pendingSave.operation, "save");
+          } catch {
+            if (this.#pendingSaves.get(deliveryId)?.has(pendingSave) === true) {
+              return false;
+            }
           }
         }
       }
@@ -458,23 +572,28 @@ export class QueueReviewRunner implements QueueRunService {
   }
 
   async #saveRollbackState(deliveryId: string, state: OperationalFailureState): Promise<void> {
-    const { operation, operationSignal } = this.#startStoreOperation((storeSignal) =>
-      this.#operationalFailures.save(deliveryId, state, storeSignal),
+    const record = this.#startRecordedStoreOperation(
+      (storeSignal) => this.#operationalFailures.save(deliveryId, state, storeSignal),
+      this.#nextFailureSlot(deliveryId),
     );
-    this.#trackPendingSave(deliveryId, operation);
-    await waitForStoreOperation(operation, "rollback", operationSignal);
+    this.#trackPendingSave(deliveryId, record);
+    await waitForStoreOperation(record.operation, "rollback", record.operationSignal);
   }
 
-  #trackPendingSave(deliveryId: string, operation: Promise<void>): void {
-    this.#pendingSaves.set(deliveryId, operation);
-    void operation.then(
+  #trackPendingSave(deliveryId: string, record: StoreOperationRecord<void>): void {
+    const pending = this.#pendingSaves.get(deliveryId) ?? new Set();
+    pending.add(record);
+    this.#pendingSaves.set(deliveryId, pending);
+    void record.operation.then(
       () => {
-        if (this.#pendingSaves.get(deliveryId) === operation) {
+        pending.delete(record);
+        if (pending.size === 0 && this.#pendingSaves.get(deliveryId) === pending) {
           this.#pendingSaves.delete(deliveryId);
         }
       },
       () => {
-        if (this.#pendingSaves.get(deliveryId) === operation) {
+        pending.delete(record);
+        if (pending.size === 0 && this.#pendingSaves.get(deliveryId) === pending) {
           this.#pendingSaves.delete(deliveryId);
         }
       },
@@ -495,6 +614,40 @@ export class QueueReviewRunner implements QueueRunService {
     return { operation, operationSignal };
   }
 
+  #startRecordedStoreOperation<T>(
+    run: (signal: AbortSignal) => Promise<T>,
+    slotOnFailure: OperationalAttemptSlot,
+    callerSignal?: AbortSignal,
+  ): StoreOperationRecord<T> {
+    const { operation, operationSignal } = this.#startStoreOperation(run, callerSignal);
+    const record: StoreOperationRecord<T> = {
+      operation,
+      operationSignal,
+      slotOnFailure,
+      counted: false,
+      reported: false,
+    };
+    return record;
+  }
+
+  async #waitRecordedStoreOperation<T>(
+    record: StoreOperationRecord<T>,
+    operationName: string,
+    callerSignal?: AbortSignal,
+  ): Promise<T> {
+    const timeoutSignal = AbortSignal.timeout(this.#configuration.timeouts.shellCommandMs);
+    const waitSignal =
+      callerSignal === undefined ? timeoutSignal : AbortSignal.any([callerSignal, timeoutSignal]);
+    try {
+      return await waitForStoreOperation(record.operation, operationName, waitSignal, callerSignal);
+    } catch (error) {
+      if (isExactCallerCancellation(error, callerSignal)) {
+        throw error;
+      }
+      throw new StoreOperationFailure(record, error);
+    }
+  }
+
   async #boundStoreOperation<T>(
     operation: Promise<T>,
     operationName: string,
@@ -509,11 +662,14 @@ export class QueueReviewRunner implements QueueRunService {
   async #clearFailureState(deliveryId: string): Promise<void> {
     // Queue settlement has already been confirmed. A stale local file must not resurrect
     // or loop a message that is no longer leased.
-    const pendingSave = this.#pendingSaves.get(deliveryId);
+    const pendingSaves = [...(this.#pendingSaves.get(deliveryId) ?? [])];
     await this.#clearFailureStateNow(deliveryId);
     this.#knownStates.delete(deliveryId);
-    if (pendingSave !== undefined) {
-      void pendingSave.then(
+    this.#outageFloors.delete(deliveryId);
+    this.#pendingLoads.delete(deliveryId);
+    this.#pendingStoreSettlements.delete(deliveryId);
+    for (const pendingSave of pendingSaves) {
+      void pendingSave.operation.then(
         () => this.#clearFailureStateNow(deliveryId),
         () => this.#clearFailureStateNow(deliveryId),
       );
@@ -548,23 +704,68 @@ export class QueueReviewRunner implements QueueRunService {
   async #settleStoreFailure(
     delivery: QueueDelivery,
     job: ReviewJobV1,
-    error: unknown,
+    failure: unknown,
     signal?: AbortSignal,
   ): Promise<QueueConsumption> {
-    const fallbackAttempt = fallbackOperationalAttempt(delivery.attempt);
-    await this.#reportFailure(referenceFor(job), error, fallbackAttempt, signal);
+    const record =
+      failure instanceof StoreOperationFailure
+        ? failure.operationRecord
+        : this.#isStoreOperationRecord(failure)
+          ? failure
+          : undefined;
+    if (record === undefined) {
+      throw failure;
+    }
+
+    if (!record.counted) {
+      record.counted = true;
+      const floor = Math.max(
+        this.#outageFloors.get(job.deliveryId) ?? 0,
+        record.slotOnFailure,
+      ) as OperationalFailureCount;
+      this.#outageFloors.set(job.deliveryId, floor);
+      this.#rememberState(
+        job.deliveryId,
+        committedState(floor, floor === MAX_OPERATIONAL_ATTEMPTS ? "filesystem" : "unknown"),
+      );
+    }
+    const attempt = record.slotOnFailure;
+    this.#pendingStoreSettlements.set(job.deliveryId, record);
+    if (!record.reported) {
+      record.reported = true;
+      await this.#reportFailure(
+        referenceFor(job),
+        reviewFailureForCategory("filesystem"),
+        attempt,
+        signal,
+      );
+    }
     throwIfCancelled(signal);
-    if (fallbackAttempt >= MAX_OPERATIONAL_ATTEMPTS) {
+    if (attempt >= MAX_OPERATIONAL_ATTEMPTS) {
       await this.#queue.acknowledge(delivery.leaseId, signal);
       await this.#clearFailureState(job.deliveryId);
     } else {
       await this.#queue.retry(
         delivery.leaseId,
-        OPERATIONAL_RETRY_DELAYS_SECONDS[fallbackAttempt - 1]!,
+        OPERATIONAL_RETRY_DELAYS_SECONDS[attempt - 1]!,
         signal,
       );
+      if (this.#pendingStoreSettlements.get(job.deliveryId) === record) {
+        this.#pendingStoreSettlements.delete(job.deliveryId);
+      }
     }
     return "settled";
+  }
+
+  #isStoreOperationRecord(value: unknown): value is StoreOperationRecord<unknown> {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      "operation" in value &&
+      "slotOnFailure" in value &&
+      "counted" in value &&
+      "reported" in value
+    );
   }
 
   async #reportFailure(
