@@ -137,6 +137,11 @@ describe("Pi review isolation", () => {
         String.raw`p\npm install`,
         "p\\\nnpm install",
         "PM=pnpm; $PM install",
+        "{pnpm,install}",
+        "p{n,}pm install",
+        "p{n..n}pm install",
+        "/bin/bash -c '{pnpm,install}'",
+        `printf '%s' "'" ; {pnpm,install}`,
       ];
       const delegate = createLocalBashOperations();
       const options = {
@@ -160,6 +165,14 @@ describe("Pi review isolation", () => {
           /review policy denies/u,
         );
       }
+      assert.equal((await readFile(marker, "utf8")).trim().split("\n").length, denied.length);
+
+      const allowed = await operations.exec(
+        "printf '%s\\n' {src,test}/index.ts",
+        checkout,
+        options,
+      );
+      assert.equal(allowed.exitCode, 0);
       assert.equal((await readFile(marker, "utf8")).trim().split("\n").length, denied.length);
     } finally {
       await rm(checkout, { recursive: true, force: true });

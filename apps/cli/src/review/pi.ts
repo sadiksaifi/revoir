@@ -118,6 +118,143 @@ const DENIED_REVIEW_COMMANDS = [
   /(?:^|[\s;&|()'"`])(?:[^\s;&|()'"`]+\/)*gh(?=[\s;&|()'"`]|$)/u,
 ];
 
+const MAX_BRACE_VARIANTS = 256;
+
+interface BraceExpansion {
+  start: number;
+  end: number;
+  alternatives: readonly string[];
+}
+
+// Brace scanning receives canonical text from literalShellCommand, so syntactic quoting and
+// escapes are already removed. Remaining quote and backslash characters are literal command text.
+function matchingBraceIndex(command: string, start: number): number | undefined {
+  let depth = 0;
+
+  for (let index = start; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function sequenceAlternatives(body: string): readonly string[] | undefined {
+  const numeric = /^(-?[0-9]+)\.\.(-?[0-9]+)(?:\.\.(-?[0-9]+))?$/u.exec(body);
+  const alphabetic = /^([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?[0-9]+))?$/u.exec(body);
+  if (numeric === null && alphabetic === null) {
+    return undefined;
+  }
+
+  const start =
+    numeric === null ? alphabetic![1]!.codePointAt(0)! : Number.parseInt(numeric[1]!, 10);
+  const end = numeric === null ? alphabetic![2]!.codePointAt(0)! : Number.parseInt(numeric[2]!, 10);
+  const explicitStep = Number.parseInt((numeric ?? alphabetic)![3] ?? "1", 10);
+  const step = (start <= end ? 1 : -1) * Math.max(Math.abs(explicitStep), 1);
+  const count = Math.floor(Math.abs(end - start) / Math.abs(step)) + 1;
+  if (count > MAX_BRACE_VARIANTS) {
+    return [];
+  }
+
+  const numericWidth =
+    numeric === null
+      ? 0
+      : Math.max(numeric[1]!.replace(/^-/, "").length, numeric[2]!.replace(/^-/, "").length);
+  const alternatives: string[] = [];
+  for (let value = start; step > 0 ? value <= end : value >= end; value += step) {
+    if (numeric === null) {
+      alternatives.push(String.fromCodePoint(value));
+    } else {
+      const magnitude = String(Math.abs(value)).padStart(numericWidth, "0");
+      alternatives.push(value < 0 ? `-${magnitude}` : magnitude);
+    }
+  }
+  return alternatives;
+}
+
+function braceAlternatives(
+  command: string,
+  start: number,
+  end: number,
+): readonly string[] | undefined {
+  const alternatives: string[] = [];
+  let segmentStart = start + 1;
+  let depth = 0;
+
+  for (let index = segmentStart; index < end; index += 1) {
+    const character = command[index]!;
+    if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+    } else if (character === "," && depth === 0) {
+      alternatives.push(command.slice(segmentStart, index));
+      segmentStart = index + 1;
+    }
+  }
+
+  if (alternatives.length > 0) {
+    alternatives.push(command.slice(segmentStart, end));
+    return alternatives.length <= MAX_BRACE_VARIANTS ? alternatives : [];
+  }
+  return sequenceAlternatives(command.slice(start + 1, end));
+}
+
+function findBraceExpansion(command: string): BraceExpansion | "unsafe" | undefined {
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
+    if (character === "{") {
+      const end = matchingBraceIndex(command, index);
+      if (end === undefined) {
+        continue;
+      }
+      const alternatives = braceAlternatives(command, index, end);
+      if (alternatives?.length === 0) {
+        return "unsafe";
+      }
+      if (alternatives !== undefined) {
+        return { start: index, end, alternatives };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function expandBraceVariants(command: string): readonly string[] | undefined {
+  const pending = [command];
+  const expanded: string[] = [];
+
+  while (pending.length > 0) {
+    const candidate = pending.pop()!;
+    const expansion = findBraceExpansion(candidate);
+    if (expansion === "unsafe") {
+      return undefined;
+    }
+    if (expansion === undefined) {
+      expanded.push(candidate);
+      continue;
+    }
+    if (pending.length + expanded.length + expansion.alternatives.length > MAX_BRACE_VARIANTS) {
+      return undefined;
+    }
+    for (const alternative of expansion.alternatives) {
+      pending.push(
+        `${candidate.slice(0, expansion.start)}${alternative}${candidate.slice(expansion.end + 1)}`,
+      );
+    }
+  }
+
+  return expanded;
+}
+
 // Match the command text after the shell removes literal quoting and escapes.
 // Runtime expansion is denied because its executable cannot be proven safely.
 function literalShellCommand(command: string): string | undefined {
@@ -191,9 +328,13 @@ function literalShellCommand(command: string): string | undefined {
 
 function reviewCommandAllowed(command: string): boolean {
   const literalCommand = literalShellCommand(command);
-  return (
-    literalCommand !== undefined &&
-    DENIED_REVIEW_COMMANDS.every((pattern) => !pattern.test(literalCommand))
+  const braceVariants =
+    literalCommand === undefined ? undefined : expandBraceVariants(literalCommand);
+  if (braceVariants === undefined) {
+    return false;
+  }
+  return braceVariants.every((variant) =>
+    DENIED_REVIEW_COMMANDS.every((pattern) => !pattern.test(variant)),
   );
 }
 
