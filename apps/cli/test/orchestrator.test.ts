@@ -41,7 +41,7 @@ async function waitFor(
     // Poll only test-owned terminal work.
     // eslint-disable-next-line no-await-in-loop
     await new Promise<void>((resolve) => {
-      setTimeout(resolve, 1);
+      setImmediate(resolve);
     });
   }
 }
@@ -125,6 +125,7 @@ function harness(
     pendingDeletionGate?: Promise<void>;
     pendingDeletionError?: Error;
     pendingSubmissionRace?: boolean;
+    pendingSubmissionStarted?: () => void;
     pendingSubmissionError?: Error;
     pendingSubmissionUncertain?: boolean;
     reactionDeletionGate?: Promise<void>;
@@ -249,6 +250,7 @@ function harness(
         },
         async submit(submitSignal, reconciliationSignal) {
           events.push("submit-review-20");
+          options.pendingSubmissionStarted?.();
           if (options.pendingSubmissionUncertain === true) {
             if (!submitSignal.aborted) {
               await new Promise<void>((resolve) => {
@@ -451,17 +453,23 @@ describe("clean review orchestrator", () => {
     assert.equal(submission.events.includes("add-+1"), false);
   });
 
-  it("reconciles a remotely submitted review after cancellation and releases the process lock", async () => {
+  it("reconciles a remotely submitted review after cancellation and releases the process lock", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
     const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-submit-race-lock-"));
     let allowSubmittedDeletion: (() => void) | undefined;
     const submittedDeletionGate = new Promise<void>((resolve) => {
       allowSubmittedDeletion = resolve;
+    });
+    let observeSubmission!: () => void;
+    const submissionStarted = new Promise<void>((resolve) => {
+      observeSubmission = resolve;
     });
     const first = harness({
       reviewMs: 20,
       lock: new FileReviewLock(stateDirectory),
       pendingDeletionGate: submittedDeletionGate,
       pendingSubmissionRace: true,
+      pendingSubmissionStarted: observeSubmission,
       review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
     });
     const second = harness({ lock: new FileReviewLock(stateDirectory) });
@@ -469,10 +477,8 @@ describe("clean review orchestrator", () => {
 
     try {
       const firstReview = assert.rejects(first.orchestrator.review(reference), ReviewTimeoutError);
-      await waitFor(
-        () => first.events.includes("submit-review-20"),
-        "review submission did not start",
-      );
+      await submissionStarted;
+      context.mock.timers.tick(20);
       await firstReview;
       await waitFor(
         () => fileIsMissing(lockPath),
