@@ -119,6 +119,7 @@ function harness(
     review?: ReviewEngine["review"];
     priorReviewState?: PriorReviewState;
     priorReviewStateAfterPendingRemoval?: PriorReviewState;
+    threadResolutionStaleSha?: string;
     prepareError?: Error;
     completionError?: Error;
     reactionError?: ReviewReaction;
@@ -224,8 +225,11 @@ function harness(
         }
       );
     },
-    async resolveReviewThreads(_reference, threadIds) {
+    async resolveReviewThreads(_reference, threadIds, _expectedHeadSha, _signal) {
       events.push(`resolve-threads-${threadIds.join(",")}`);
+      return options.threadResolutionStaleSha === undefined
+        ? { status: "resolved" as const }
+        : { status: "stale" as const, currentSha: options.threadResolutionStaleSha };
     },
     async addReaction(_reference, reaction: ReviewReaction) {
       events.push(`add-${reaction}`);
@@ -698,6 +702,34 @@ describe("clean review orchestrator", () => {
     assert.equal(events.includes("resolve-threads-THREAD_OLD"), false);
     assert.equal(events.includes("create-review"), false);
     assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("stops reconciliation and completion when thread resolution reports a stale head", async () => {
+    const staleHeadSha = "3".repeat(40);
+    const current = validatedFinding();
+    const { createdPublications, events, orchestrator } = harness({
+      threadResolutionStaleSha: staleHeadSha,
+      priorReviewState: {
+        activeFingerprints: ["b".repeat(64), "c".repeat(64)],
+        ownedOpenThreads: [
+          { id: "THREAD_A", fingerprint: "b".repeat(64) },
+          { id: "THREAD_B", fingerprint: "c".repeat(64) },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      },
+      review: async () => ({ findings: [current], diagnostics: [] }),
+    });
+
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "stale",
+      reviewedSha: "2".repeat(40),
+      currentSha: staleHeadSha,
+    });
+    assert.deepEqual(createdPublications, []);
+    assert.equal(events.includes("add-+1"), false);
+    assert.deepEqual(events.slice(events.indexOf("resolve-threads-THREAD_A,THREAD_B")), [
+      "resolve-threads-THREAD_A,THREAD_B",
+    ]);
   });
 
   it("deletes a pending findings review when the head changes before submission", async () => {

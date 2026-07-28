@@ -375,22 +375,23 @@ export class CleanReviewOrchestrator implements ManualReviewService {
             );
             const preResolutionSha = await github.getHeadSha(reference, signal);
             throwIfAborted(signal);
+            let postReconciliationSha = preResolutionSha;
             if (
               preResolutionSha === pullRequest.headSha &&
               reconciliation.obsoleteThreadIds.length > 0
             ) {
-              await github.resolveReviewThreads(
+              const resolution = await github.resolveReviewThreads(
                 reference,
                 reconciliation.obsoleteThreadIds,
+                pullRequest.headSha,
                 signal,
               );
               throwIfAborted(signal);
+              postReconciliationSha =
+                resolution.status === "stale"
+                  ? resolution.currentSha
+                  : await github.getHeadSha(reference, signal);
             }
-            const postReconciliationSha =
-              preResolutionSha !== pullRequest.headSha ||
-              reconciliation.obsoleteThreadIds.length === 0
-                ? preResolutionSha
-                : await github.getHeadSha(reference, signal);
             throwIfAborted(signal);
             if (postReconciliationSha !== pullRequest.headSha) {
               result = {

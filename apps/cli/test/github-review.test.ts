@@ -53,6 +53,21 @@ function pullRequestResponse(headSha = "2".repeat(40)) {
   };
 }
 
+function ownedReviewThreadResponse(id: string, fingerprint: string) {
+  return {
+    id,
+    isResolved: false,
+    comments: {
+      nodes: [
+        {
+          body: `<!-- revoir:finding:v1:${fingerprint} -->`,
+          author: { login: "revoir-test[bot]" },
+        },
+      ],
+    },
+  };
+}
+
 describe("GitHub App review gateway", () => {
   it("signs a short-lived RS256 GitHub App JWT", () => {
     const jwt = createGitHubAppJwt(7, TEST_PRIVATE_KEY, 1_000);
@@ -328,6 +343,9 @@ describe("GitHub App review gateway", () => {
           },
         ]);
       }
+      if (url.endsWith("/pulls/17")) {
+        return json(pullRequestResponse());
+      }
       if (url.endsWith("/graphql")) {
         const request = JSON.parse(String(init?.body)) as {
           query: string;
@@ -416,6 +434,7 @@ describe("GitHub App review gateway", () => {
     assert.deepEqual(await session.getPriorReviewState(reference, new AbortController().signal), {
       activeFingerprints: [ownBodyFingerprint, ownThreadFingerprint],
       bodyFindings: [{ fingerprint: ownBodyFingerprint }],
+      bodyStateMigrationRequired: true,
       ownedOpenThreads: [
         {
           id: "THREAD_OWN_OPEN",
@@ -426,15 +445,112 @@ describe("GitHub App review gateway", () => {
       runHeadShas: ["2".repeat(40)],
     });
     await assert.rejects(
-      () => session.resolveReviewThreads(reference, ["THREAD_HUMAN"], new AbortController().signal),
+      () =>
+        session.resolveReviewThreads(
+          reference,
+          ["THREAD_HUMAN"],
+          "2".repeat(40),
+          new AbortController().signal,
+        ),
       /not owned by this GitHub App/u,
     );
-    await session.resolveReviewThreads(
-      reference,
-      ["THREAD_OWN_OPEN"],
-      new AbortController().signal,
+    assert.deepEqual(
+      await session.resolveReviewThreads(
+        reference,
+        ["THREAD_OWN_OPEN"],
+        "2".repeat(40),
+        new AbortController().signal,
+      ),
+      { status: "resolved" },
     );
     assert.deepEqual(mutations, ["THREAD_OWN_OPEN"]);
+  });
+
+  it("prevalidates ownership and fences every thread resolution with the expected head", async () => {
+    const expectedHeadSha = "2".repeat(40);
+    const staleHeadSha = "3".repeat(40);
+    const mutations: string[] = [];
+    let headReads = 0;
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+        return json([]);
+      }
+      if (url.endsWith("/pulls/17")) {
+        headReads += 1;
+        return json(pullRequestResponse(headReads === 1 ? expectedHeadSha : staleHeadSha));
+      }
+      if (url.endsWith("/graphql")) {
+        const request = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables: Record<string, unknown>;
+        };
+        if (request.query.includes("reviewThreads")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      ownedReviewThreadResponse("THREAD_A", "a".repeat(64)),
+                      ownedReviewThreadResponse("THREAD_B", "b".repeat(64)),
+                    ],
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                  },
+                },
+              },
+            },
+          });
+        }
+        mutations.push(String(request.variables.threadId));
+        return json({
+          data: {
+            resolveReviewThread: {
+              thread: { id: request.variables.threadId, isResolved: true },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const signal = new AbortController().signal;
+    await session.getPriorReviewState(reference, signal);
+
+    await assert.rejects(
+      () =>
+        session.resolveReviewThreads(
+          reference,
+          ["THREAD_A", "THREAD_FOREIGN"],
+          expectedHeadSha,
+          signal,
+        ),
+      /not owned by this GitHub App/u,
+    );
+    assert.equal(headReads, 0);
+    assert.deepEqual(mutations, []);
+
+    assert.deepEqual(
+      await session.resolveReviewThreads(
+        reference,
+        ["THREAD_A", "THREAD_B"],
+        expectedHeadSha,
+        signal,
+      ),
+      { status: "stale", currentSha: staleHeadSha },
+    );
+    assert.equal(headReads, 2);
+    assert.deepEqual(mutations, ["THREAD_A"]);
   });
 
   it("migrates the latest legacy body-marker review until a versioned snapshot exists", async () => {
@@ -532,10 +648,7 @@ describe("GitHub App review gateway", () => {
         planFindingReconciliation([latestFinding], prior).netNewFindings,
         hasVersionedSnapshot ? [latestFinding] : [],
       );
-      assert.equal(
-        planFindingReconciliation([latestFinding], prior).bodyStateChanged,
-        true,
-      );
+      assert.equal(planFindingReconciliation([latestFinding], prior).bodyStateChanged, true);
     }
   });
 

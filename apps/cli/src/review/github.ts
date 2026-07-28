@@ -24,6 +24,10 @@ export interface GitHubPendingReview {
   submit(signal: AbortSignal, reconciliationSignal: AbortSignal): Promise<void>;
 }
 
+export type ReviewThreadResolution =
+  | { readonly status: "resolved" }
+  | { readonly status: "stale"; readonly currentSha: string };
+
 export interface GitHubReviewSession {
   readonly installationToken: string;
   getPullRequest(
@@ -40,8 +44,9 @@ export interface GitHubReviewSession {
   resolveReviewThreads(
     reference: PullRequestReference,
     threadIds: readonly string[],
+    expectedHeadSha: string,
     signal: AbortSignal,
-  ): Promise<void>;
+  ): Promise<ReviewThreadResolution>;
   removeOwnReaction(
     reference: PullRequestReference,
     reaction: ReviewReaction,
@@ -595,14 +600,23 @@ class InstallationSession implements GitHubReviewSession {
   }
 
   async resolveReviewThreads(
-    _reference: PullRequestReference,
+    reference: PullRequestReference,
     threadIds: readonly string[],
+    expectedHeadSha: string,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<ReviewThreadResolution> {
     const uniqueThreadIds = [...new Set(threadIds)].toSorted();
     for (const threadId of uniqueThreadIds) {
       if (!this.#ownedOpenThreadIds.has(threadId)) {
         throw new Error("Refusing to resolve a review thread not owned by this GitHub App.");
+      }
+    }
+    for (const threadId of uniqueThreadIds) {
+      // Each mutation must still belong to the reviewed head.
+      // eslint-disable-next-line no-await-in-loop
+      const currentSha = await this.getHeadSha(reference, signal);
+      if (currentSha !== expectedHeadSha) {
+        return { status: "stale", currentSha };
       }
       // Resolution remains ordered so a partial failure has deterministic remote state.
       // eslint-disable-next-line no-await-in-loop
@@ -626,6 +640,7 @@ class InstallationSession implements GitHubReviewSession {
       }
       this.#ownedOpenThreadIds.delete(threadId);
     }
+    return { status: "resolved" };
   }
 
   async removeOwnPendingReview(
