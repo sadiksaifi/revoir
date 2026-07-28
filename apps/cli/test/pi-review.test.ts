@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { FindingContractError } from "../src/review/findings.js";
 import {
   PiReviewEngine,
   type PiSession,
@@ -150,6 +151,79 @@ index 1111111..2222222 100644
       assert.equal(result.findings.length, 1);
       assert.equal(result.findings[0]?.priority, "P1");
       assert.equal(result.diagnostics.length, 1);
+      assert.equal(sessions.disposed, 1);
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves safe per-candidate diagnostics for all-invalid Pi output", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "revoir-pi-invalid-findings-"));
+    const sourceSecret = "PRIVATE_SOURCE_TOKEN";
+    try {
+      await writeFile(join(checkout, "source.ts"), "const current = true;\n");
+      const sessions = new FakeSessionFactory();
+      sessions.result = JSON.stringify({
+        version: 1,
+        findings: [
+          {
+            priority: "P9",
+            title: "Invalid priority",
+            path: "source.ts",
+            range: null,
+            issue: `The ${sourceSecret} candidate is invalid.`,
+            impact: "It must not be published.",
+            evidence: `Observed ${sourceSecret} in private source.`,
+            fixDirection: "Remove the invalid candidate.",
+          },
+          {
+            priority: "P1",
+            title: "Invalid path",
+            path: `../${sourceSecret}.ts`,
+            range: null,
+            issue: "The candidate points outside the checkout.",
+            impact: "It must not be published.",
+            evidence: "The path traverses above the repository root.",
+            fixDirection: "Use a repository-relative path.",
+          },
+        ],
+      });
+      const engine = new PiReviewEngine(
+        { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+        sessions,
+      );
+
+      await assert.rejects(
+        () =>
+          engine.review(
+            {
+              reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+              pullRequest,
+              workspace: {
+                ...workspace,
+                checkout,
+                diff: `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1 @@
+-const previous = true;
++const current = true;
+`,
+              },
+            },
+            new AbortController().signal,
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof FindingContractError);
+          assert.equal(error.diagnostics.length, 2);
+          const reasons = error.diagnostics.map((diagnostic) => diagnostic.message).join(" ");
+          assert.match(reasons, /priority must be one of P0, P1, P2, or P3/u);
+          assert.match(reasons, /normalized repository-relative POSIX path/u);
+          assert.doesNotMatch(reasons, new RegExp(sourceSecret, "u"));
+          return true;
+        },
+      );
       assert.equal(sessions.disposed, 1);
     } finally {
       await rm(checkout, { recursive: true, force: true });

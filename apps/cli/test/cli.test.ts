@@ -9,6 +9,7 @@ import { CLI_VERSION, runCli, type CliIo } from "../src/cli.js";
 import { resolveApplicationPaths } from "../src/config/paths.js";
 import { loadConfiguration } from "../src/config/store.js";
 import { createDefaultDiagnosticGateway, type DiagnosticGateway } from "../src/diagnostics.js";
+import { FindingContractError } from "../src/review/findings.js";
 import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
 import { passingGateway, TEST_PRIVATE_KEY } from "./helpers.js";
@@ -461,5 +462,49 @@ describe("CLI", () => {
     );
     assert.match(stderr.output, /\[REDACTED\]/u);
     assert.doesNotMatch(stderr.output, /cli-cloudflare-secret/u);
+  });
+
+  it("prints redacted per-candidate reasons when Pi returns only invalid findings", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const allInvalid: ManualReviewService = {
+      async review() {
+        throw new FindingContractError("Pi returned no publishable findings (2 rejected).", [
+          {
+            index: 0,
+            code: "invalid",
+            message: "findings[0].priority must be one of P0, P1, P2, or P3.",
+          },
+          {
+            index: 1,
+            code: "invalid",
+            message: "findings[1].evidence contained cli-cloudflare-secret.",
+          },
+        ]);
+      },
+    };
+
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: allInvalid,
+      }),
+      1,
+    );
+    assert.match(stderr.output, /no publishable findings/u);
+    assert.match(stderr.output, /#1: findings\[0\]\.priority must be one of P0, P1, P2, or P3/u);
+    assert.match(stderr.output, /#2: findings\[1\]\.evidence contained \[REDACTED\]/u);
+    assert.doesNotMatch(stderr.output, /cli-cloudflare-secret/u);
+    assert.equal(stdout.output, "");
   });
 });

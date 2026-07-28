@@ -12,6 +12,7 @@ import {
   runDiagnostics,
 } from "./diagnostics.js";
 import { SecretRedactor } from "./redaction.js";
+import { FindingContractError } from "./review/findings.js";
 import {
   createDefaultManualReviewService,
   type ManualReviewService,
@@ -333,6 +334,15 @@ export async function runCli(
       return 0;
     } catch (error) {
       write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
+      if (error instanceof FindingContractError && error.diagnostics.length > 0) {
+        const reasons = error.diagnostics
+          .map(
+            (diagnostic) =>
+              `- #${diagnostic.index < 0 ? "envelope" : diagnostic.index + 1}: ${diagnostic.message}`,
+          )
+          .join("\n");
+        write(io.stderr, `Rejected model findings:\n${redactor.text(reasons)}\n`);
+      }
       return error instanceof PullRequestEligibilityError || error instanceof PullRequestUrlError
         ? 2
         : 1;
