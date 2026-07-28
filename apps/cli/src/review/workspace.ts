@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { devNull } from "node:os";
 import { join } from "node:path";
 
+import { isCallerCancellation } from "../cancellation.js";
 import type { PullRequestReference, PullRequestSnapshot } from "./pull-request.js";
 import { createTerminalHandle, type TerminalHandle } from "./terminal-handle.js";
 
@@ -383,7 +384,11 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
         cleanup,
       };
     } catch (error) {
-      const primary = redactError(error, installationToken);
+      const primary = isCallerCancellation(error, signal)
+        ? signal.reason instanceof Error
+          ? signal.reason
+          : new Error("Review was cancelled.", { cause: signal.reason })
+        : redactError(error, installationToken);
       try {
         await cleanup();
       } catch (cleanupError) {

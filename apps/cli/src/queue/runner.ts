@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { parseReviewJob, ReviewJobSchemaError, type ReviewJobV1 } from "@revoir/contracts";
 
+import { isCallerCancellation } from "../cancellation.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import {
   GitHubReviewFailureReporter,
@@ -150,10 +151,6 @@ function consumeReservation(state: OperationalFailureState): OperationalFailureS
     return state;
   }
   return committedState(state.reservation.slot, state.terminalCategory);
-}
-
-function isExactCallerCancellation(error: unknown, signal?: AbortSignal): boolean {
-  return signal?.aborted === true && error === signal.reason;
 }
 
 class StoreOperationTimeoutError extends Error {
@@ -328,9 +325,9 @@ export class QueueReviewRunner implements QueueRunService {
       await this.#saveFailureState(job.deliveryId, reservedState, slot, signal);
       throwIfCancelled(signal);
     } catch (error) {
-      if (isExactCallerCancellation(error, signal)) {
+      if (isCallerCancellation(error, signal)) {
         await this.#rollbackReservation(job.deliveryId, reservation);
-        throw error;
+        throw signal?.reason instanceof Error ? signal.reason : error;
       }
       if (signal?.aborted === true) {
         throw signal.reason instanceof Error ? signal.reason : error;
@@ -354,9 +351,9 @@ export class QueueReviewRunner implements QueueRunService {
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
-      if (isExactCallerCancellation(error, signal)) {
+      if (isCallerCancellation(error, signal)) {
         await this.#rollbackReservation(job.deliveryId, reservation);
-        throw error;
+        throw signal?.reason instanceof Error ? signal.reason : error;
       }
       if (error instanceof PullRequestEligibilityError) {
         if (signal?.aborted === true) {
@@ -460,7 +457,7 @@ export class QueueReviewRunner implements QueueRunService {
       loaded = await this.#waitRecordedStoreOperation(loadRecord, "load", signal);
     } catch (error) {
       if (
-        isExactCallerCancellation(error, signal) &&
+        isCallerCancellation(error, signal) &&
         this.#pendingLoads.get(deliveryId) === loadRecord
       ) {
         this.#pendingLoads.delete(deliveryId);
@@ -681,8 +678,8 @@ export class QueueReviewRunner implements QueueRunService {
     try {
       return await waitForStoreOperation(record.operation, operationName, waitSignal, callerSignal);
     } catch (error) {
-      if (isExactCallerCancellation(error, callerSignal)) {
-        throw error;
+      if (isCallerCancellation(error, callerSignal)) {
+        throw callerSignal?.reason instanceof Error ? callerSignal.reason : error;
       }
       throw new StoreOperationFailure(record, error);
     }

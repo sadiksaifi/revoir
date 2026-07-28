@@ -2387,6 +2387,54 @@ describe("automatic queue review runner", () => {
     );
   });
 
+  it("rolls back wrapped review cancellation and reuses its owned slot", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("stop active review");
+    const deliveries = [delivery("cancelled", reviewJob(), 7), delivery("reused", reviewJob(), 8)];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge() {},
+      async retry() {
+        assert.fail("Graceful cancellation must not retry.");
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        if (reviews === 1) {
+          controller.abort(cancellation);
+          throw new Error("git failed", { cause: cancellation });
+        }
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviewService,
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(controller.signal), cancellation);
+    await runner.consumeOne();
+
+    assert.deepEqual(
+      failures.saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 1],
+    );
+  });
+
   it("consumes a slot after failed cancellation rollback before allowing another review", async () => {
     const controller = new AbortController();
     const cancellation = new Error("stop active review");
