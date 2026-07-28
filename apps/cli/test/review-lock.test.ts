@@ -358,6 +358,80 @@ describe("manual review process lock", () => {
     await nextLease.release();
   });
 
+  it("shares concurrent release work and retries failed release I/O", async () => {
+    const stateDirectory = await temporaryStateDirectory();
+    const lockPath = join(stateDirectory, "manual-review.lock");
+    let releasePhase = false;
+    let readFailures = 1;
+    let unlinkFailures = 1;
+    let releaseReads = 0;
+    let releaseUnlinks = 0;
+    const lock = new FileReviewLock(stateDirectory, {
+      inspectProcess: inspectProcesses(
+        new Map([[process.pid, { kind: "alive", processBirth: liveProcessBirth }]]),
+      ),
+      async readFile(path, encoding) {
+        if (releasePhase && path === lockPath) {
+          releaseReads += 1;
+          if (readFailures > 0) {
+            readFailures -= 1;
+            throw new Error("injected release read failure");
+          }
+        }
+        return readFile(path, encoding);
+      },
+      async unlink(path) {
+        if (releasePhase && path === lockPath) {
+          releaseUnlinks += 1;
+          if (unlinkFailures > 0) {
+            unlinkFailures -= 1;
+            throw new Error("injected release unlink failure");
+          }
+        }
+        await unlink(path);
+      },
+    });
+    const lease = await lock.acquire();
+    releasePhase = true;
+
+    const failedReads = await Promise.allSettled([lease.release(), lease.release()]);
+    assert.ok(failedReads.every((result) => result.status === "rejected"));
+    assert.equal(releaseReads, 1);
+    assert.equal(releaseUnlinks, 0);
+
+    const failedUnlinks = await Promise.allSettled([lease.release(), lease.release()]);
+    assert.ok(failedUnlinks.every((result) => result.status === "rejected"));
+    assert.equal(releaseReads, 2);
+    assert.equal(releaseUnlinks, 1);
+
+    await Promise.all([lease.release(), lease.release()]);
+    assert.equal(releaseReads, 3);
+    assert.equal(releaseUnlinks, 2);
+    await lease.release();
+    assert.equal(releaseReads, 3);
+    assert.equal(releaseUnlinks, 2);
+    await assert.rejects(() => readFile(lockPath, "utf8"), { code: "ENOENT" });
+  });
+
+  it("does not remove a replacement owner while releasing a lease", async () => {
+    const stateDirectory = await temporaryStateDirectory();
+    const lockPath = join(stateDirectory, "manual-review.lock");
+    const lease = await deterministicLock(
+      stateDirectory,
+      new Map([[process.pid, { kind: "alive", processBirth: liveProcessBirth }]]),
+    ).acquire();
+    const replacement = {
+      pid: process.pid,
+      owner: "replacement-owner",
+      processBirth: liveProcessBirth,
+    };
+    await writeFile(lockPath, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
+
+    await lease.release();
+
+    assert.deepEqual(JSON.parse(await readFile(lockPath, "utf8")), replacement);
+  });
+
   it("aborts a non-settling process probe without leaving a lock behind", async () => {
     const stateDirectory = await temporaryStateDirectory();
     const cancellation = new Error("cancel lock acquisition");

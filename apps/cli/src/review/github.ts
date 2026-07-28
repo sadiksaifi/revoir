@@ -90,10 +90,14 @@ function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled.");
 }
 
-async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) {
     throw abortReason(signal);
   }
+}
+
+async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => {
       reject(abortReason(signal));
@@ -109,6 +113,21 @@ async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise
         reject(error);
       },
     );
+  });
+}
+
+async function yieldToEventLoop(signal: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearImmediate(immediate);
+      reject(abortReason(signal));
+    };
+    const immediate = setImmediate(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    });
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -264,22 +283,40 @@ class InstallationSession implements GitHubReviewSession {
     reaction: ReviewReaction,
     signal: AbortSignal,
   ): Promise<void> {
-    const response = await this.#request(
-      `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/reactions?per_page=100`,
-      signal,
-    );
-    const value = await responseJson(response, "reaction lookup", signal);
-    if (!Array.isArray(value)) {
-      throw new Error("GitHub reaction lookup returned an invalid response.");
-    }
-    const ownedReactions = value
-      .map((item) => parseReaction(item))
-      .filter(
-        (candidate) =>
-          candidate.content === reaction && candidate.user.login.toLowerCase() === this.#botLogin,
+    const ownedReactionIds = new Set<number>();
+    let page = 1;
+    for (;;) {
+      throwIfAborted(signal);
+      // Reaction pages must be requested and validated in order.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await this.#request(
+        `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/reactions?per_page=100&page=${page}`,
+        signal,
       );
+      // eslint-disable-next-line no-await-in-loop
+      const value = await responseJson(response, "reaction lookup", signal);
+      if (!Array.isArray(value)) {
+        throw new Error("GitHub reaction lookup returned an invalid response.");
+      }
+      const pageReactions = value.map((item) => parseReaction(item));
+      for (const candidate of pageReactions) {
+        if (
+          candidate.content === reaction &&
+          candidate.user.login.toLowerCase() === this.#botLogin
+        ) {
+          ownedReactionIds.add(candidate.id);
+        }
+      }
+      if (pageReactions.length < 100) {
+        break;
+      }
+      page += 1;
+      // Yield so cancellation can interrupt an unexpectedly endless page sequence.
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
     await Promise.all(
-      ownedReactions.map((candidate) => this.deleteReaction(reference, candidate.id, signal)),
+      [...ownedReactionIds].map((reactionId) => this.deleteReaction(reference, reactionId, signal)),
     );
   }
 

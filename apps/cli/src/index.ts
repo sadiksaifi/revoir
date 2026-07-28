@@ -58,6 +58,7 @@ export {
 export {
   GitWorkspacePreparer,
   SystemCommandRunner,
+  WorkspacePreparationError,
   type CommandRunner,
   type PreparedWorkspace,
   type WorkspacePreparer,

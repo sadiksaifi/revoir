@@ -10,6 +10,7 @@ import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pul
 import {
   GitWorkspacePreparer,
   SystemCommandRunner,
+  WorkspacePreparationError,
   type CommandOptions,
   type CommandResult,
   type CommandRunner,
@@ -240,6 +241,96 @@ describe("Git review workspace", () => {
       }
       const capturedRoot = runRoot;
       await assert.rejects(() => lstat(capturedRoot), { code: "ENOENT" });
+    } finally {
+      await cleanupTemporaryDirectories();
+    }
+  });
+
+  it("retains a retryable cleanup handle when partial preparation cleanup fails", async () => {
+    try {
+      const cache = await temporaryDirectory("revoir-cache-partial-cleanup-retry-");
+      const token = "installation-token-must-not-leak";
+      let root: string | undefined;
+      let removalAttempts = 0;
+      let finishRetry: (() => void) | undefined;
+      const retryGate = new Promise<void>((resolve) => {
+        finishRetry = resolve;
+      });
+      const runner: CommandRunner = {
+        async run(_command, _arguments, options) {
+          const askpass = options.environment?.GIT_ASKPASS;
+          if (askpass !== undefined) {
+            root = dirname(askpass);
+          }
+          throw new Error(`clone rejected ${token}`);
+        },
+      };
+      const preparer = new GitWorkspacePreparer(cache, 10_000, runner, {
+        async remove(path, options) {
+          removalAttempts += 1;
+          if (removalAttempts === 1) {
+            throw new Error("injected initial cleanup failure");
+          }
+          await retryGate;
+          await rm(path, options);
+        },
+      });
+      const snapshot: PullRequestSnapshot = {
+        number: 17,
+        state: "open",
+        draft: false,
+        authorId: 42,
+        baseSha: "1".repeat(40),
+        headSha: "2".repeat(40),
+        baseRepository: {
+          id: 99,
+          fullName: "owner/repository",
+          cloneUrl: "https://github.com/owner/repository.git",
+        },
+        headRepository: {
+          id: 99,
+          fullName: "owner/repository",
+          cloneUrl: "https://github.com/owner/repository.git",
+        },
+      };
+
+      let preparationError: WorkspacePreparationError | undefined;
+      await assert.rejects(
+        () =>
+          preparer.prepare(
+            parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+            snapshot,
+            token,
+            new AbortController().signal,
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof WorkspacePreparationError);
+          preparationError = error;
+          assert.equal(error.errors.length, 2);
+          assert.match(error.errors.map(String).join(" "), /clone rejected \[REDACTED\]/u);
+          assert.match(error.errors.map(String).join(" "), /injected initial cleanup failure/u);
+          assert.doesNotMatch(
+            JSON.stringify(error, Object.getOwnPropertyNames(error)),
+            new RegExp(token, "u"),
+          );
+          return true;
+        },
+      );
+      assert.ok(root);
+      const capturedRoot = root;
+      await lstat(capturedRoot);
+      assert.ok(preparationError);
+
+      const retries = [preparationError.cleanup(), preparationError.cleanup()];
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      assert.equal(removalAttempts, 2);
+      finishRetry?.();
+      await Promise.all(retries);
+      await assert.rejects(() => lstat(capturedRoot), { code: "ENOENT" });
+      await preparationError.cleanup();
+      assert.equal(removalAttempts, 2);
     } finally {
       await cleanupTemporaryDirectories();
     }

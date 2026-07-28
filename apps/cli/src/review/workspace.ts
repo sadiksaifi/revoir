@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import type { PullRequestReference, PullRequestSnapshot } from "./pull-request.js";
+import { createTerminalHandle, type TerminalHandle } from "./terminal-handle.js";
 
 const executeFile = promisify(execFile);
 
@@ -73,6 +74,19 @@ export interface WorkspacePreparer {
   ): Promise<PreparedWorkspace>;
 }
 
+export class WorkspacePreparationError extends AggregateError {
+  readonly cleanup: TerminalHandle;
+
+  constructor(primary: Error, cleanupFailure: Error, cleanup: TerminalHandle) {
+    super(
+      [primary, cleanupFailure],
+      "Workspace preparation failed and partial workspace cleanup also failed.",
+    );
+    this.name = "WorkspacePreparationError";
+    this.cleanup = cleanup;
+  }
+}
+
 export interface GitWorkspacePreparerHooks {
   remove?(path: string, options: { recursive: true; force: true }): Promise<void>;
 }
@@ -88,6 +102,17 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) {
     throw signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled.");
   }
+}
+
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+function redactError(value: unknown, secret: string): Error {
+  const source = asError(value);
+  const redacted = new Error(source.message.split(secret).join("[REDACTED]"));
+  redacted.name = source.name;
+  return redacted;
 }
 
 export class GitWorkspacePreparer implements WorkspacePreparer {
@@ -122,6 +147,9 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
         checkoutsDirectory,
         `${reference.owner}-${reference.repository}-pr-${reference.number}-`,
       ),
+    );
+    const cleanup = createTerminalHandle(() =>
+      this.#remove(root, { recursive: true, force: true }),
     );
     const askpass = join(root, "git-askpass.sh");
     const checkout = join(root, "repository");
@@ -178,43 +206,21 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
         throw new Error("Installation credential was persisted in the Git remote.");
       }
 
-      let cleaned = false;
-      let cleanupAttempt: Promise<void> | undefined;
-      const removeDirectory = this.#remove;
       return {
         root,
         checkout,
         diff: diff.stdout,
         remoteUrl,
-        async cleanup() {
-          if (cleaned) {
-            return;
-          }
-          if (cleanupAttempt !== undefined) {
-            return cleanupAttempt;
-          }
-
-          const attempt = removeDirectory(root, { recursive: true, force: true }).then(() => {
-            cleaned = true;
-          });
-          cleanupAttempt = attempt;
-          try {
-            await attempt;
-          } finally {
-            if (cleanupAttempt === attempt) {
-              cleanupAttempt = undefined;
-            }
-          }
-        },
+        cleanup,
       };
     } catch (error) {
-      await this.#remove(root, { recursive: true, force: true });
-      if (error instanceof Error && error.message.includes(installationToken)) {
-        throw new Error(error.message.split(installationToken).join("[REDACTED]"), {
-          cause: error,
-        });
+      const primary = redactError(error, installationToken);
+      try {
+        await cleanup();
+      } catch (cleanupError) {
+        throw new WorkspacePreparationError(primary, asError(cleanupError), cleanup);
       }
-      throw error;
+      throw primary;
     }
   }
 }

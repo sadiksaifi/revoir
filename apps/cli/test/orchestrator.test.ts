@@ -17,6 +17,7 @@ import {
 } from "../src/review/pi.js";
 import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pull-request.js";
 import type { PreparedWorkspace, WorkspacePreparer } from "../src/review/workspace.js";
+import { WorkspacePreparationError } from "../src/review/workspace.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
 
 const reference = parsePullRequestUrl("https://github.com/owner/repository/pull/17");
@@ -75,8 +76,13 @@ function harness(
     reactionError?: ReviewReaction;
     reconciliationNeverSettles?: boolean;
     headError?: Error;
+    postcheckError?: Error;
     headNeverSettles?: boolean;
-    mutateHeadDuring?: "workspace-cleanup" | "reaction-removal";
+    mutateHeadDuring?: "workspace-cleanup" | "reaction-removal" | "completion-creation";
+    reactionDeletionGate?: Promise<void>;
+    reactionDeletionError?: Error;
+    workspaceCleanupGate?: Promise<void>;
+    workspaceCleanupError?: Error;
     lock?: ReviewLock;
     reviewMs?: number;
   } = {},
@@ -84,6 +90,7 @@ function harness(
   const events: string[] = [];
   const snapshot = options.pullRequest ?? pullRequest();
   let currentSha = options.currentSha ?? snapshot.headSha;
+  let headRequests = 0;
   let nextReactionId = 10;
   const ownedReactions = new Set<ReviewReaction>();
   const session: GitHubReviewSession = {
@@ -94,8 +101,12 @@ function harness(
     },
     async getHeadSha(_reference, signal?: AbortSignal) {
       events.push("get-head");
+      headRequests += 1;
       if (options.headError !== undefined) {
         throw options.headError;
+      }
+      if (headRequests === 2 && options.postcheckError !== undefined) {
+        throw options.postcheckError;
       }
       if (options.headNeverSettles) {
         return new Promise<string>((_resolve, reject) => {
@@ -122,6 +133,9 @@ function harness(
       if (reaction === "+1" && options.completionError !== undefined) {
         throw options.completionError;
       }
+      if (reaction === "+1" && options.mutateHeadDuring === "completion-creation") {
+        currentSha = "3".repeat(40);
+      }
       return nextReactionId++;
     },
     async removeOwnReaction(_reference, reaction, signal) {
@@ -141,6 +155,10 @@ function harness(
     },
     async deleteReaction(_reference, id) {
       events.push(`delete-${id}`);
+      await options.reactionDeletionGate;
+      if (options.reactionDeletionError !== undefined) {
+        throw options.reactionDeletionError;
+      }
       if (id === 10) {
         ownedReactions.delete("eyes");
       }
@@ -168,6 +186,10 @@ function harness(
         remoteUrl: "https://github.com/owner/repository.git",
         async cleanup() {
           events.push("cleanup");
+          await options.workspaceCleanupGate;
+          if (options.workspaceCleanupError !== undefined) {
+            throw options.workspaceCleanupError;
+          }
           if (options.mutateHeadDuring === "workspace-cleanup") {
             currentSha = "3".repeat(40);
           }
@@ -218,6 +240,7 @@ describe("clean review orchestrator", () => {
       "delete-10",
       "get-head",
       "add-+1",
+      "get-head",
     ]);
   });
 
@@ -241,6 +264,26 @@ describe("clean review orchestrator", () => {
         assert.equal(events.includes("add-+1"), false);
       }),
     );
+  });
+
+  it("compensates the exact completion reaction when the head changes during creation", async () => {
+    const { events, orchestrator } = harness({ mutateHeadDuring: "completion-creation" });
+
+    assert.deepEqual(await orchestrator.review(reference), {
+      status: "stale",
+      reviewedSha: "2".repeat(40),
+      currentSha: "3".repeat(40),
+    });
+    assert.deepEqual(events.slice(-3), ["add-+1", "get-head", "delete-11"]);
+  });
+
+  it("removes the exact completion reaction when the postcheck fails", async () => {
+    const failed = harness({ postcheckError: new Error("postcheck failed") });
+
+    await assert.rejects(() => failed.orchestrator.review(reference), /postcheck failed/u);
+
+    assert.deepEqual(failed.events.slice(-4), ["get-head", "add-+1", "get-head", "delete-11"]);
+    assert.equal(failed.events.includes("remove-own-+1"), false);
   });
 
   it("rejects ineligible work before checkout or any reaction", async () => {
@@ -297,6 +340,31 @@ describe("clean review orchestrator", () => {
       "add-+1",
       "remove-own-+1",
     ]);
+  });
+
+  it("retries retained partial-workspace cleanup without losing preparation failures", async () => {
+    let cleanupAttempts = 0;
+    const preparationFailure = new WorkspacePreparationError(
+      new Error("clone failed with [REDACTED]"),
+      new Error("initial cleanup failed"),
+      async () => {
+        cleanupAttempts += 1;
+      },
+    );
+    const failed = harness({ prepareError: preparationFailure });
+
+    await assert.rejects(
+      () => failed.orchestrator.review(reference),
+      (error: unknown) => {
+        assert.ok(error instanceof WorkspacePreparationError);
+        assert.match(error.errors.map(String).join(" "), /clone failed with \[REDACTED\]/u);
+        assert.match(error.errors.map(String).join(" "), /initial cleanup failed/u);
+        return true;
+      },
+    );
+
+    assert.equal(cleanupAttempts, 1);
+    assert.deepEqual(failed.events.slice(-2), ["prepare-installation-secret", "delete-10"]);
   });
 
   it("reconciles bot-owned eyes and completion reactions after ambiguous creation", async () => {
@@ -471,6 +539,164 @@ describe("clean review orchestrator", () => {
       ReviewTimeoutError,
     );
     assert.deepEqual(timedOut.events.slice(-3), ["cleanup", "delete-10", "get-head"]);
+  });
+
+  it("bounds non-settling workspace cleanup by the original deadline and continues cleanup", async () => {
+    let finishCleanup: (() => void) | undefined;
+    const cleanupGate = new Promise<void>((resolve) => {
+      finishCleanup = resolve;
+    });
+    let releases = 0;
+    const timedOut = harness({
+      reviewMs: 30,
+      workspaceCleanupGate: cleanupGate,
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+    const started = Date.now();
+
+    await assert.rejects(
+      Promise.race([
+        timedOut.orchestrator.review(reference),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("workspace cleanup exceeded hard deadline")), 120);
+        }),
+      ]),
+      ReviewTimeoutError,
+    );
+
+    assert.ok(Date.now() - started < 100);
+    assert.equal(timedOut.events.filter((event) => event === "cleanup").length, 1);
+    assert.equal(timedOut.events.includes("delete-10"), true);
+    assert.equal(releases, 1);
+    finishCleanup?.();
+  });
+
+  it("bounds non-settling reaction cleanup without renewing the review timer", async () => {
+    let finishDeletion: (() => void) | undefined;
+    const deletionGate = new Promise<void>((resolve) => {
+      finishDeletion = resolve;
+    });
+    let releases = 0;
+    const timedOut = harness({
+      reviewMs: 30,
+      reactionDeletionGate: deletionGate,
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+    const started = Date.now();
+
+    await assert.rejects(
+      Promise.race([
+        timedOut.orchestrator.review(reference),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("reaction cleanup renewed the deadline")), 120);
+        }),
+      ]),
+      ReviewTimeoutError,
+    );
+
+    assert.ok(Date.now() - started < 100);
+    assert.equal(timedOut.events.filter((event) => event === "delete-10").length, 1);
+    assert.equal(releases, 1);
+    finishDeletion?.();
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(timedOut.ownedReactions.has("eyes"), false);
+  });
+
+  it("bounds lock release by the original deadline while allowing late release", async () => {
+    let finishRelease: (() => void) | undefined;
+    const releaseGate = new Promise<void>((resolve) => {
+      finishRelease = resolve;
+    });
+    let releases = 0;
+    let completedReleases = 0;
+    const timedOut = harness({
+      reviewMs: 30,
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+              await releaseGate;
+              completedReleases += 1;
+            },
+          };
+        },
+      },
+    });
+    const started = Date.now();
+
+    await assert.rejects(
+      Promise.race([
+        timedOut.orchestrator.review(reference),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("lock release exceeded hard deadline")), 120);
+        }),
+      ]),
+      ReviewTimeoutError,
+    );
+
+    assert.ok(Date.now() - started < 100);
+    assert.equal(releases, 1);
+    assert.equal(completedReleases, 0);
+    finishRelease?.();
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(completedReleases, 1);
+  });
+
+  it("reports primary, cleanup, and release failures in stable stage order", async () => {
+    const failed = harness({
+      review: async () => {
+        throw new Error("primary review failure");
+      },
+      workspaceCleanupError: new Error("workspace cleanup failure"),
+      reactionDeletionError: new Error("reaction cleanup failure"),
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              throw new Error("release failure");
+            },
+          };
+        },
+      },
+    });
+
+    await assert.rejects(
+      () => failed.orchestrator.review(reference),
+      (error: unknown) => {
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(
+          error.errors.map((failure) => String(failure)),
+          [
+            "Error: primary review failure",
+            "Error: workspace cleanup failure",
+            "Error: reaction cleanup failure",
+            "Error: release failure",
+          ],
+        );
+        return true;
+      },
+    );
   });
 
   it("releases the process lock on every terminal path", async () => {

@@ -3,6 +3,7 @@ import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { inspectProcess, type ProcessIdentity } from "./process-identity.js";
+import { createTerminalHandle } from "./terminal-handle.js";
 
 const LOCK_FILE = "manual-review.lock";
 const LOCK_MODE = 0o600;
@@ -22,6 +23,8 @@ interface StaleClaim {
 export interface FileReviewLockHooks {
   afterStaleClaim?(): Promise<void>;
   inspectProcess?(pid: number, signal: AbortSignal): Promise<ProcessIdentity>;
+  readFile?(path: string, encoding: BufferEncoding): Promise<string>;
+  unlink?(path: string): Promise<void>;
 }
 
 type LockState = { kind: "missing" } | { kind: "invalid" } | { kind: "owned"; owner: LockOwner };
@@ -135,9 +138,12 @@ function parseStaleClaim(value: string): StaleClaim | undefined {
   }
 }
 
-async function readLockState(path: string): Promise<LockState> {
+async function readLockState(
+  path: string,
+  read: (path: string, encoding: BufferEncoding) => Promise<string> = readFile,
+): Promise<LockState> {
   try {
-    const owner = parseLockOwner(await readFile(path, "utf8"));
+    const owner = parseLockOwner(await read(path, "utf8"));
     return owner === undefined ? { kind: "invalid" } : { kind: "owned", owner };
   } catch (error) {
     if (isFileSystemError(error, "ENOENT")) {
@@ -179,11 +185,15 @@ export class FileReviewLock implements ReviewLock {
   readonly #lockPath: string;
   readonly #hooks: FileReviewLockHooks;
   readonly #inspectProcess: (pid: number, signal: AbortSignal) => Promise<ProcessIdentity>;
+  readonly #readFile: (path: string, encoding: BufferEncoding) => Promise<string>;
+  readonly #unlink: (path: string) => Promise<void>;
 
   constructor(stateDirectory: string, hooks: FileReviewLockHooks = {}) {
     this.#lockPath = join(stateDirectory, LOCK_FILE);
     this.#hooks = hooks;
     this.#inspectProcess = hooks.inspectProcess ?? inspectProcess;
+    this.#readFile = hooks.readFile ?? readFile;
+    this.#unlink = hooks.unlink ?? unlink;
   }
 
   async acquire(signal: AbortSignal = new AbortController().signal): Promise<ReviewLockLease> {
@@ -232,22 +242,18 @@ export class FileReviewLock implements ReviewLock {
   }
 
   #lease(owner: LockOwner): ReviewLockLease {
-    let released = false;
+    const release = createTerminalHandle(async () => {
+      const current = await readLockState(this.#lockPath, this.#readFile);
+      if (current.kind === "owned" && sameOwner(current.owner, owner)) {
+        await this.#unlink(this.#lockPath).catch((error: unknown) => {
+          if (!isFileSystemError(error, "ENOENT")) {
+            throw error;
+          }
+        });
+      }
+    });
     return {
-      release: async () => {
-        if (released) {
-          return;
-        }
-        released = true;
-        const current = await readLockState(this.#lockPath);
-        if (current.kind === "owned" && sameOwner(current.owner, owner)) {
-          await unlink(this.#lockPath).catch((error: unknown) => {
-            if (!isFileSystemError(error, "ENOENT")) {
-              throw error;
-            }
-          });
-        }
-      },
+      release,
     };
   }
 

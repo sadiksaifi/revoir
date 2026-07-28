@@ -88,7 +88,7 @@ describe("GitHub App review gateway", () => {
       if (url.endsWith("/pulls/17")) {
         return json(pullRequestResponse());
       }
-      if (url.endsWith("/issues/17/reactions?per_page=100")) {
+      if (url.endsWith("/issues/17/reactions?per_page=100&page=1")) {
         return json([
           {
             id: 31,
@@ -193,7 +193,7 @@ describe("GitHub App review gateway", () => {
             }
             throw new Error("network failed after reaction creation");
           }
-          if (url.endsWith("/issues/17/reactions?per_page=100")) {
+          if (url.endsWith("/issues/17/reactions?per_page=100&page=1")) {
             return json(reactions);
           }
           if (url.endsWith("/reactions/41") && init?.method === "DELETE") {
@@ -220,6 +220,184 @@ describe("GitHub App review gateway", () => {
         assert.equal(requests.filter((request) => request.url.endsWith("/reactions/40")).length, 0);
       }),
     );
+  });
+
+  it("validates every reaction page before deleting deduplicated bot reactions", async () => {
+    const requests: string[] = [];
+    const deleted: number[] = [];
+    const pageOne = Array.from({ length: 100 }, (_, index) => ({
+      id: index + 1,
+      content: index === 0 ? "+1" : "eyes",
+      user: { login: index === 0 ? "revoir-test[bot]" : "human" },
+    }));
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/issues/17/reactions?per_page=100&page=1")) {
+        return json(pageOne);
+      }
+      if (url.endsWith("/issues/17/reactions?per_page=100&page=2")) {
+        return json([
+          { id: 1, content: "+1", user: { login: "revoir-test[bot]" } },
+          { id: 101, content: "+1", user: { login: "REVOIR-TEST[BOT]" } },
+          { id: 102, content: "+1", user: { login: "human" } },
+        ]);
+      }
+      const reactionId = /\/reactions\/(\d+)$/u.exec(url)?.[1];
+      if (reactionId !== undefined && init?.method === "DELETE") {
+        deleted.push(Number(reactionId));
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    await session.removeOwnCompletionReaction(reference, new AbortController().signal);
+
+    assert.deepEqual(
+      deleted.toSorted((left, right) => left - right),
+      [1, 101],
+    );
+    assert.equal(
+      requests.some((url) => url.endsWith("/issues/17/reactions?per_page=100&page=2")),
+      true,
+    );
+    assert.equal(
+      requests.some((url) => url.endsWith("/reactions/102")),
+      false,
+    );
+  });
+
+  it("requests an empty page after exactly 100 reactions", async () => {
+    const requestedPages: number[] = [];
+    const fetchImplementation: FetchLike = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      const page = /reactions\?per_page=100&page=(\d+)$/u.exec(url)?.[1];
+      if (page !== undefined) {
+        requestedPages.push(Number(page));
+        return json(
+          page === "1"
+            ? Array.from({ length: 100 }, (_, index) => ({
+                id: index + 1,
+                content: "eyes",
+                user: { login: "human" },
+              }))
+            : [],
+        );
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    await session.removeOwnReaction(reference, "eyes", new AbortController().signal);
+
+    assert.deepEqual(requestedPages, [1, 2]);
+  });
+
+  it("does not delete earlier reactions when a later page is malformed", async () => {
+    const deleted: number[] = [];
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/issues/17/reactions?per_page=100&page=1")) {
+        return json(
+          Array.from({ length: 100 }, (_, index) => ({
+            id: index + 1,
+            content: "+1",
+            user: { login: "revoir-test[bot]" },
+          })),
+        );
+      }
+      if (url.endsWith("/issues/17/reactions?per_page=100&page=2")) {
+        return json([{ id: "invalid", content: "+1", user: { login: "revoir-test[bot]" } }]);
+      }
+      if (init?.method === "DELETE") {
+        deleted.push(Number(url.split("/").at(-1)));
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    await assert.rejects(() =>
+      session.removeOwnCompletionReaction(reference, new AbortController().signal),
+    );
+
+    assert.deepEqual(deleted, []);
+  });
+
+  it("bounds an endless sequence of full reaction pages by cancellation", async () => {
+    const abortController = new AbortController();
+    let pages = 0;
+    const fetchImplementation: FetchLike = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.includes("/issues/17/reactions?")) {
+        pages += 1;
+        return json(
+          Array.from({ length: 100 }, (_, index) => ({
+            id: pages * 1_000 + index,
+            content: "eyes",
+            user: { login: "human" },
+          })),
+        );
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, abortController.signal);
+    const reconciliation = session.removeOwnReaction(reference, "eyes", abortController.signal);
+    setTimeout(() => {
+      abortController.abort(new Error("stop pagination"));
+    }, 5);
+
+    await assert.rejects(
+      Promise.race([
+        reconciliation,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("pagination did not cancel")), 100);
+        }),
+      ]),
+      /stop pagination/u,
+    );
+    assert.ok(pages > 0);
   });
 
   it("cancels non-settling authentication requests", async () => {
