@@ -113,9 +113,18 @@ export class QueueReviewRunner implements QueueRunService {
     try {
       await this.#reviews.review(referenceFor(job), {
         expectedHeadSha: job.pullRequest.headSha,
+        ...(signal === undefined ? {} : { signal }),
       });
+      if (signal?.aborted === true) {
+        throw signal.reason instanceof Error
+          ? signal.reason
+          : new Error("Queue runner was cancelled.");
+      }
       await this.#queue.acknowledge(delivery.leaseId, signal);
     } catch (error) {
+      if (signal?.aborted === true) {
+        throw signal.reason instanceof Error ? signal.reason : error;
+      }
       if (error instanceof PullRequestEligibilityError) {
         await this.#queue.acknowledge(delivery.leaseId, signal);
       } else {

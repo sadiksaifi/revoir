@@ -1,13 +1,12 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { devNull } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
 import type { PullRequestReference, PullRequestSnapshot } from "./pull-request.js";
 import { createTerminalHandle, type TerminalHandle } from "./terminal-handle.js";
 
-const executeFile = promisify(execFile);
+const MAX_COMMAND_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 export interface CommandOptions {
   cwd?: string;
@@ -29,22 +28,122 @@ export interface CommandRunner {
   ): Promise<CommandResult>;
 }
 
+function terminateProcess(pid: number | undefined): void {
+  if (pid === undefined) {
+    return;
+  }
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL");
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // The process group has already exited.
+    }
+  }
+}
+
 export class SystemCommandRunner implements CommandRunner {
   async run(
     command: string,
     arguments_: readonly string[],
     options: CommandOptions,
   ): Promise<CommandResult> {
+    options.signal?.throwIfAborted();
+    const child = spawn(command, [...arguments_], {
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      detached: process.platform !== "win32",
+      ...(options.environment === undefined ? {} : { env: options.environment }),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let outputLimitExceeded = false;
+    let spawnError: Error | undefined;
+    let timedOut = false;
+    const collect =
+      (output: Buffer[], currentBytes: () => number, setBytes: (bytes: number) => void) =>
+      (data: Buffer): void => {
+        const acceptedBytes = Math.min(data.length, MAX_COMMAND_OUTPUT_BYTES - currentBytes());
+        if (acceptedBytes > 0) {
+          output.push(data.subarray(0, acceptedBytes));
+          setBytes(currentBytes() + acceptedBytes);
+        }
+        if (acceptedBytes < data.length) {
+          outputLimitExceeded = true;
+          terminateProcess(child.pid);
+        }
+      };
+    child.stdout.on(
+      "data",
+      collect(
+        stdout,
+        () => stdoutBytes,
+        (bytes) => {
+          stdoutBytes = bytes;
+        },
+      ),
+    );
+    child.stderr.on(
+      "data",
+      collect(
+        stderr,
+        () => stderrBytes,
+        (bytes) => {
+          stderrBytes = bytes;
+        },
+      ),
+    );
+    child.once("error", (error) => {
+      spawnError = error;
+    });
+    const terminate = () => terminateProcess(child.pid);
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      terminate();
+    }, options.timeoutMs);
+    options.signal?.addEventListener("abort", terminate, { once: true });
+
     try {
-      const result = await executeFile(command, [...arguments_], {
-        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-        ...(options.environment === undefined ? {} : { env: options.environment }),
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-        timeout: options.timeoutMs,
+      const { code, signal } = await new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+      }>((resolve) => {
+        child.once("close", (exitCode, exitSignal) => {
+          resolve({ code: exitCode, signal: exitSignal });
+        });
+        if (options.signal?.aborted) {
+          terminate();
+        }
       });
-      return { stdout: result.stdout, stderr: result.stderr };
+      options.signal?.throwIfAborted();
+      if (timedOut) {
+        throw new Error(`Command timed out after ${options.timeoutMs}ms.`);
+      }
+      if (outputLimitExceeded) {
+        throw new Error(`Command output exceeded ${MAX_COMMAND_OUTPUT_BYTES} bytes.`);
+      }
+      if (spawnError !== undefined) {
+        throw spawnError;
+      }
+      const stderrText = Buffer.concat(stderr, stderrBytes).toString("utf8");
+      if (code !== 0) {
+        throw Object.assign(
+          new Error(
+            code === null
+              ? `Command was terminated by ${signal ?? "an unknown signal"}.`
+              : `Command exited with status ${code}.`,
+          ),
+          { stderr: stderrText },
+        );
+      }
+      return {
+        stdout: Buffer.concat(stdout, stdoutBytes).toString("utf8"),
+        stderr: stderrText,
+      };
     } catch (error) {
       const detail =
         typeof error === "object" &&
@@ -54,6 +153,12 @@ export class SystemCommandRunner implements CommandRunner {
           ? `: ${error.stderr.trim()}`
           : "";
       throw new Error(`${command} failed${detail}`, { cause: error });
+    } finally {
+      clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", terminate);
+      if (child.exitCode === null && child.signalCode === null) {
+        terminate();
+      }
     }
   }
 }

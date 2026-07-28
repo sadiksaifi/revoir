@@ -1137,6 +1137,50 @@ describe("clean review orchestrator", () => {
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
   });
 
+  it("propagates caller cancellation before releasing the worker slot", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("daemon stopped");
+    let markReviewStarted: (() => void) | undefined;
+    const reviewStarted = new Promise<void>((resolve) => {
+      markReviewStarted = resolve;
+    });
+    let releases = 0;
+    const cancelled = harness({
+      reviewMs: 50,
+      review: async (_input, signal) => {
+        markReviewStarted?.();
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+    const review = cancelled.orchestrator.review(reference, { signal: controller.signal });
+    await reviewStarted;
+    controller.abort(cancellation);
+
+    await assert.rejects(
+      Promise.race([
+        review,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("caller cancellation did not reach the review")), 100);
+        }),
+      ]),
+      cancellation,
+    );
+    assert.equal(cancelled.events.includes("cleanup"), true);
+    assert.equal(cancelled.ownedReactions.has("eyes"), false);
+    assert.equal(releases, 1);
+  });
+
   it("keeps the process lock while a timed-out review engine is still active", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-orchestrator-lock-"));
     let finishReview: (() => void) | undefined;

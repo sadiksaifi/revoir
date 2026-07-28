@@ -234,4 +234,98 @@ describe("automatic queue review runner", () => {
     assert.deepEqual(acknowledgements, ["lease-3"]);
     assert.deepEqual(reportedAttempts, [1, 2, 3]);
   });
+
+  it("acknowledges a successful third attempt after two reported operational failures", async () => {
+    const deliveries = [1, 2, 3].map((attempt) =>
+      delivery(`lease-${attempt}`, reviewJob(), attempt),
+    );
+    const acknowledgements: string[] = [];
+    const retries: Array<{ leaseId: string; delaySeconds: number }> = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+      },
+      async retry(leaseId, delaySeconds) {
+        retries.push({ leaseId, delaySeconds });
+      },
+    };
+    let reviewAttempts = 0;
+    const reviews: ManualReviewService = {
+      async review() {
+        reviewAttempts += 1;
+        if (reviewAttempts < 3) {
+          throw new Error("temporary provider failure");
+        }
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const reportedAttempts: number[] = [];
+    const reporter: ReviewFailureReporter = {
+      async report(_reference, _error, attempt) {
+        reportedAttempts.push(attempt);
+      },
+    };
+    const runner = new QueueReviewRunner(configuration(), queue, reviews, reporter);
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+    await runner.consumeOne();
+
+    assert.deepEqual(retries, [
+      { leaseId: "lease-1", delaySeconds: 30 },
+      { leaseId: "lease-2", delaySeconds: 120 },
+    ]);
+    assert.deepEqual(acknowledgements, ["lease-3"]);
+    assert.deepEqual(reportedAttempts, [1, 2]);
+  });
+
+  it("propagates daemon cancellation without settling or reporting the active queue lease", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("daemon stopped");
+    let reviewStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      reviewStarted = resolve;
+    });
+    const queue: QueueClient = {
+      async pullOne() {
+        return delivery("lease-cancelled", reviewJob());
+      },
+      async acknowledge() {
+        assert.fail("Cancellation must leave the active lease for visibility-timeout redelivery.");
+      },
+      async retry() {
+        assert.fail("Cancellation must not consume an operational retry.");
+      },
+    };
+    const reviews: ManualReviewService = {
+      async review(_reference, options) {
+        assert.equal(options?.signal, controller.signal);
+        reviewStarted?.();
+        return new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+            once: true,
+          });
+        });
+      },
+    };
+    const reporter: ReviewFailureReporter = {
+      async report() {
+        assert.fail("Daemon cancellation is not an operational review failure.");
+      },
+    };
+    const consumption = new QueueReviewRunner(configuration(), queue, reviews, reporter).consumeOne(
+      controller.signal,
+    );
+    await started;
+    controller.abort(cancellation);
+
+    await assert.rejects(consumption, cancellation);
+  });
 });

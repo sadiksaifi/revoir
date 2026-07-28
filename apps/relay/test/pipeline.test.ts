@@ -91,6 +91,7 @@ describe("webhook-to-review pipeline", () => {
             ? undefined
             : {
                 leaseId: `lease-${outcome}`,
+                attempt: 1,
                 body: job,
               };
         },
@@ -146,7 +147,7 @@ describe("webhook-to-review pipeline", () => {
     const queue: QueueClient = {
       async pullOne() {
         const job = queued.shift();
-        return job === undefined ? undefined : { leaseId: "lease-stale", body: job };
+        return job === undefined ? undefined : { leaseId: "lease-stale", attempt: 1, body: job };
       },
       async acknowledge(leaseId) {
         acknowledged.push(leaseId);
@@ -195,6 +196,7 @@ describe("webhook-to-review pipeline", () => {
           ? undefined
           : {
               leaseId: "lease-operational-failure",
+              attempt: 1,
               body: job,
             };
       },

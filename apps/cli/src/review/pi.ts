@@ -289,6 +289,8 @@ export class PiReviewEngine implements ReviewEngine {
       const validated = await validateModelReviewOutput(result, {
         checkout: input.workspace.checkout,
         diff: input.workspace.diff,
+        signal,
+        shellCommandMs: this.#shellCommandMs,
       });
       return {
         findings: validated.findings,
