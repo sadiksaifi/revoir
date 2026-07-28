@@ -1181,6 +1181,31 @@ describe("clean review orchestrator", () => {
     assert.equal(releases, 1);
   });
 
+  it("releases a lock acquired at the caller cancellation boundary", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("daemon stopped during lock acquisition");
+    let releases = 0;
+    const cancelled = harness({
+      lock: {
+        async acquire() {
+          controller.abort(cancellation);
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+
+    await assert.rejects(
+      cancelled.orchestrator.review(reference, { signal: controller.signal }),
+      cancellation,
+    );
+    assert.equal(releases, 1);
+    assert.deepEqual(cancelled.events, []);
+  });
+
   it("keeps the process lock while a timed-out review engine is still active", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-orchestrator-lock-"));
     let finishReview: (() => void) | undefined;
