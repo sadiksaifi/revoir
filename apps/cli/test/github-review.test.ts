@@ -9,8 +9,9 @@ import {
   ReviewSubmissionUncertainError,
   type FetchLike,
 } from "../src/review/github.js";
-import { createReviewPublication } from "../src/review/publication.js";
+import { createReviewPublication, renderFileFinding } from "../src/review/publication.js";
 import { parsePullRequestUrl } from "../src/review/pull-request.js";
+import { planFindingReconciliation } from "../src/review/reconciliation.js";
 import { createTestConfiguration, TEST_PRIVATE_KEY } from "./helpers.js";
 
 const reference = parsePullRequestUrl("https://github.com/owner/repository/pull/17");
@@ -50,6 +51,57 @@ function pullRequestResponse(headSha = "2".repeat(40)) {
       },
     },
   };
+}
+
+function ownedReviewThreadResponse(id: string, fingerprint: string) {
+  return {
+    id,
+    isResolved: false,
+    comments: {
+      nodes: [
+        {
+          body: `<!-- revoir:finding:v1:${fingerprint} -->`,
+          author: { login: "revoir-test[bot]" },
+        },
+      ],
+    },
+  };
+}
+
+function reviewFileFinding(fingerprint: string, path: string): ReviewFindingV1 {
+  return {
+    version: 1,
+    fingerprint,
+    priority: "P1",
+    path,
+    range: null,
+    defectKind: "correctness",
+    impactKind: "incorrect-result",
+    fixAction: "restore",
+    anchor: path,
+    attachment: { kind: "file", path },
+  };
+}
+
+function ownReview(id: number, body: string | null, state = "COMMENTED") {
+  return {
+    id,
+    state,
+    body,
+    user: { login: "revoir-test[bot]" },
+  };
+}
+
+function legacyReviewBody(candidate: ReviewFindingV1): string {
+  return renderFileFinding(candidate);
+}
+
+function explicitReviewBody(candidates: readonly ReviewFindingV1[]): string {
+  return createReviewPublication("2".repeat(40), [], candidates).payload.body!;
+}
+
+function markerOnlyExplicitReviewBody(candidate: ReviewFindingV1): string {
+  return `<!-- revoir:body-state:v1 -->\n<!-- revoir:body-finding:v1:${candidate.fingerprint} -->`;
 }
 
 describe("GitHub App review gateway", () => {
@@ -101,6 +153,8 @@ describe("GitHub App review gateway", () => {
           { id: 32, content: "+1", user: { login: "human" } },
           { id: 34, content: "eyes", user: { login: "revoir-test[bot]" } },
           { id: 35, content: "eyes", user: { login: "human" } },
+          { id: 36, content: "confused", user: { login: "revoir-test[bot]" } },
+          { id: 37, content: "confused", user: { login: "human" } },
         ]);
       }
       if (url.endsWith("/issues/17/reactions") && init?.method === "POST") {
@@ -113,7 +167,8 @@ describe("GitHub App review gateway", () => {
       if (
         url.endsWith("/reactions/31") ||
         url.endsWith("/reactions/33") ||
-        url.endsWith("/reactions/34")
+        url.endsWith("/reactions/34") ||
+        url.endsWith("/reactions/36")
       ) {
         return new Response(null, { status: 204 });
       }
@@ -165,6 +220,8 @@ describe("GitHub App review gateway", () => {
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/32")).length, 0);
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/34")).length, 1);
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/35")).length, 0);
+    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/36")).length, 1);
+    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/37")).length, 0);
     assert.ok(requests.every((request) => request.init?.signal === abortController.signal));
   });
 
@@ -272,6 +329,759 @@ describe("GitHub App review gateway", () => {
 
     await session.removeOwnPendingReview(reference, new AbortController().signal);
     assert.deepEqual(deleted, [71]);
+  });
+
+  it("discovers prior run markers and resolves only obsolete App-owned finding threads", async () => {
+    const mutations: string[] = [];
+    const ownBodyFingerprint = "a".repeat(64);
+    const ownThreadFingerprint = "b".repeat(64);
+    const markerShapedSource = `<!-- revoir:finding:v1:${"c".repeat(64)} -->`;
+    const ownThreadBody = renderFileFinding({
+      version: 1,
+      fingerprint: ownThreadFingerprint,
+      fingerprintAliases: ["9".repeat(64)],
+      priority: "P1",
+      path: markerShapedSource,
+      range: null,
+      defectKind: "correctness",
+      impactKind: "incorrect-result",
+      fixAction: "restore",
+      anchor: markerShapedSource,
+      attachment: { kind: "file", path: markerShapedSource },
+    });
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+        return json([
+          {
+            id: 201,
+            state: "COMMENTED",
+            body: `<!-- revoir:run:v1:${"2".repeat(40)} -->\n<!-- revoir:finding:v1:${ownBodyFingerprint} -->`,
+            user: { login: "revoir-test[bot]" },
+          },
+          {
+            id: 202,
+            state: "COMMENTED",
+            body: `<!-- revoir:finding:v1:${"c".repeat(64)} -->`,
+            user: { login: "human" },
+          },
+          {
+            id: 203,
+            state: "COMMENTED",
+            body: `<!-- revoir:finding:v1:${"d".repeat(64)} -->`,
+            user: { login: "another-app[bot]" },
+          },
+        ]);
+      }
+      if (url.endsWith("/pulls/17")) {
+        return json(pullRequestResponse());
+      }
+      if (url.endsWith("/graphql")) {
+        const request = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables: Record<string, unknown>;
+        };
+        if (request.query.includes("reviewThreads")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      {
+                        id: "THREAD_OWN_OPEN",
+                        isResolved: false,
+                        comments: {
+                          nodes: [
+                            {
+                              body: ownThreadBody,
+                              author: { login: "revoir-test[bot]" },
+                            },
+                          ],
+                        },
+                      },
+                      {
+                        id: "THREAD_OWN_RESOLVED",
+                        isResolved: true,
+                        comments: {
+                          nodes: [
+                            {
+                              body: `<!-- revoir:finding:v1:${"e".repeat(64)} -->`,
+                              author: { login: "revoir-test[bot]" },
+                            },
+                          ],
+                        },
+                      },
+                      {
+                        id: "THREAD_HUMAN",
+                        isResolved: false,
+                        comments: {
+                          nodes: [
+                            {
+                              body: `<!-- revoir:finding:v1:${"f".repeat(64)} -->`,
+                              author: { login: "human" },
+                            },
+                          ],
+                        },
+                      },
+                      {
+                        id: "THREAD_OTHER_APP",
+                        isResolved: false,
+                        comments: {
+                          nodes: [
+                            {
+                              body: `<!-- revoir:finding:v1:${"0".repeat(64)} -->`,
+                              author: { login: "another-app[bot]" },
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                  },
+                },
+              },
+            },
+          });
+        }
+        mutations.push(String(request.variables.threadId));
+        return json({
+          data: {
+            resolveReviewThread: {
+              thread: { id: request.variables.threadId, isResolved: true },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    assert.deepEqual(await session.getPriorReviewState(reference, new AbortController().signal), {
+      activeFingerprints: [ownBodyFingerprint, ownThreadFingerprint],
+      bodyFindings: [{ fingerprint: ownBodyFingerprint }],
+      bodyStateMigrationRequired: true,
+      ownedOpenThreads: [
+        {
+          id: "THREAD_OWN_OPEN",
+          fingerprint: ownThreadFingerprint,
+          aliases: ["9".repeat(64)],
+        },
+      ],
+      runHeadShas: ["2".repeat(40)],
+    });
+    await assert.rejects(
+      () =>
+        session.resolveReviewThreads(
+          reference,
+          ["THREAD_HUMAN"],
+          "2".repeat(40),
+          new AbortController().signal,
+        ),
+      /not owned by this GitHub App/u,
+    );
+    assert.deepEqual(
+      await session.resolveReviewThreads(
+        reference,
+        ["THREAD_OWN_OPEN"],
+        "2".repeat(40),
+        new AbortController().signal,
+      ),
+      { status: "resolved" },
+    );
+    assert.deepEqual(mutations, ["THREAD_OWN_OPEN"]);
+  });
+
+  it("prevalidates ownership and fences every thread resolution with the expected head", async () => {
+    const expectedHeadSha = "2".repeat(40);
+    const staleHeadSha = "3".repeat(40);
+    const mutations: string[] = [];
+    let headReads = 0;
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+        return json([]);
+      }
+      if (url.endsWith("/pulls/17")) {
+        headReads += 1;
+        return json(pullRequestResponse(headReads === 1 ? expectedHeadSha : staleHeadSha));
+      }
+      if (url.endsWith("/graphql")) {
+        const request = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables: Record<string, unknown>;
+        };
+        if (request.query.includes("reviewThreads")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      ownedReviewThreadResponse("THREAD_A", "a".repeat(64)),
+                      ownedReviewThreadResponse("THREAD_B", "b".repeat(64)),
+                    ],
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                  },
+                },
+              },
+            },
+          });
+        }
+        mutations.push(String(request.variables.threadId));
+        return json({
+          data: {
+            resolveReviewThread: {
+              thread: { id: request.variables.threadId, isResolved: true },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const signal = new AbortController().signal;
+    await session.getPriorReviewState(reference, signal);
+
+    await assert.rejects(
+      () =>
+        session.resolveReviewThreads(
+          reference,
+          ["THREAD_A", "THREAD_FOREIGN"],
+          expectedHeadSha,
+          signal,
+        ),
+      /not owned by this GitHub App/u,
+    );
+    assert.equal(headReads, 0);
+    assert.deepEqual(mutations, []);
+
+    assert.deepEqual(
+      await session.resolveReviewThreads(
+        reference,
+        ["THREAD_A", "THREAD_B"],
+        expectedHeadSha,
+        signal,
+      ),
+      { status: "stale", currentSha: staleHeadSha },
+    );
+    assert.equal(headReads, 2);
+    assert.deepEqual(mutations, ["THREAD_A"]);
+  });
+
+  it("migrates the latest legacy body-marker review until a versioned snapshot exists", async () => {
+    const olderFingerprint = "a".repeat(64);
+    const latestFingerprint = "b".repeat(64);
+    const ignoredFingerprint = "c".repeat(64);
+    const latestFinding: ReviewFindingV1 = {
+      version: 1,
+      fingerprint: latestFingerprint,
+      priority: "P1",
+      path: "source.ts",
+      range: null,
+      defectKind: "correctness",
+      impactKind: "incorrect-result",
+      fixAction: "restore",
+      anchor: "source.ts",
+      attachment: { kind: "file", path: "source.ts" },
+    };
+    const legacyBody = (fingerprint: string): string =>
+      renderFileFinding({ ...latestFinding, fingerprint });
+
+    for (const hasVersionedSnapshot of [false, true]) {
+      const fetchImplementation: FetchLike = async (input) => {
+        const url = String(input);
+        if (url.endsWith("/app")) {
+          return json({ slug: "revoir-test" });
+        }
+        if (url.endsWith("/app/installations/8/access_tokens")) {
+          return json({ token: "installation-secret" });
+        }
+        if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+          return json([
+            {
+              id: 201,
+              state: "COMMENTED",
+              body: legacyBody(olderFingerprint),
+              user: { login: "revoir-test[bot]" },
+            },
+            {
+              id: 202,
+              state: "COMMENTED",
+              body: legacyBody(latestFingerprint),
+              user: { login: "revoir-test[bot]" },
+            },
+            ...(hasVersionedSnapshot
+              ? [
+                  {
+                    id: 203,
+                    state: "COMMENTED",
+                    body: createReviewPublication("2".repeat(40), [], []).payload.body!,
+                    user: { login: "revoir-test[bot]" },
+                  },
+                  {
+                    id: 204,
+                    state: "COMMENTED",
+                    body: legacyBody(ignoredFingerprint),
+                    user: { login: "revoir-test[bot]" },
+                  },
+                ]
+              : []),
+          ]);
+        }
+        if (url.endsWith("/graphql")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [],
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                  },
+                },
+              },
+            },
+          });
+        }
+        throw new Error(`Unexpected request ${url}`);
+      };
+      // Sequential cases reuse no gateway state.
+      // eslint-disable-next-line no-await-in-loop
+      const session = await new GitHubAppReviewGateway(
+        fetchImplementation,
+        "https://api.test",
+        () => 1_000,
+      ).authenticate(configuration.github, reference, new AbortController().signal);
+      // eslint-disable-next-line no-await-in-loop
+      const prior = await session.getPriorReviewState(reference, new AbortController().signal);
+
+      assert.deepEqual(
+        prior.bodyFindings,
+        hasVersionedSnapshot ? [] : [{ fingerprint: latestFingerprint }],
+      );
+      assert.equal(prior.bodyStateMigrationRequired === true, !hasVersionedSnapshot);
+      assert.deepEqual(
+        planFindingReconciliation([latestFinding], prior).netNewFindings,
+        hasVersionedSnapshot ? [latestFinding] : [],
+      );
+      assert.equal(planFindingReconciliation([latestFinding], prior).bodyStateChanged, true);
+    }
+  });
+
+  it("folds submitted App review bodies into the latest authoritative snapshot", async () => {
+    const fingerprints = {
+      older: "a".repeat(64),
+      latest: "b".repeat(64),
+      ignored: "c".repeat(64),
+      other: "d".repeat(64),
+    };
+    const findings = {
+      older: reviewFileFinding(fingerprints.older, "older.ts"),
+      latest: reviewFileFinding(fingerprints.latest, "latest.ts"),
+      ignored: reviewFileFinding(fingerprints.ignored, "ignored.ts"),
+      other: reviewFileFinding(fingerprints.other, "other.ts"),
+    };
+    const scenarios = [
+      {
+        name: "latest legacy marker set",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(202, legacyReviewBody(findings.latest)),
+        ],
+        expectedBodyFingerprints: [fingerprints.latest],
+        migrationRequired: true,
+        candidate: findings.latest,
+        expectedNetNew: [],
+        bodyStateChanged: true,
+        runHeadShas: [],
+      },
+      {
+        name: "empty legacy body",
+        reviews: [ownReview(201, legacyReviewBody(findings.older)), ownReview(202, "")],
+        expectedBodyFingerprints: [],
+        migrationRequired: true,
+        candidate: findings.older,
+        expectedNetNew: [fingerprints.older],
+        bodyStateChanged: true,
+        runHeadShas: [],
+      },
+      {
+        name: "null inline-only legacy body",
+        reviews: [ownReview(201, legacyReviewBody(findings.older)), ownReview(202, null)],
+        expectedBodyFingerprints: [],
+        migrationRequired: true,
+        candidate: findings.older,
+        expectedNetNew: [fingerprints.older],
+        bodyStateChanged: true,
+        runHeadShas: [],
+      },
+      {
+        name: "run-only legacy body",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(202, `<!-- revoir:run:v1:${"3".repeat(40)} -->`),
+        ],
+        expectedBodyFingerprints: [],
+        migrationRequired: true,
+        candidate: findings.older,
+        expectedNetNew: [fingerprints.older],
+        bodyStateChanged: true,
+        runHeadShas: ["3".repeat(40)],
+      },
+      {
+        name: "pending and non-App reviews are ignored",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.latest)),
+          ownReview(202, legacyReviewBody(findings.ignored), "PENDING"),
+          {
+            id: 203,
+            state: "COMMENTED",
+            body: legacyReviewBody(findings.other),
+            user: { login: "human" },
+          },
+        ],
+        expectedBodyFingerprints: [fingerprints.latest],
+        migrationRequired: true,
+        candidate: findings.latest,
+        expectedNetNew: [],
+        bodyStateChanged: true,
+        runHeadShas: [],
+      },
+      {
+        name: "legacy cannot override an explicit snapshot",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(202, explicitReviewBody([findings.latest])),
+          ownReview(203, legacyReviewBody(findings.ignored)),
+        ],
+        expectedBodyFingerprints: [fingerprints.latest],
+        migrationRequired: false,
+        candidate: findings.latest,
+        expectedNetNew: [],
+        bodyStateChanged: false,
+        runHeadShas: ["2".repeat(40)],
+      },
+      {
+        name: "explicit state without a run marker remains authoritative",
+        reviews: [
+          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(202, markerOnlyExplicitReviewBody(findings.latest)),
+          ownReview(203, legacyReviewBody(findings.ignored)),
+        ],
+        expectedBodyFingerprints: [fingerprints.latest],
+        migrationRequired: false,
+        candidate: findings.latest,
+        expectedNetNew: [],
+        bodyStateChanged: false,
+        runHeadShas: [],
+      },
+      {
+        name: "latest explicit empty snapshot wins",
+        reviews: [
+          ownReview(201, explicitReviewBody([findings.latest])),
+          ownReview(202, explicitReviewBody([])),
+          ownReview(203, legacyReviewBody(findings.ignored)),
+        ],
+        expectedBodyFingerprints: [],
+        migrationRequired: false,
+        candidate: findings.latest,
+        expectedNetNew: [fingerprints.latest],
+        bodyStateChanged: true,
+        runHeadShas: ["2".repeat(40)],
+      },
+    ];
+
+    await Promise.all(
+      scenarios.map(async (scenario) => {
+        const fetchImplementation: FetchLike = async (input) => {
+          const url = String(input);
+          if (url.endsWith("/app")) {
+            return json({ slug: "revoir-test" });
+          }
+          if (url.endsWith("/app/installations/8/access_tokens")) {
+            return json({ token: "installation-secret" });
+          }
+          if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+            return json(scenario.reviews);
+          }
+          if (url.endsWith("/graphql")) {
+            return json({
+              data: {
+                repository: {
+                  pullRequest: {
+                    reviewThreads: {
+                      nodes: [],
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                    },
+                  },
+                },
+              },
+            });
+          }
+          throw new Error(`Unexpected request ${url}`);
+        };
+        const session = await new GitHubAppReviewGateway(
+          fetchImplementation,
+          "https://api.test",
+          () => 1_000,
+        ).authenticate(configuration.github, reference, new AbortController().signal);
+        const prior = await session.getPriorReviewState(reference, new AbortController().signal);
+        const plan = planFindingReconciliation([scenario.candidate], prior);
+
+        assert.deepEqual(
+          prior.bodyFindings?.map(({ fingerprint }) => fingerprint),
+          scenario.expectedBodyFingerprints,
+          scenario.name,
+        );
+        assert.equal(
+          prior.bodyStateMigrationRequired === true,
+          scenario.migrationRequired,
+          scenario.name,
+        );
+        assert.deepEqual(
+          plan.netNewFindings.map(({ fingerprint }) => fingerprint),
+          scenario.expectedNetNew,
+          scenario.name,
+        );
+        assert.equal(plan.bodyStateChanged, scenario.bodyStateChanged, scenario.name);
+        assert.deepEqual(prior.runHeadShas, scenario.runHeadShas, scenario.name);
+      }),
+    );
+  });
+
+  it("folds legacy snapshots across a review-page boundary and unions open App threads", async () => {
+    const retiredFingerprint = "a".repeat(64);
+    const threadFingerprint = "b".repeat(64);
+    const ignoredFingerprint = "c".repeat(64);
+    const retiredFinding = reviewFileFinding(retiredFingerprint, "returned.ts");
+    const threadFinding = reviewFileFinding(threadFingerprint, "unchanged.ts");
+    const firstPage = [
+      ...Array.from({ length: 99 }, (_, index) => ({
+        id: index + 1,
+        state: "COMMENTED",
+        body: "",
+        user: { login: "human" },
+      })),
+      {
+        id: 100,
+        state: "COMMENTED",
+        body: renderFileFinding(retiredFinding),
+        user: { login: "revoir-test[bot]" },
+      },
+    ];
+    const fetchImplementation: FetchLike = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+        return json(firstPage);
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=2")) {
+        return json([
+          {
+            id: 101,
+            state: "COMMENTED",
+            body: null,
+            user: { login: "revoir-test[bot]" },
+          },
+          {
+            id: 102,
+            state: "PENDING",
+            body: renderFileFinding(reviewFileFinding(ignoredFingerprint, "pending.ts")),
+            user: { login: "revoir-test[bot]" },
+          },
+        ]);
+      }
+      if (url.endsWith("/graphql")) {
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  nodes: [ownedReviewThreadResponse("THREAD_OPEN", threadFingerprint)],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const prior = await session.getPriorReviewState(reference, new AbortController().signal);
+    const plan = planFindingReconciliation([retiredFinding, threadFinding], prior);
+
+    assert.deepEqual(prior.bodyFindings, []);
+    assert.equal(prior.bodyStateMigrationRequired, true);
+    assert.deepEqual(prior.activeFingerprints, [threadFingerprint]);
+    assert.deepEqual(prior.ownedOpenThreads, [
+      { id: "THREAD_OPEN", fingerprint: threadFingerprint },
+    ]);
+    assert.deepEqual(
+      plan.netNewFindings.map(({ fingerprint }) => fingerprint),
+      [retiredFingerprint],
+    );
+    assert.equal(plan.bodyStateChanged, true);
+  });
+
+  it("discovers full body snapshots across delta, retirement, and clean runs", async () => {
+    const historicalFingerprint = "a".repeat(64);
+    const latestFingerprint = "b".repeat(64);
+    const fileFinding: ReviewFindingV1 = {
+      version: 1,
+      fingerprint: historicalFingerprint,
+      priority: "P1",
+      path: "source.ts",
+      range: null,
+      defectKind: "correctness",
+      impactKind: "incorrect-result",
+      fixAction: "restore",
+      anchor: "source.ts",
+      attachment: { kind: "file", path: "source.ts" },
+    };
+    const fallbackFinding: ReviewFindingV1 = {
+      ...fileFinding,
+      range: { start: 2, end: 2, side: "RIGHT" },
+      attachment: {
+        kind: "inline",
+        path: "source.ts",
+        startLine: 2,
+        endLine: 2,
+        side: "RIGHT",
+      },
+    };
+    const latestFinding: ReviewFindingV1 = {
+      ...fileFinding,
+      fingerprint: latestFingerprint,
+      path: "latest.ts",
+      anchor: "latest.ts",
+      attachment: { kind: "file", path: "latest.ts" },
+    };
+    const historicalBodies = [
+      createReviewPublication("1".repeat(40), [fileFinding]).payload.body!,
+      createReviewPublication("1".repeat(40), [fallbackFinding]).fallbackPayload.body!,
+    ];
+
+    await Promise.all(
+      historicalBodies.flatMap((historicalBody, index) =>
+        (["findings", "retired", "clean"] as const).map(async (priorRun) => {
+          const returnedFinding = index === 0 ? fileFinding : fallbackFinding;
+          const laterBody =
+            priorRun === "findings"
+              ? createReviewPublication(
+                  "2".repeat(40),
+                  [latestFinding],
+                  [returnedFinding, latestFinding],
+                ).payload.body!
+              : createReviewPublication("2".repeat(40), [], []).payload.body!;
+          const fetchImplementation: FetchLike = async (input, init) => {
+            const url = String(input);
+            if (url.endsWith("/app")) {
+              return json({ slug: "revoir-test" });
+            }
+            if (url.endsWith("/app/installations/8/access_tokens")) {
+              return json({ token: "installation-secret" });
+            }
+            if (url.includes("/reactions?per_page=100&page=1")) {
+              return json(
+                priorRun === "clean"
+                  ? [
+                      {
+                        id: 301,
+                        content: "+1",
+                        user: { login: "revoir-test[bot]" },
+                      },
+                    ]
+                  : [],
+              );
+            }
+            if (url.endsWith("/reactions/301") && init?.method === "DELETE") {
+              return new Response(null, { status: 204 });
+            }
+            if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+              return json([
+                {
+                  id: 201,
+                  state: "COMMENTED",
+                  body: historicalBody,
+                  user: { login: "revoir-test[bot]" },
+                },
+                ...(priorRun === "clean"
+                  ? []
+                  : [
+                      {
+                        id: 202,
+                        state: "COMMENTED",
+                        body: laterBody,
+                        user: { login: "revoir-test[bot]" },
+                      },
+                    ]),
+              ]);
+            }
+            if (url.endsWith("/graphql")) {
+              return json({
+                data: {
+                  repository: {
+                    pullRequest: {
+                      reviewThreads: {
+                        nodes: [],
+                        pageInfo: { hasNextPage: false, endCursor: null },
+                      },
+                    },
+                  },
+                },
+              });
+            }
+            throw new Error(`Unexpected request ${url}`);
+          };
+          const session = await new GitHubAppReviewGateway(
+            fetchImplementation,
+            "https://api.test",
+            () => 1_000,
+          ).authenticate(configuration.github, reference, new AbortController().signal);
+
+          await session.removeOwnCompletionReaction(reference, new AbortController().signal);
+          const prior = await session.getPriorReviewState(reference, new AbortController().signal);
+          assert.deepEqual(
+            prior.activeFingerprints,
+            priorRun === "findings" ? [historicalFingerprint, latestFingerprint] : [],
+          );
+          assert.deepEqual(
+            planFindingReconciliation([returnedFinding], prior).netNewFindings,
+            priorRun === "findings" ? [] : [returnedFinding],
+          );
+        }),
+      ),
+    );
   });
 
   it("uses the bounded state-aware fence while reconciling an owned pending review", async () => {

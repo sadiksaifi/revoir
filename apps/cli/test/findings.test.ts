@@ -14,6 +14,7 @@ import {
   validateModelReviewOutput,
 } from "../src/review/findings.js";
 import { createReviewPublication } from "../src/review/publication.js";
+import { planFindingReconciliation } from "../src/review/reconciliation.js";
 
 const execFileAsync = promisify(execFile);
 const NFD_PATH = "cafe\u0301.ts";
@@ -561,6 +562,390 @@ describe("finding validation", () => {
     assert.equal(result.diagnostics[0]?.code, "duplicate");
   });
 
+  it("keeps distinct same-anchor occurrences publishable across separate changed ranges", async () => {
+    const diff = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,4 @@
+ const retained = true;
++throwIfAborted(signal);
++const between = true;
++throwIfAborted(signal);
+`;
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          range: { start: 2, end: 2, side: "RIGHT" },
+          anchor: "throwIfAborted(signal);",
+        }),
+        finding({
+          range: { start: 4, end: 4, side: "RIGHT" },
+          anchor: "throwIfAborted(signal);",
+        }),
+      ]),
+      { checkout, diff },
+    );
+
+    assert.equal(result.findings.length, 2);
+    assert.equal(result.diagnostics.length, 0);
+    assert.notEqual(result.findings[0]?.fingerprint, result.findings[1]?.fingerprint);
+  });
+
+  it("keeps a surviving same-anchor occurrence stable after its peer disappears", async () => {
+    const withPeer = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,4 @@
+ const retained = true;
++throwIfAborted(signal);
++const between = true;
++throwIfAborted(signal);
+`;
+    const withoutPeer = `diff --git a/source.ts b/source.ts
+index 1111111..3333333 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,3 @@
+ const retained = true;
++const between = true;
++throwIfAborted(signal);
+`;
+    const peer = finding({
+      range: { start: 2, end: 2, side: "RIGHT" },
+      anchor: "throwIfAborted(signal);",
+    });
+    const survivingWithPeer = finding({
+      range: { start: 4, end: 4, side: "RIGHT" },
+      anchor: "throwIfAborted(signal);",
+    });
+    const survivingWithoutPeer = finding({
+      range: { start: 3, end: 3, side: "RIGHT" },
+      anchor: "throwIfAborted(signal);",
+    });
+    const firstRun = await validateModelReviewOutput(output([peer, survivingWithPeer]), {
+      checkout,
+      diff: withPeer,
+    });
+    const secondRun = await validateModelReviewOutput(output([survivingWithoutPeer]), {
+      checkout,
+      diff: withoutPeer,
+    });
+    const peerFingerprint = firstRun.findings[0]!.fingerprint;
+    const survivingFingerprint = firstRun.findings[1]!.fingerprint;
+
+    assert.deepEqual(
+      planFindingReconciliation(secondRun.findings, {
+        activeFingerprints: [peerFingerprint, survivingFingerprint],
+        ownedOpenThreads: [
+          {
+            id: "THREAD_PEER",
+            fingerprint: peerFingerprint,
+            aliases: firstRun.findings[0]!.fingerprintAliases!,
+          },
+          {
+            id: "THREAD_SURVIVOR",
+            fingerprint: survivingFingerprint,
+            aliases: firstRun.findings[1]!.fingerprintAliases!,
+          },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [],
+        obsoleteThreadIds: ["THREAD_PEER"],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
+      },
+    );
+  });
+
+  it("keeps a surviving same-anchor occurrence matched when a new peer appears", async () => {
+    const withoutPeer = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,4 @@
+ const retained = true;
++guard();
++targetAnchor();
++tail();
+`;
+    const withPeer = `diff --git a/source.ts b/source.ts
+index 1111111..3333333 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,7 @@
+ const retained = true;
++guard();
++targetAnchor();
++tail();
++guard();
++targetAnchor();
++tail();
+`;
+    const survivor = finding({
+      range: { start: 3, end: 3, side: "RIGHT" },
+      defectKind: "correctness",
+      impactKind: "operation-failure",
+      fixAction: "guard",
+      anchor: "targetAnchor();",
+    });
+    const addedPeer = finding({
+      range: { start: 6, end: 6, side: "RIGHT" },
+      defectKind: "correctness",
+      impactKind: "operation-failure",
+      fixAction: "guard",
+      anchor: "targetAnchor();",
+    });
+    const firstRun = await validateModelReviewOutput(output([survivor]), {
+      checkout,
+      diff: withoutPeer,
+    });
+    const secondRun = await validateModelReviewOutput(output([survivor, addedPeer]), {
+      checkout,
+      diff: withPeer,
+    });
+    const survivingThread = firstRun.findings[0]!;
+
+    assert.deepEqual(
+      planFindingReconciliation(secondRun.findings, {
+        activeFingerprints: [survivingThread.fingerprint],
+        ownedOpenThreads: [
+          {
+            id: "THREAD_SURVIVOR",
+            fingerprint: survivingThread.fingerprint,
+            aliases: survivingThread.fingerprintAliases!,
+          },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [secondRun.findings[1]],
+        obsoleteThreadIds: [],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
+      },
+    );
+  });
+
+  it("publishes and retires a same-count occurrence replacement while retaining its peer", async () => {
+    const firstDiff = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,7 @@
+ const retained = true;
++guardOne();
++targetAnchor();
++tailOne();
++guardRemoved();
++targetAnchor();
++tailRemoved();
+`;
+    const secondDiff = `diff --git a/source.ts b/source.ts
+index 1111111..3333333 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,8 @@
+ const retained = true;
++guardOne();
++targetAnchor();
++tailOne();
++const middle = true;
++guardAdded();
++targetAnchor();
++tailAdded();
+`;
+    const retained = finding({
+      range: { start: 3, end: 3, side: "RIGHT" },
+      anchor: "targetAnchor();",
+    });
+    const removed = finding({
+      range: { start: 6, end: 6, side: "RIGHT" },
+      anchor: "targetAnchor();",
+    });
+    const added = finding({
+      range: { start: 7, end: 7, side: "RIGHT" },
+      anchor: "targetAnchor();",
+    });
+    const firstRun = await validateModelReviewOutput(output([retained, removed]), {
+      checkout,
+      diff: firstDiff,
+    });
+    const secondRun = await validateModelReviewOutput(output([added, retained]), {
+      checkout,
+      diff: secondDiff,
+    });
+
+    assert.deepEqual(
+      planFindingReconciliation(secondRun.findings, {
+        activeFingerprints: firstRun.findings.map(({ fingerprint }) => fingerprint),
+        ownedOpenThreads: firstRun.findings.map(({ fingerprint, fingerprintAliases }, index) => ({
+          id: index === 0 ? "THREAD_RETAINED" : "THREAD_REMOVED",
+          fingerprint,
+          aliases: fingerprintAliases!,
+        })),
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [secondRun.findings[0]],
+        obsoleteThreadIds: ["THREAD_REMOVED"],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
+      },
+    );
+  });
+
+  it("keeps occurrence identity stable when unrelated changed text is inserted beside it", async () => {
+    const beforeEdit = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,3 @@
+ const retained = true;
++targetAnchor();
++const tail = true;
+`;
+    const afterEdit = `diff --git a/source.ts b/source.ts
+index 1111111..3333333 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,4 @@
+ const retained = true;
++targetAnchor();
++const unrelated = true;
++const tail = true;
+`;
+    const candidate = finding({
+      range: { start: 2, end: 2, side: "RIGHT" },
+      anchor: "targetAnchor();",
+    });
+    const firstRun = await validateModelReviewOutput(output([candidate]), {
+      checkout,
+      diff: beforeEdit,
+    });
+    const secondRun = await validateModelReviewOutput(output([candidate]), {
+      checkout,
+      diff: afterEdit,
+    });
+
+    assert.equal(secondRun.findings[0]?.fingerprint, firstRun.findings[0]?.fingerprint);
+  });
+
+  it("keeps identical repeated blocks as distinct publishable occurrences", async () => {
+    const diff = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,7 @@
+ const retained = true;
++guard();
++targetAnchor();
++tail();
++guard();
++targetAnchor();
++tail();
+`;
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          range: { start: 3, end: 3, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+        finding({
+          range: { start: 6, end: 6, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+      ]),
+      { checkout, diff },
+    );
+
+    assert.equal(result.findings.length, 2);
+    assert.equal(result.diagnostics.length, 0);
+    assert.notEqual(result.findings[0]?.fingerprint, result.findings[1]?.fingerprint);
+  });
+
+  it("keeps identical shifted multiline blocks matched across input permutations", async () => {
+    const beforeShift = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,7 @@
+ const retained = true;
++guard();
++targetAnchor();
++tail();
++guard();
++targetAnchor();
++tail();
+`;
+    const afterShift = `diff --git a/source.ts b/source.ts
+index 1111111..3333333 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,8 @@
+ const retained = true;
++const unrelated = true;
++guard();
++targetAnchor();
++tail();
++guard();
++targetAnchor();
++tail();
+`;
+    const firstRun = await validateModelReviewOutput(
+      output([
+        finding({
+          range: { start: 3, end: 4, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+        finding({
+          range: { start: 6, end: 7, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+      ]),
+      { checkout, diff: beforeShift },
+    );
+    const secondRun = await validateModelReviewOutput(
+      output([
+        finding({
+          range: { start: 4, end: 5, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+        finding({
+          range: { start: 7, end: 8, side: "RIGHT" },
+          anchor: "targetAnchor();",
+        }),
+      ]),
+      { checkout, diff: afterShift },
+    );
+    const threads = firstRun.findings.map(({ fingerprint, fingerprintAliases }, index) => ({
+      id: `THREAD_${index + 1}`,
+      fingerprint,
+      aliases: fingerprintAliases!,
+    }));
+
+    for (const findings of [secondRun.findings, secondRun.findings.toReversed()]) {
+      for (const ownedOpenThreads of [threads, threads.toReversed()]) {
+        assert.deepEqual(
+          planFindingReconciliation(findings, {
+            activeFingerprints: firstRun.findings.map(({ fingerprint }) => fingerprint),
+            ownedOpenThreads,
+            runHeadShas: ["1".repeat(40)],
+          }),
+          {
+            netNewFindings: [],
+            obsoleteThreadIds: [],
+            currentBodyFindings: [],
+            bodyStateChanged: false,
+          },
+        );
+      }
+    }
+  });
+
   it("keeps Unicode case-fold lookalikes as distinct exact anchors", async () => {
     const diff = `diff --git a/source.ts b/source.ts
 index 1111111..2222222 100644
@@ -583,10 +968,9 @@ index 1111111..2222222 100644
     assert.notEqual(result.findings[0]?.fingerprint, result.findings[1]?.fingerprint);
   });
 
-  it("uses a fixed structured fingerprint tuple with exact Unicode identity", () => {
+  it("uses a stable finding-identity fingerprint matrix across repeated reviews", () => {
     const base = finding() as unknown as ModelFindingV1;
     const fingerprint = findingFingerprint(base);
-    assert.equal(fingerprint, "8e8e6446b4a836e283ce962e682aa449d035fd966cf82ee4c4caf462902210be");
     assert.equal(
       findingFingerprint({
         anchor: base.anchor,
@@ -598,18 +982,24 @@ index 1111111..2222222 100644
       }),
       fingerprint,
     );
-    assert.notEqual(findingFingerprint({ ...base, path: "new-name.ts" }), fingerprint);
-    assert.notEqual(
+    assert.equal(findingFingerprint({ ...base }), fingerprint, "identical finding");
+    assert.equal(
       findingFingerprint({
         ...base,
-        range: { start: 2, end: 2, side: "RIGHT" },
+        range: { start: 20, end: 21, side: "LEFT" },
       }),
       fingerprint,
+      "moved finding",
     );
+    assert.equal(
+      findingFingerprint({ ...base, fixAction: "propagate" }),
+      fingerprint,
+      "changed remediation for the same defect",
+    );
+    assert.notEqual(findingFingerprint({ ...base, path: "new-name.ts" }), fingerprint);
     for (const changed of [
       { defectKind: "correctness" },
       { impactKind: "incorrect-result" },
-      { fixAction: "guard" },
       { anchor: "Const" },
       { anchor: "Straße" },
       { anchor: "STRASSE" },

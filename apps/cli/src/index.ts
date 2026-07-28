@@ -67,10 +67,17 @@ export {
   createReviewPublication,
   renderFileFinding,
   renderInlineFinding,
+  renderRunMarker,
   type GitHubInlineReviewComment,
   type GitHubReviewPayload,
   type ReviewPublication,
 } from "./review/publication.js";
+export {
+  planFindingReconciliation,
+  type FindingReconciliationPlan,
+  type OwnedFindingThread,
+  type PriorReviewState,
+} from "./review/reconciliation.js";
 export {
   assertPullRequestEligible,
   parsePullRequestUrl,

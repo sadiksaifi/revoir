@@ -8,14 +8,25 @@ import type {
   PullRequestRepository,
   PullRequestSnapshot,
 } from "./pull-request.js";
+import {
+  bodyStateFindingIdentities,
+  findingMarkerIdentities,
+  runMarkerHeadShas,
+  type PriorFindingIdentity,
+  type PriorReviewState,
+} from "./reconciliation.js";
 
-export type ReviewReaction = "eyes" | "+1";
+export type ReviewReaction = "eyes" | "+1" | "confused";
 
 export interface GitHubPendingReview {
   readonly id: number;
   delete(signal: AbortSignal): Promise<void>;
   submit(signal: AbortSignal, reconciliationSignal: AbortSignal): Promise<void>;
 }
+
+export type ReviewThreadResolution =
+  | { readonly status: "resolved" }
+  | { readonly status: "stale"; readonly currentSha: string };
 
 export interface GitHubReviewSession {
   readonly installationToken: string;
@@ -26,6 +37,16 @@ export interface GitHubReviewSession {
   getHeadSha(reference: PullRequestReference, signal: AbortSignal): Promise<string>;
   removeOwnCompletionReaction(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
   removeOwnPendingReview(reference: PullRequestReference, signal: AbortSignal): Promise<void>;
+  getPriorReviewState(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<PriorReviewState>;
+  resolveReviewThreads(
+    reference: PullRequestReference,
+    threadIds: readonly string[],
+    expectedHeadSha: string,
+    signal: AbortSignal,
+  ): Promise<ReviewThreadResolution>;
   removeOwnReaction(
     reference: PullRequestReference,
     reaction: ReviewReaction,
@@ -92,6 +113,7 @@ interface GitHubReactionResponse {
 }
 
 interface GitHubReviewResponse {
+  body: string;
   id: number;
   state: string;
   userLogin: string;
@@ -302,6 +324,14 @@ function parseReview(value: unknown): GitHubReviewResponse {
   const review = record(value, "review");
   const user = record(review.user, "review user");
   return {
+    body:
+      review.body === null || review.body === undefined
+        ? ""
+        : typeof review.body === "string"
+          ? review.body
+          : (() => {
+              throw new Error("GitHub returned an invalid review body.");
+            })(),
     id: positiveInteger(review.id, "review id"),
     state: string(review.state, "review state"),
     userLogin: string(user.login, "review user login"),
@@ -314,6 +344,8 @@ class InstallationSession implements GitHubReviewSession {
   readonly #botLogin: string;
   readonly #fetch: FetchLike;
   readonly #pendingFenceAttemptMs: number;
+  #ownedOpenThreadIds = new Set<string>();
+  #priorRunWasClean = false;
 
   constructor(
     installationToken: string,
@@ -366,7 +398,238 @@ class InstallationSession implements GitHubReviewSession {
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<void> {
-    await this.removeOwnReaction(reference, "+1", signal);
+    const removed = settledValues(
+      await Promise.allSettled([
+        this.#removeOwnReaction(reference, "+1", signal),
+        this.#removeOwnReaction(reference, "confused", signal),
+      ]),
+      "GitHub completion reaction reconciliation failed.",
+    );
+    this.#priorRunWasClean = removed[0]!;
+  }
+
+  async #graphql(
+    query: string,
+    variables: Record<string, unknown>,
+    action: string,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const response = await this.#request("/graphql", signal, {
+      method: "POST",
+      body: JSON.stringify({ query, variables }),
+      headers: { "Content-Type": "application/json" },
+    });
+    const envelope = record(await responseJson(response, action, signal), action);
+    if (Array.isArray(envelope.errors) && envelope.errors.length > 0) {
+      throw new Error(`GitHub ${action} returned GraphQL errors.`);
+    }
+    return record(envelope.data, `${action} data`);
+  }
+
+  async getPriorReviewState(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<PriorReviewState> {
+    const activeFingerprints = new Set<string>();
+    const runHeadShas = new Set<string>();
+    let latestBodyFindings: readonly PriorFindingIdentity[] = [];
+    let bodyStateMigrationRequired = false;
+    let foundExplicitBodyState = false;
+    let reviewPage = 1;
+    for (;;) {
+      throwIfAborted(signal);
+      // Review pages are part of one authoritative snapshot and remain ordered.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await this.#request(
+        `/repos/${reference.owner}/${reference.repository}/pulls/${reference.number}/reviews?per_page=100&page=${reviewPage}`,
+        signal,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      const value = await responseJson(response, "prior review lookup", signal);
+      if (!Array.isArray(value)) {
+        throw new Error("GitHub prior review lookup returned an invalid response.");
+      }
+      const reviews = value.map((item) => parseReview(item));
+      for (const review of reviews) {
+        if (
+          review.state.toUpperCase() !== "PENDING" &&
+          review.userLogin.toLowerCase() === this.#botLogin
+        ) {
+          const reviewHeadShas = runMarkerHeadShas(review.body);
+          for (const headSha of reviewHeadShas) {
+            runHeadShas.add(headSha);
+          }
+          const bodyState = bodyStateFindingIdentities(review.body);
+          if (bodyState !== undefined) {
+            latestBodyFindings = bodyState;
+            bodyStateMigrationRequired = false;
+            foundExplicitBodyState = true;
+          } else if (!foundExplicitBodyState) {
+            latestBodyFindings = findingMarkerIdentities(review.body);
+            bodyStateMigrationRequired = true;
+          }
+        }
+      }
+      if (reviews.length < 100) {
+        break;
+      }
+      reviewPage += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
+    if (!this.#priorRunWasClean) {
+      for (const finding of latestBodyFindings) {
+        activeFingerprints.add(finding.fingerprint);
+      }
+    } else {
+      latestBodyFindings = [];
+      bodyStateMigrationRequired = false;
+    }
+
+    const ownedOpenThreads: Array<{
+      id: string;
+      fingerprint: string;
+      aliases?: readonly string[];
+    }> = [];
+    let after: string | null = null;
+    for (;;) {
+      // GraphQL exposes the review-thread node IDs required by resolveReviewThread.
+      // eslint-disable-next-line no-await-in-loop
+      const data = await this.#graphql(
+        `query RevoirReviewThreads($owner: String!, $repository: String!, $number: Int!, $after: String) {
+          repository(owner: $owner, name: $repository) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 100, after: $after) {
+                nodes {
+                  id
+                  isResolved
+                  comments(first: 1) {
+                    nodes {
+                      body
+                      author { login }
+                    }
+                  }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }`,
+        {
+          owner: reference.owner,
+          repository: reference.repository,
+          number: reference.number,
+          after,
+        },
+        "review thread lookup",
+        signal,
+      );
+      const repositoryValue = record(data.repository, "review thread repository");
+      const pullRequest = record(repositoryValue.pullRequest, "review thread pull request");
+      const threads = record(pullRequest.reviewThreads, "review threads");
+      if (!Array.isArray(threads.nodes)) {
+        throw new Error("GitHub review thread lookup returned invalid nodes.");
+      }
+      for (const candidate of threads.nodes) {
+        const thread = record(candidate, "review thread");
+        const id = string(thread.id, "review thread id");
+        if (typeof thread.isResolved !== "boolean") {
+          throw new Error("GitHub returned an invalid review thread resolution state.");
+        }
+        const comments = record(thread.comments, "review thread comments");
+        if (!Array.isArray(comments.nodes)) {
+          throw new Error("GitHub returned invalid review thread comments.");
+        }
+        const firstComment = comments.nodes[0];
+        if (firstComment === undefined) {
+          continue;
+        }
+        const comment = record(firstComment, "review thread opening comment");
+        const author = record(comment.author, "review thread opening author");
+        const authorLogin = string(author.login, "review thread opening author login");
+        const body = string(comment.body, "review thread opening comment body");
+        const findingIdentities = findingMarkerIdentities(body);
+        if (
+          !thread.isResolved &&
+          authorLogin.toLowerCase() === this.#botLogin &&
+          findingIdentities.length === 1
+        ) {
+          const findingIdentity = findingIdentities[0]!;
+          activeFingerprints.add(findingIdentity.fingerprint);
+          ownedOpenThreads.push({
+            id,
+            fingerprint: findingIdentity.fingerprint,
+            ...(findingIdentity.aliases === undefined ? {} : { aliases: findingIdentity.aliases }),
+          });
+        }
+      }
+      const pageInfo = record(threads.pageInfo, "review thread page info");
+      if (typeof pageInfo.hasNextPage !== "boolean") {
+        throw new Error("GitHub returned invalid review thread pagination.");
+      }
+      if (!pageInfo.hasNextPage) {
+        break;
+      }
+      after = string(pageInfo.endCursor, "review thread end cursor");
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
+
+    const sortedThreads = ownedOpenThreads.toSorted((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+    this.#ownedOpenThreadIds = new Set(sortedThreads.map(({ id }) => id));
+    return {
+      activeFingerprints: [...activeFingerprints].toSorted(),
+      bodyFindings: latestBodyFindings,
+      ...(bodyStateMigrationRequired ? { bodyStateMigrationRequired: true } : {}),
+      ownedOpenThreads: sortedThreads,
+      runHeadShas: [...runHeadShas].toSorted(),
+    };
+  }
+
+  async resolveReviewThreads(
+    reference: PullRequestReference,
+    threadIds: readonly string[],
+    expectedHeadSha: string,
+    signal: AbortSignal,
+  ): Promise<ReviewThreadResolution> {
+    const uniqueThreadIds = [...new Set(threadIds)].toSorted();
+    for (const threadId of uniqueThreadIds) {
+      if (!this.#ownedOpenThreadIds.has(threadId)) {
+        throw new Error("Refusing to resolve a review thread not owned by this GitHub App.");
+      }
+    }
+    for (const threadId of uniqueThreadIds) {
+      // Each mutation must still belong to the reviewed head.
+      // eslint-disable-next-line no-await-in-loop
+      const currentSha = await this.getHeadSha(reference, signal);
+      if (currentSha !== expectedHeadSha) {
+        return { status: "stale", currentSha };
+      }
+      // Resolution remains ordered so a partial failure has deterministic remote state.
+      // eslint-disable-next-line no-await-in-loop
+      const data = await this.#graphql(
+        `mutation RevoirResolveThread($threadId: ID!) {
+          resolveReviewThread(input: {threadId: $threadId}) {
+            thread { id isResolved }
+          }
+        }`,
+        { threadId },
+        "review thread resolution",
+        signal,
+      );
+      const result = record(data.resolveReviewThread, "review thread resolution result");
+      const thread = record(result.thread, "resolved review thread");
+      if (
+        string(thread.id, "resolved review thread id") !== threadId ||
+        thread.isResolved !== true
+      ) {
+        throw new Error("GitHub did not confirm review thread resolution.");
+      }
+      this.#ownedOpenThreadIds.delete(threadId);
+    }
+    return { status: "resolved" };
   }
 
   async removeOwnPendingReview(
@@ -414,11 +677,11 @@ class InstallationSession implements GitHubReviewSession {
     );
   }
 
-  async removeOwnReaction(
+  async #removeOwnReaction(
     reference: PullRequestReference,
     reaction: ReviewReaction,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const ownedReactionIds = new Set<number>();
     let page = 1;
     for (;;) {
@@ -459,6 +722,15 @@ class InstallationSession implements GitHubReviewSession {
       ),
       "GitHub reaction reconciliation failed.",
     );
+    return ownedReactionIds.size > 0;
+  }
+
+  async removeOwnReaction(
+    reference: PullRequestReference,
+    reaction: ReviewReaction,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.#removeOwnReaction(reference, reaction, signal);
   }
 
   async addReaction(

@@ -26,6 +26,7 @@ export {
 
 export interface ReviewFindingV1 extends FindingV1 {
   attachment: FindingAttachment;
+  fingerprintAliases?: readonly string[];
 }
 
 export type FindingAttachment =
@@ -224,6 +225,26 @@ export function findingFingerprint(
     ModelFindingV1,
     "path" | "range" | "defectKind" | "impactKind" | "fixAction" | "anchor"
   >,
+  occurrenceContext?: string,
+): string {
+  const identityParts: unknown[] = [
+    FINDING_CONTRACT_VERSION,
+    finding.path,
+    finding.defectKind,
+    finding.impactKind,
+    finding.anchor,
+  ];
+  if (occurrenceContext !== undefined) {
+    identityParts.push(occurrenceContext);
+  }
+  return createHash("sha256").update(JSON.stringify(identityParts)).digest("hex");
+}
+
+export function prerequisiteFindingFingerprint(
+  finding: Pick<
+    ModelFindingV1,
+    "path" | "range" | "defectKind" | "impactKind" | "fixAction" | "anchor"
+  >,
 ): string {
   const identity = JSON.stringify([
     FINDING_CONTRACT_VERSION,
@@ -237,6 +258,53 @@ export function findingFingerprint(
     finding.anchor,
   ]);
   return createHash("sha256").update(identity).digest("hex");
+}
+
+function anchorOccurrenceContext(file: DiffFile, finding: ModelFindingV1): string | undefined {
+  if (finding.range === null) {
+    return undefined;
+  }
+  const changedLines = [...file.changedLineText.entries()]
+    .flatMap(([key, text]) => {
+      const [side, lineText] = key.split(":");
+      const line = Number(lineText);
+      return side === finding.range!.side && Number.isInteger(line) ? [{ line, text }] : [];
+    })
+    .toSorted((left, right) => left.line - right.line);
+  const occurrence = changedLines.findIndex(
+    ({ line, text }) =>
+      line >= finding.range!.start && line <= finding.range!.end && text.includes(finding.anchor),
+  );
+  if (occurrence < 0) {
+    return undefined;
+  }
+  const before = changedLines
+    .slice(0, occurrence)
+    .findLast(({ text }) => !text.includes(finding.anchor))?.text;
+  const after = changedLines
+    .slice(occurrence + 1)
+    .find(({ text }) => !text.includes(finding.anchor))?.text;
+  if (before === undefined && after === undefined) {
+    return undefined;
+  }
+  return JSON.stringify([before ?? null, after ?? null]);
+}
+
+function occurrenceKey(finding: ModelFindingV1): string {
+  return JSON.stringify([
+    finding.range?.start ?? null,
+    finding.range?.end ?? null,
+    finding.range?.side ?? null,
+  ]);
+}
+
+interface ValidatedCandidate {
+  readonly index: number;
+  readonly finding: ModelFindingV1;
+  readonly attachment: FindingAttachment;
+  readonly baseFingerprint: string;
+  readonly contextFingerprint?: string;
+  readonly occurrenceKey: string;
 }
 
 function attachment(file: DiffFile, finding: ModelFindingV1): FindingAttachment {
@@ -269,9 +337,8 @@ export async function validateModelReviewOutput(
   }
 
   const diff = parseGitDiff(options.diff);
-  const findings: ReviewFindingV1[] = [];
   const diagnostics: FindingDiagnostic[] = [];
-  const fingerprints = new Set<string>();
+  const candidates: ValidatedCandidate[] = [];
   for (const [index, candidate] of envelope.findings.entries()) {
     try {
       const modelFinding = validateFindingSemantics(parseModelFinding(candidate, index), index);
@@ -287,21 +354,16 @@ export async function validateModelReviewOutput(
         throw new Error("range is not a contiguous changed-line range in the reviewed diff.");
       }
       validateTechnicalAnchor(modelFinding, file);
-      const fingerprint = findingFingerprint(modelFinding);
-      if (fingerprints.has(fingerprint)) {
-        diagnostics.push({
-          index,
-          code: "duplicate",
-          message: `findings[${index}] duplicates an earlier stable fingerprint.`,
-        });
-        continue;
-      }
-      fingerprints.add(fingerprint);
-      findings.push({
-        version: FINDING_CONTRACT_VERSION,
-        fingerprint,
-        ...modelFinding,
+      const context = anchorOccurrenceContext(file, modelFinding);
+      candidates.push({
+        index,
+        finding: modelFinding,
         attachment: attachment(file, modelFinding),
+        baseFingerprint: findingFingerprint(modelFinding),
+        ...(context === undefined
+          ? {}
+          : { contextFingerprint: findingFingerprint(modelFinding, context) }),
+        occurrenceKey: occurrenceKey(modelFinding),
       });
     } catch (error) {
       diagnostics.push({
@@ -310,6 +372,48 @@ export async function validateModelReviewOutput(
         message: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  const occurrenceKeysByFingerprint = new Map<string, Set<string>>();
+  for (const candidate of candidates) {
+    const keys = occurrenceKeysByFingerprint.get(candidate.baseFingerprint) ?? new Set<string>();
+    keys.add(candidate.occurrenceKey);
+    occurrenceKeysByFingerprint.set(candidate.baseFingerprint, keys);
+  }
+
+  const findings: ReviewFindingV1[] = [];
+  const seenOccurrences = new Set<string>();
+  for (const candidate of candidates) {
+    const occurrenceIdentity = `${candidate.baseFingerprint}:${candidate.occurrenceKey}`;
+    if (seenOccurrences.has(occurrenceIdentity)) {
+      diagnostics.push({
+        index: candidate.index,
+        code: "duplicate",
+        message: `findings[${candidate.index}] duplicates an earlier stable fingerprint.`,
+      });
+      continue;
+    }
+    seenOccurrences.add(occurrenceIdentity);
+    const hasPeerOccurrences =
+      (occurrenceKeysByFingerprint.get(candidate.baseFingerprint)?.size ?? 0) > 1;
+    const fingerprint = hasPeerOccurrences
+      ? findingFingerprint(candidate.finding, candidate.occurrenceKey)
+      : candidate.baseFingerprint;
+    const fingerprintAliases = new Set([
+      candidate.baseFingerprint,
+      prerequisiteFindingFingerprint(candidate.finding),
+      ...(candidate.contextFingerprint === undefined ? [] : [candidate.contextFingerprint]),
+    ]);
+    fingerprintAliases.delete(fingerprint);
+    findings.push({
+      version: FINDING_CONTRACT_VERSION,
+      fingerprint,
+      ...(fingerprintAliases.size === 0
+        ? {}
+        : { fingerprintAliases: [...fingerprintAliases].toSorted() }),
+      ...candidate.finding,
+      attachment: candidate.attachment,
+    });
   }
 
   if (envelope.findings.length > 0 && findings.length === 0) {
