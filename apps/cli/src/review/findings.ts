@@ -47,6 +47,10 @@ const SPECULATIVE =
   /\b(?:apparently|appears?|could|guess|likely|may|maybe|might|perhaps|possibly|potentially|seems?)\b/iu;
 const MERGE_OR_SEVERITY_BOILERPLATE =
   /\b(?:blocks? merge|do not merge|merge (?:instruction|this)|must not merge|p[0-3]\s+means|severity\s+(?:is|means))\b/iu;
+const PRAISE_OR_SUMMARY =
+  /(?:\b(?:excellent|good|great|nice|solid)\s+(?:approach|change|implementation|job|work)\b|\blooks?\s+good\b|\bwell[ -]done\b|\bthe rest of (?:the )?(?:change|code|implementation)\b|^(?:(?:general|overall)\s+)?(?:overview|summary)\b|\boverall(?:,|\s+(?:the|this|change|code|implementation)))/iu;
+const MARKDOWN =
+  /(?:`|\[[^\]\r\n]+\]\([^)\r\n]+\)|\*\*|__|^(?:\s{0,3}#{1,6}|\s{0,3}>|\s*(?:[-+*]|\d+\.))\s)/u;
 const ACTION_VERB =
   /^(?:add|await|bound|call|cancel|check|clone|close|compare|compute|convert|create|decode|defer|delete|derive|discard|encode|ensure|escape|expose|filter|forward|guard|handle|include|initialize|limit|map|move|parse|pass|preserve|propagate|publish|read|reconcile|record|refactor|reject|release|remove|rename|replace|resolve|restore|retry|return|sanitize|serialize|set|skip|sort|stop|submit|throw|update|use|validate|verify|wrap|write)\b/iu;
 
@@ -88,6 +92,20 @@ function validateFindingProse(finding: ModelFindingV1, index: number): ModelFind
     )
   ) {
     throw new Error(`${path} contains merge or severity boilerplate.`);
+  }
+  if (
+    [finding.title, finding.issue, finding.impact, finding.evidence, finding.fixDirection].some(
+      (text) => PRAISE_OR_SUMMARY.test(text),
+    )
+  ) {
+    throw new Error(`${path} contains praise or general-summary prose.`);
+  }
+  if (
+    [finding.title, finding.issue, finding.impact, finding.evidence, finding.fixDirection].some(
+      (text) => MARKDOWN.test(text),
+    )
+  ) {
+    throw new Error(`${path} contains Markdown instead of concise finding prose.`);
   }
   return finding;
 }

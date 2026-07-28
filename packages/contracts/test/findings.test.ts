@@ -113,11 +113,15 @@ describe("finding contract v1", () => {
     }
   });
 
-  it("rejects empty, untrimmed, multiline-title, and wrong-type fields", () => {
+  it("rejects empty, untrimmed, multiline, and wrong-type fields", () => {
     const cases = [
       { ...finding(), title: "" },
       { ...finding(), title: " padded " },
       { ...finding(), title: "two\nlines" },
+      { ...finding(), issue: "two\nlines" },
+      { ...finding(), impact: "two\nlines" },
+      { ...finding(), evidence: "two\nlines" },
+      { ...finding(), fixDirection: "two\nlines" },
       { ...finding(), evidence: null },
       { ...finding(), path: "source\u0000.ts" },
     ];

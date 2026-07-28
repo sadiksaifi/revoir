@@ -11,6 +11,7 @@ import {
   findingFingerprint,
   validateModelReviewOutput,
 } from "../src/review/findings.js";
+import { createReviewPublication } from "../src/review/publication.js";
 
 const DIFF = `diff --git a/source.ts b/source.ts
 index 1111111..2222222 100644
@@ -307,6 +308,50 @@ describe("finding validation", () => {
     );
 
     assert.equal(result.findings.length, 1);
+  });
+
+  it("keeps praise, summaries, and Markdown out of publication", async () => {
+    const prohibited = [
+      "Great work overall",
+      "## Summary\nThe rest of the change looks good.",
+      "The [changed call](https://example.test/private) omits the required signal.",
+      "Pass the active cancellation signal.\n\n- Add a regression test.",
+    ];
+    const result = await validateModelReviewOutput(
+      output([
+        finding(),
+        finding({
+          title: prohibited[0],
+          issue: "The first added branch does not forward cancellation.",
+        }),
+        finding({
+          issue: prohibited[1],
+        }),
+        finding({
+          issue: "The second added branch does not forward cancellation.",
+          evidence: prohibited[2],
+        }),
+        finding({
+          issue: "The third added branch does not forward cancellation.",
+          fixDirection: prohibited[3],
+        }),
+      ]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.equal(result.findings.length, 1);
+    assert.equal(result.diagnostics.length, prohibited.length);
+    const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
+    for (const modelControlledText of prohibited) {
+      assert.equal(publication.includes(modelControlledText), false);
+      assert.equal(
+        result.diagnostics
+          .map((diagnostic) => diagnostic.message)
+          .join("\n")
+          .includes(modelControlledText),
+        false,
+      );
+    }
   });
 
   it("publishes valid candidates from mixed output and reports safe diagnostics", async () => {

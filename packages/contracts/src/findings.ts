@@ -146,9 +146,11 @@ export function parseModelFinding(value: unknown, index: number): ModelFindingV1
     title: boundedString(finding.title, `${path}.title`, 120, { singleLine: true }),
     path: boundedString(finding.path, `${path}.path`, 1024, { singleLine: true }),
     range: parseRange(finding.range, `${path}.range`),
-    issue: boundedString(finding.issue, `${path}.issue`, 2_000),
-    impact: boundedString(finding.impact, `${path}.impact`, 2_000),
-    evidence: boundedString(finding.evidence, `${path}.evidence`, 4_000),
-    fixDirection: boundedString(finding.fixDirection, `${path}.fixDirection`, 1_000),
+    issue: boundedString(finding.issue, `${path}.issue`, 2_000, { singleLine: true }),
+    impact: boundedString(finding.impact, `${path}.impact`, 2_000, { singleLine: true }),
+    evidence: boundedString(finding.evidence, `${path}.evidence`, 4_000, { singleLine: true }),
+    fixDirection: boundedString(finding.fixDirection, `${path}.fixDirection`, 1_000, {
+      singleLine: true,
+    }),
   };
 }
