@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, link, mkdtemp, readFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -669,6 +669,74 @@ describe("clean review orchestrator", () => {
     });
     assert.equal(releases, 1);
     assert.deepEqual(timedOut.events, []);
+  });
+
+  it("retains a lock committed after timeout and retries release until it is gone", async () => {
+    const root = await mkdtemp(join(tmpdir(), "revoir-late-lock-test-"));
+    const stateDirectory = join(root, "state", "revoir");
+    const lockPath = join(stateDirectory, "manual-review.lock");
+    let linkCommitted = false;
+    let resumeLink: (() => void) | undefined;
+    const linkGate = new Promise<void>((resolve) => {
+      resumeLink = resolve;
+    });
+    let releaseReads = 0;
+    let releaseUnlinks = 0;
+    const timedOut = harness({
+      reviewMs: 50,
+      lock: new FileReviewLock(stateDirectory, {
+        async link(existingPath, newPath) {
+          await link(existingPath, newPath);
+          if (newPath === lockPath) {
+            linkCommitted = true;
+            await linkGate;
+          }
+        },
+        async readFile(path, encoding) {
+          if (path === lockPath) {
+            releaseReads += 1;
+            if (releaseReads === 1) {
+              throw new Error("transient late release read failure");
+            }
+          }
+          return readFile(path, encoding);
+        },
+        async unlink(path) {
+          if (path === lockPath) {
+            releaseUnlinks += 1;
+            if (releaseUnlinks === 1) {
+              throw new Error("transient late release unlink failure");
+            }
+          }
+          await unlink(path);
+        },
+      }),
+    });
+
+    try {
+      const foreground = timedOut.orchestrator.review(reference).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await waitFor(() => linkCommitted, "lock did not reach the committed boundary");
+      const failure = await foreground;
+
+      assert.ok(failure instanceof ReviewTimeoutError);
+      assert.deepEqual(timedOut.events, []);
+      assert.equal(await fileIsMissing(lockPath), false);
+
+      resumeLink?.();
+      await waitFor(
+        () => fileIsMissing(lockPath),
+        "late committed lock was not released after transient failures",
+      );
+      assert.equal(releaseReads, 3);
+      assert.equal(releaseUnlinks, 2);
+      assert.deepEqual(timedOut.events, []);
+    } finally {
+      resumeLink?.();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("times out non-settling session creation, cleans artifacts, and disposes a late session", async () => {

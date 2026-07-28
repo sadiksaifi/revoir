@@ -22,7 +22,9 @@ interface StaleClaim {
 
 export interface FileReviewLockHooks {
   afterStaleClaim?(): Promise<void>;
+  beforeLockLink?(): Promise<void>;
   inspectProcess?(pid: number, signal: AbortSignal): Promise<ProcessIdentity>;
+  link?(existingPath: string, newPath: string): Promise<void>;
   readFile?(path: string, encoding: BufferEncoding): Promise<string>;
   unlink?(path: string): Promise<void>;
 }
@@ -185,6 +187,7 @@ export class FileReviewLock implements ReviewLock {
   readonly #lockPath: string;
   readonly #hooks: FileReviewLockHooks;
   readonly #inspectProcess: (pid: number, signal: AbortSignal) => Promise<ProcessIdentity>;
+  readonly #link: (existingPath: string, newPath: string) => Promise<void>;
   readonly #readFile: (path: string, encoding: BufferEncoding) => Promise<string>;
   readonly #unlink: (path: string) => Promise<void>;
 
@@ -192,6 +195,7 @@ export class FileReviewLock implements ReviewLock {
     this.#lockPath = join(stateDirectory, LOCK_FILE);
     this.#hooks = hooks;
     this.#inspectProcess = hooks.inspectProcess ?? inspectProcess;
+    this.#link = hooks.link ?? link;
     this.#readFile = hooks.readFile ?? readFile;
     this.#unlink = hooks.unlink ?? unlink;
   }
@@ -221,14 +225,11 @@ export class FileReviewLock implements ReviewLock {
       } finally {
         await handle.close();
       }
-      await link(candidatePath, this.#lockPath);
+      await this.#hooks.beforeLockLink?.();
+      throwIfAborted(signal);
+      await this.#link(candidatePath, this.#lockPath);
       await unlink(candidatePath).catch(() => {});
-      const lease = this.#lease(owner);
-      if (signal.aborted) {
-        await lease.release();
-        throw abortReason(signal);
-      }
-      return lease;
+      return this.#lease(owner);
     } catch (error) {
       await unlink(candidatePath).catch(() => {});
       if (!isFileSystemError(error, "EEXIST")) {
@@ -346,7 +347,7 @@ export class FileReviewLock implements ReviewLock {
         try {
           // Claim generations must be inspected and created in order.
           // eslint-disable-next-line no-await-in-loop
-          await link(candidatePath, claimPath);
+          await this.#link(candidatePath, claimPath);
           paths.push(claimPath);
           return { paths };
         } catch (error) {

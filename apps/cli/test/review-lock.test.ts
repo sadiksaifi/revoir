@@ -413,13 +413,26 @@ describe("manual review process lock", () => {
     await assert.rejects(() => readFile(lockPath, "utf8"), { code: "ENOENT" });
   });
 
-  it("does not remove a replacement owner while releasing a lease", async () => {
+  it("does not remove a replacement owner while retrying a failed lease release", async () => {
     const stateDirectory = await temporaryStateDirectory();
     const lockPath = join(stateDirectory, "manual-review.lock");
-    const lease = await deterministicLock(
-      stateDirectory,
-      new Map([[process.pid, { kind: "alive", processBirth: liveProcessBirth }]]),
-    ).acquire();
+    let releasePhase = false;
+    let readFailures = 1;
+    const lease = await new FileReviewLock(stateDirectory, {
+      inspectProcess: inspectProcesses(
+        new Map([[process.pid, { kind: "alive", processBirth: liveProcessBirth }]]),
+      ),
+      async readFile(path, encoding) {
+        if (releasePhase && path === lockPath && readFailures > 0) {
+          readFailures -= 1;
+          throw new Error("injected release read failure");
+        }
+        return readFile(path, encoding);
+      },
+    }).acquire();
+    releasePhase = true;
+    await assert.rejects(() => lease.release(), /injected release read failure/u);
+
     const replacement = {
       pid: process.pid,
       owner: "replacement-owner",
@@ -428,8 +441,70 @@ describe("manual review process lock", () => {
     await writeFile(lockPath, `${JSON.stringify(replacement)}\n`, { mode: 0o600 });
 
     await lease.release();
+    await lease.release();
 
     assert.deepEqual(JSON.parse(await readFile(lockPath, "utf8")), replacement);
+  });
+
+  it("returns a retryable lease when cancellation arrives immediately after linking", async () => {
+    const stateDirectory = await temporaryStateDirectory();
+    const lockPath = join(stateDirectory, "manual-review.lock");
+    const cancellation = new Error("cancel after lock commit");
+    const abortController = new AbortController();
+    let linked = false;
+    const lock = new FileReviewLock(stateDirectory, {
+      inspectProcess: inspectProcesses(
+        new Map([[process.pid, { kind: "alive", processBirth: liveProcessBirth }]]),
+      ),
+      async link(existingPath, newPath) {
+        await link(existingPath, newPath);
+        if (newPath === lockPath) {
+          linked = true;
+          abortController.abort(cancellation);
+        }
+      },
+    });
+
+    const lease = await lock.acquire(abortController.signal);
+
+    assert.equal(linked, true);
+    assert.equal(abortController.signal.aborted, true);
+    const owner = JSON.parse(await readFile(lockPath, "utf8")) as Record<string, unknown>;
+    assert.equal(owner.pid, process.pid);
+    assert.equal(typeof owner.owner, "string");
+    assert.equal(owner.processBirth, liveProcessBirth);
+    await lease.release();
+    await assert.rejects(() => readFile(lockPath, "utf8"), { code: "ENOENT" });
+  });
+
+  it("rejects cancellation before linking and cleans the private candidate", async () => {
+    const stateDirectory = await temporaryStateDirectory();
+    const cancellation = new Error("cancel before lock commit");
+    const abortController = new AbortController();
+    const beforeLink = deferred();
+    const resumeLink = deferred();
+    const lock = new FileReviewLock(stateDirectory, {
+      inspectProcess: inspectProcesses(
+        new Map([[process.pid, { kind: "alive", processBirth: liveProcessBirth }]]),
+      ),
+      async beforeLockLink() {
+        beforeLink.resolve();
+        await resumeLink.promise;
+      },
+    });
+
+    const acquisition = lock.acquire(abortController.signal);
+    await Promise.race([
+      beforeLink.promise,
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("lock did not reach the pre-link boundary")), 100);
+      }),
+    ]);
+    abortController.abort(cancellation);
+    resumeLink.resolve();
+
+    await assert.rejects(acquisition, cancellation);
+    assert.deepEqual(await readdir(stateDirectory), []);
   });
 
   it("aborts a non-settling process probe without leaving a lock behind", async () => {

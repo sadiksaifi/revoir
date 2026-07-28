@@ -165,6 +165,109 @@ describe("GitHub App review gateway", () => {
     assert.ok(requests.every((request) => request.init?.signal === abortController.signal));
   });
 
+  it("treats only deleted and already-absent reaction responses as successful", async () => {
+    const statuses = [200, 201, 202, 206, 401, 403, 429, 500];
+    let deleteAttempt = 0;
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.includes("/reactions/") && init?.method === "DELETE") {
+        const status = statuses[deleteAttempt];
+        deleteAttempt += 1;
+        assert.ok(status !== undefined);
+        return status === 204
+          ? new Response(null, { status })
+          : new Response(JSON.stringify({ message: "delete failed" }), { status });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    for (const status of statuses) {
+      // Every unexpected status, including otherwise-successful 2xx responses, is a failure.
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(
+        () => session.deleteReaction(reference, 91, new AbortController().signal),
+        new RegExp(`HTTP ${status}`, "u"),
+      );
+    }
+  });
+
+  it("accepts a missing reaction directly and after a lost successful deletion response", async () => {
+    let directMissing = true;
+    let retryAttempts = 0;
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/reactions/91") && init?.method === "DELETE") {
+        assert.equal(directMissing, true);
+        directMissing = false;
+        return json({ message: "Not Found" }, 404);
+      }
+      if (url.endsWith("/reactions/92") && init?.method === "DELETE") {
+        retryAttempts += 1;
+        if (retryAttempts === 1) {
+          throw new Error("network failed after GitHub deleted the reaction");
+        }
+        return json({ message: "Not Found" }, 404);
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    await session.deleteReaction(reference, 91, new AbortController().signal);
+    await assert.rejects(
+      () => session.deleteReaction(reference, 92, new AbortController().signal),
+      /network failed/u,
+    );
+    await session.deleteReaction(reference, 92, new AbortController().signal);
+    assert.equal(retryAttempts, 2);
+  });
+
+  it("accepts a reaction disappearing between reconciliation lookup and deletion", async () => {
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/issues/17/reactions?per_page=100&page=1")) {
+        return json([{ id: 93, content: "eyes", user: { login: "revoir-test[bot]" } }]);
+      }
+      if (url.endsWith("/reactions/93") && init?.method === "DELETE") {
+        return json({ message: "Not Found" }, 404);
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    await session.removeOwnReaction(reference, "eyes", new AbortController().signal);
+  });
+
   it("can reconcile created reactions after invalid JSON and network ambiguity", async () => {
     await Promise.all(
       (["eyes", "+1"] as const).map(async (reaction) => {

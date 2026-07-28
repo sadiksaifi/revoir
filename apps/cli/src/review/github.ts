@@ -369,7 +369,7 @@ class InstallationSession implements GitHubReviewSession {
     const response = await this.#request(`/reactions/${reactionId}`, signal, {
       method: "DELETE",
     });
-    if (!response.ok) {
+    if (response.status !== 204 && response.status !== 404) {
       throw new Error(`GitHub reaction removal failed with HTTP ${response.status}.`);
     }
   }
