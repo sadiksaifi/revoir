@@ -51,8 +51,8 @@ function reviewJob(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function delivery(leaseId: string, body: unknown): QueueDelivery {
-  return { leaseId, body };
+function delivery(leaseId: string, body: unknown, attempt = 1): QueueDelivery {
+  return { leaseId, attempt, body };
 }
 
 describe("automatic queue review runner", () => {
@@ -181,5 +181,40 @@ describe("automatic queue review runner", () => {
 
     assert.equal(pulls, 3);
     assert.equal(maximumActiveReviews, 1);
+  });
+
+  it("retries two operational failures with increasing delay and acknowledges the third", async () => {
+    const deliveries = [1, 2, 3].map((attempt) =>
+      delivery(`lease-${attempt}`, reviewJob(), attempt),
+    );
+    const acknowledgements: string[] = [];
+    const retries: Array<{ leaseId: string; delaySeconds: number }> = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+      },
+      async retry(leaseId, delaySeconds) {
+        retries.push({ leaseId, delaySeconds });
+      },
+    };
+    const reviews: ManualReviewService = {
+      async review() {
+        throw new Error("temporary Pi failure");
+      },
+    };
+    const runner = new QueueReviewRunner(configuration(), queue, reviews);
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+    await runner.consumeOne();
+
+    assert.deepEqual(retries, [
+      { leaseId: "lease-1", delaySeconds: 30 },
+      { leaseId: "lease-2", delaySeconds: 120 },
+    ]);
+    assert.deepEqual(acknowledgements, ["lease-3"]);
   });
 });

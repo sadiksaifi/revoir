@@ -8,6 +8,7 @@ type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Resp
 
 export interface QueueDelivery {
   leaseId: string;
+  attempt: number;
   body: unknown;
 }
 
@@ -23,6 +24,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function requireLeaseId(value: unknown): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error("Cloudflare Queue returned a message without a lease identifier.");
+  }
+  return value;
+}
+
+function requireAttempt(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new Error("Cloudflare Queue returned a message without a valid attempt count.");
+  }
+  return value as number;
+}
+
+function requireRetryDelay(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 24 * 60 * 60) {
+    throw new Error("Cloudflare Queue retry delay must be between 0 and 86400 seconds.");
   }
   return value;
 }
@@ -95,6 +110,7 @@ export class CloudflareQueueClient {
     }
     return {
       leaseId: requireLeaseId(message.lease_id),
+      attempt: requireAttempt(message.attempts),
       body: decodeBody(message),
     };
   }
@@ -111,12 +127,17 @@ export class CloudflareQueueClient {
     requireSettlement(result, "acknowledged");
   }
 
-  async retry(leaseId: string, signal?: AbortSignal): Promise<void> {
+  async retry(leaseId: string, delaySeconds = 0, signal?: AbortSignal): Promise<void> {
     const result = await this.#request(
       "ack",
       {
         acks: [],
-        retries: [{ lease_id: requireLeaseId(leaseId) }],
+        retries: [
+          {
+            lease_id: requireLeaseId(leaseId),
+            delay_seconds: requireRetryDelay(delaySeconds),
+          },
+        ],
       },
       signal,
     );

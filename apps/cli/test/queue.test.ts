@@ -83,6 +83,7 @@ describe("Cloudflare Queue pull client", () => {
     const delivery = await client.pullOne();
     assert.ok(delivery !== undefined);
     assert.equal(delivery.leaseId, "lease-1");
+    assert.equal(delivery.attempt, 1);
     assert.deepEqual(parseReviewJob(delivery.body), reviewJob());
     await client.acknowledge(delivery.leaseId);
 
@@ -128,6 +129,7 @@ describe("Cloudflare Queue pull client", () => {
                     messages: [
                       {
                         body: "not-base64",
+                        attempts: 2,
                         metadata: { "CF-Content-Type": "json" },
                         lease_id: "lease-2",
                       },
@@ -141,12 +143,13 @@ describe("Cloudflare Queue pull client", () => {
 
     assert.deepEqual(await client.pullOne(), {
       leaseId: "lease-2",
+      attempt: 2,
       body: undefined,
     });
-    await client.retry("lease-2");
+    await client.retry("lease-2", 45);
     assert.deepEqual(await requests[1]!.json(), {
       acks: [],
-      retries: [{ lease_id: "lease-2" }],
+      retries: [{ lease_id: "lease-2", delay_seconds: 45 }],
     });
   });
 

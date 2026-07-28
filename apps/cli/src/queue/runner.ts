@@ -9,11 +9,13 @@ import { PullRequestEligibilityError, type PullRequestReference } from "../revie
 import { CloudflareQueueClient, type QueueDelivery } from "./client.js";
 
 const IDLE_POLL_DELAY_MS = 1_000;
+const MAX_OPERATIONAL_ATTEMPTS = 3;
+const OPERATIONAL_RETRY_DELAYS_SECONDS = [30, 120] as const;
 
 export interface QueueClient {
   pullOne(signal?: AbortSignal): Promise<QueueDelivery | undefined>;
   acknowledge(leaseId: string, signal?: AbortSignal): Promise<void>;
-  retry(leaseId: string, signal?: AbortSignal): Promise<void>;
+  retry(leaseId: string, delaySeconds: number, signal?: AbortSignal): Promise<void>;
 }
 
 export type QueueConsumption = "idle" | "settled";
@@ -109,8 +111,14 @@ export class QueueReviewRunner implements QueueRunService {
     } catch (error) {
       if (error instanceof PullRequestEligibilityError) {
         await this.#queue.acknowledge(delivery.leaseId, signal);
+      } else if (delivery.attempt >= MAX_OPERATIONAL_ATTEMPTS) {
+        await this.#queue.acknowledge(delivery.leaseId, signal);
       } else {
-        await this.#queue.retry(delivery.leaseId, signal);
+        await this.#queue.retry(
+          delivery.leaseId,
+          OPERATIONAL_RETRY_DELAYS_SECONDS[delivery.attempt - 1]!,
+          signal,
+        );
       }
     }
     return "settled";
