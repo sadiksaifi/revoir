@@ -416,12 +416,18 @@ describe("Pi review isolation", () => {
     const pidFile = join(root, "pid");
     try {
       await Promise.all([mkdir(checkout), mkdir(temporaryDirectory), mkdir(trustedBin)]);
-      await writeExecutable(
+      await writeFile(
         fakeNode,
-        `const child = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, process.pid + "\\n" + child.pid); setInterval(() => {}, 1_000);`,
+        `#!/bin/sh
+sleep 60 &
+child=$!
+printf '%s\\n%s' "$$" "$child" > ${JSON.stringify(pidFile)}
+wait
+`,
+        { mode: 0o755 },
       );
 
-      const timedOperations = createReviewBashOperations(checkout, 1_000, {
+      const timedOperations = createReviewBashOperations(checkout, 5_000, {
         temporaryDirectory,
         trustedPath: `${trustedBin}:/usr/bin:/bin`,
       });
@@ -431,7 +437,7 @@ describe("Pi review isolation", () => {
             onData() {},
             timeout: 60,
           }),
-        /timeout:1/u,
+        /timeout:5/u,
       );
       const timedPids = (await readFile(pidFile, "utf8"))
         .split("\n")
@@ -451,22 +457,30 @@ describe("Pi review isolation", () => {
         onData() {},
         signal: controller.signal,
       });
-      while (true) {
+      let abortedPids: number[] | undefined;
+      while (abortedPids === undefined) {
         try {
           // eslint-disable-next-line no-await-in-loop
-          await access(pidFile);
-          break;
+          const recordedPids = (await readFile(pidFile, "utf8"))
+            .split("\n")
+            .map((value) => Number.parseInt(value, 10));
+          if (
+            recordedPids.length === 2 &&
+            recordedPids.every((pid) => Number.isSafeInteger(pid) && pid > 0)
+          ) {
+            abortedPids = recordedPids;
+          }
         } catch {
-          // Yield until the directly spawned process records its PID.
+          // The process has not created its PID file yet.
+        }
+        if (abortedPids === undefined) {
+          // Yield until the directly spawned process records both PIDs.
           // eslint-disable-next-line no-await-in-loop
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
       }
       controller.abort();
       await assert.rejects(() => operation, /aborted/u);
-      const abortedPids = (await readFile(pidFile, "utf8"))
-        .split("\n")
-        .map((value) => Number.parseInt(value, 10));
       for (const pid of abortedPids) {
         assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
       }
