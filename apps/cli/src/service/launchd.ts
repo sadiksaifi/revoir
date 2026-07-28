@@ -105,8 +105,8 @@ ${environmentXml}
     <true/>
     <key>KeepAlive</key>
     <dict>
-      <key>Crashed</key>
-      <true/>
+      <key>SuccessfulExit</key>
+      <false/>
     </dict>
     <key>ThrottleInterval</key>
     <integer>${definition.throttleIntervalSeconds}</integer>

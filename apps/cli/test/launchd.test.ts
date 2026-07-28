@@ -1,7 +1,35 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 
-import { createLaunchAgentDefinition, renderLaunchAgentPlist } from "../src/service/launchd.js";
+import {
+  type LaunchAgentDefinition,
+  createLaunchAgentDefinition,
+  renderLaunchAgentPlist,
+} from "../src/service/launchd.js";
+
+const execFileAsync = promisify(execFile);
+
+async function waitForAttemptCount(
+  path: string,
+  expected: number,
+  deadline: number,
+): Promise<void> {
+  const attempts = await readFile(path, "utf8").catch(() => "");
+  if (attempts.trimEnd().split("\n").filter(Boolean).length >= expected) {
+    return;
+  }
+  if (Date.now() >= deadline) {
+    assert.fail(`launchd did not run the daemon ${expected} times`);
+  }
+  await delay(100);
+  await waitForAttemptCount(path, expected, deadline);
+}
 
 describe("launchd service definition", () => {
   it("renders one deterministic per-user LaunchAgent with escaped XDG paths and bounded restarts", () => {
@@ -35,7 +63,7 @@ describe("launchd service definition", () => {
       XDG_STATE_HOME: "/Users/test & tools/.local/state",
     });
     assert.match(plist, /<string>\/Users\/test &amp; tools\/\.local\/bin\/revoir<\/string>/u);
-    assert.match(plist, /<key>Crashed<\/key>\s*<true\/>/u);
+    assert.match(plist, /<key>SuccessfulExit<\/key>\s*<false\/>/u);
     assert.match(plist, /<key>ThrottleInterval<\/key>\s*<integer>30<\/integer>/u);
     assert.match(
       plist,
@@ -46,4 +74,49 @@ describe("launchd service definition", () => {
       /<key>StandardErrorPath<\/key>\s*<string>\/Users\/test &amp; tools\/\.local\/state\/revoir\/logs\/launchd\.stderr\.log<\/string>/u,
     );
   });
+
+  it(
+    "restarts a daemon that exits with status 1",
+    {
+      skip:
+        process.platform !== "darwin" || process.env["REVOIR_LAUNCHD_SMOKE"] !== "1"
+          ? "set REVOIR_LAUNCHD_SMOKE=1 on macOS to run the real launchd smoke test"
+          : false,
+      timeout: 10_000,
+    },
+    async (context) => {
+      const uid = process.getuid?.();
+      assert.notEqual(uid, undefined);
+
+      const directory = await mkdtemp(join(tmpdir(), "revoir-launchd-smoke-"));
+      const label = `io.github.sadiksaifi.revoir.smoke.${process.pid}`;
+      const target = `gui/${uid}/${label}`;
+      const plistFile = join(directory, `${label}.plist`);
+      const attemptsFile = join(directory, "attempts.log");
+
+      context.after(async () => {
+        await execFileAsync("/bin/launchctl", ["bootout", target]).catch(() => undefined);
+        await rm(directory, { force: true, recursive: true });
+      });
+
+      const definition: LaunchAgentDefinition = {
+        label,
+        programArguments: [
+          "/bin/sh",
+          "-c",
+          'printf "attempt\\n" >> "$1"; exit 1',
+          "revoir-launchd-smoke",
+          attemptsFile,
+        ],
+        environment: {},
+        standardOutputPath: join(directory, "stdout.log"),
+        standardErrorPath: join(directory, "stderr.log"),
+        throttleIntervalSeconds: 1,
+        exitTimeoutSeconds: 5,
+      };
+      await writeFile(plistFile, renderLaunchAgentPlist(definition), { mode: 0o600 });
+      await execFileAsync("/bin/launchctl", ["bootstrap", `gui/${uid}`, plistFile]);
+      await waitForAttemptCount(attemptsFile, 2, Date.now() + 5_000);
+    },
+  );
 });
