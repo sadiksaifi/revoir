@@ -1,9 +1,12 @@
 import { parseReviewJob, ReviewJobSchemaError, type ReviewJobV1 } from "@revoir/contracts";
 
 import type { RevoirConfiguration } from "../config/schema.js";
-import type { ManualReviewService } from "../review/orchestrator.js";
+import {
+  createDefaultManualReviewService,
+  type ManualReviewService,
+} from "../review/orchestrator.js";
 import { PullRequestEligibilityError, type PullRequestReference } from "../review/pull-request.js";
-import type { QueueDelivery } from "./client.js";
+import { CloudflareQueueClient, type QueueDelivery } from "./client.js";
 
 const IDLE_POLL_DELAY_MS = 1_000;
 
@@ -14,6 +17,10 @@ export interface QueueClient {
 }
 
 export type QueueConsumption = "idle" | "settled";
+
+export interface QueueRunService {
+  run(signal?: AbortSignal): Promise<void>;
+}
 
 function locallyEligible(job: ReviewJobV1, configuration: RevoirConfiguration["github"]): boolean {
   if (
@@ -57,7 +64,7 @@ function waitForNextPoll(signal?: AbortSignal): Promise<void> {
   });
 }
 
-export class QueueReviewRunner {
+export class QueueReviewRunner implements QueueRunService {
   readonly #configuration: RevoirConfiguration;
   readonly #queue: QueueClient;
   readonly #reviews: ManualReviewService;
@@ -123,4 +130,12 @@ export class QueueReviewRunner {
       }
     }
   }
+}
+
+export function createDefaultQueueRunService(configuration: RevoirConfiguration): QueueRunService {
+  return new QueueReviewRunner(
+    configuration,
+    new CloudflareQueueClient(configuration.cloudflare, configuration.timeouts.reviewMs),
+    createDefaultManualReviewService(configuration),
+  );
 }

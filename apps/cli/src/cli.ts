@@ -11,6 +11,7 @@ import {
   type DiagnosticResult,
   runDiagnostics,
 } from "./diagnostics.js";
+import { createDefaultQueueRunService, type QueueRunService } from "./queue/runner.js";
 import { SecretRedactor } from "./redaction.js";
 import { FindingContractError } from "./review/findings.js";
 import {
@@ -32,6 +33,7 @@ Usage:
   revoir setup [options]
   revoir diagnose [--config <path>] [--json] [--verbose]
   revoir review <GitHub PR URL> [--config <path>] [--verbose]
+  revoir run [--config <path>] [--verbose]
   revoir --help
   revoir --version
 
@@ -39,6 +41,7 @@ Commands:
   setup       Create the protected local configuration and validate the installation.
   diagnose    Non-interactively validate an existing installation.
   review      Review one eligible pull request and publish validated findings or a clean result.
+  run         Pull and settle eligible webhook review jobs one at a time.
 
 Setup options:
   --non-interactive
@@ -74,6 +77,7 @@ export interface CliDependencies {
   io: CliIo;
   gateway?: DiagnosticGateway;
   reviewService?: ManualReviewService;
+  runService?: QueueRunService;
   prompt?: PromptFunction;
 }
 
@@ -192,7 +196,10 @@ export async function runCli(
     return 0;
   }
   if (
-    (arguments_[0] === "setup" || arguments_[0] === "diagnose" || arguments_[0] === "review") &&
+    (arguments_[0] === "setup" ||
+      arguments_[0] === "diagnose" ||
+      arguments_[0] === "review" ||
+      arguments_[0] === "run") &&
     (arguments_[1] === "--help" || arguments_[1] === "-h")
   ) {
     write(io.stdout, HELP);
@@ -346,6 +353,33 @@ export async function runCli(
       return error instanceof PullRequestEligibilityError || error instanceof PullRequestUrlError
         ? 2
         : 1;
+    }
+  }
+
+  if (command === "run") {
+    if (common.json) {
+      write(io.stderr, "Error: --json is not supported by the run command.\n");
+      return 2;
+    }
+    if (common.arguments.length > 0) {
+      write(io.stderr, "Error: run does not accept positional arguments.\n");
+      return 2;
+    }
+
+    let configuration;
+    try {
+      configuration = await loadConfiguration(configFile);
+    } catch (error) {
+      write(io.stderr, `Error: ${new SecretRedactor().error(error, common.verbose)}\n`);
+      return 2;
+    }
+    const redactor = new SecretRedactor(configuration);
+    try {
+      await (dependencies.runService ?? createDefaultQueueRunService(configuration)).run();
+      return 0;
+    } catch (error) {
+      write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
+      return 1;
     }
   }
 
