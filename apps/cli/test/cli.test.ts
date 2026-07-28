@@ -9,6 +9,8 @@ import { CLI_VERSION, runCli, type CliIo } from "../src/cli.js";
 import { resolveApplicationPaths } from "../src/config/paths.js";
 import { loadConfiguration } from "../src/config/store.js";
 import { createDefaultDiagnosticGateway, type DiagnosticGateway } from "../src/diagnostics.js";
+import type { ManualReviewService } from "../src/review/orchestrator.js";
+import { PullRequestEligibilityError } from "../src/review/pull-request.js";
 import { passingGateway, TEST_PRIVATE_KEY } from "./helpers.js";
 
 class CapturingWritable extends Writable {
@@ -318,5 +320,114 @@ describe("CLI", () => {
     stderr.output = "";
     assert.equal(await runCli(["diagnose"], { io, gateway: passingGateway() }), 2);
     assert.match(stderr.output, /Run "revoir setup" first/u);
+  });
+
+  it("dispatches canonical manual reviews and reports clean and stale results", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+
+    const calls: string[] = [];
+    const cleanService: ManualReviewService = {
+      async review(reference) {
+        calls.push(reference.url);
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: cleanService,
+      }),
+      0,
+    );
+    assert.deepEqual(calls, ["https://github.com/owner/repository/pull/17"]);
+    assert.match(stdout.output, /Clean review completed/u);
+
+    stdout.output = "";
+    const staleService: ManualReviewService = {
+      async review() {
+        return {
+          status: "stale",
+          reviewedSha: "2".repeat(40),
+          currentSha: "3".repeat(40),
+        };
+      },
+    };
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: staleService,
+      }),
+      0,
+    );
+    assert.match(stdout.output, /Review discarded/u);
+    assert.match(stdout.output, new RegExp("3".repeat(40), "u"));
+
+    stderr.output = "";
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17?diff=split"], {
+        io,
+        reviewService: cleanService,
+      }),
+      2,
+    );
+    assert.match(stderr.output, /canonical form/u);
+    assert.equal(calls.length, 1);
+  });
+
+  it("classifies eligibility rejection separately and redacts review failures", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const rejected: ManualReviewService = {
+      async review() {
+        throw new PullRequestEligibilityError("Draft pull requests are not eligible.");
+      },
+    };
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: rejected,
+      }),
+      2,
+    );
+    assert.match(stderr.output, /not eligible/u);
+
+    stderr.output = "";
+    const failed: ManualReviewService = {
+      async review() {
+        throw new Error("remote rejected cli-cloudflare-secret");
+      },
+    };
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: failed,
+      }),
+      1,
+    );
+    assert.match(stderr.output, /\[REDACTED\]/u);
+    assert.doesNotMatch(stderr.output, /cli-cloudflare-secret/u);
   });
 });
