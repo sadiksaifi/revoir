@@ -225,6 +225,92 @@ describe("GitHub App review gateway", () => {
     assert.ok(requests.every((request) => request.init?.signal === abortController.signal));
   });
 
+  it("creates, updates, and removes one bot-owned failure comment without touching humans", async () => {
+    const comments = [
+      {
+        id: 40,
+        body: "<!-- revoir:failure:v1 --> human-owned",
+        user: { login: "human" },
+      },
+    ];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/issues/17/comments?per_page=100&page=1")) {
+        return json(comments);
+      }
+      if (url.endsWith("/issues/17/comments") && init?.method === "POST") {
+        const created = {
+          id: 41,
+          body: (JSON.parse(String(init.body)) as { body: string }).body,
+          user: { login: "revoir-test[bot]" },
+        };
+        comments.push(created);
+        return json(created, 201);
+      }
+      if (url.endsWith("/issues/comments/41") && init?.method === "PATCH") {
+        comments[1]!.body = (JSON.parse(String(init.body)) as { body: string }).body;
+        return json(comments[1]);
+      }
+      if (url.endsWith("/issues/comments/41") && init?.method === "DELETE") {
+        comments.splice(1, 1);
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const first = "<!-- revoir:failure:v1 --> first failure";
+    const second = "<!-- revoir:failure:v1 --> second failure";
+
+    await session.upsertFailureComment(reference, first, new AbortController().signal);
+    await session.upsertFailureComment(reference, second, new AbortController().signal);
+    assert.deepEqual(comments, [
+      {
+        id: 40,
+        body: "<!-- revoir:failure:v1 --> human-owned",
+        user: { login: "human" },
+      },
+      {
+        id: 41,
+        body: second,
+        user: { login: "revoir-test[bot]" },
+      },
+    ]);
+
+    await session.removeOwnFailureComment(reference, new AbortController().signal);
+    assert.deepEqual(comments, [
+      {
+        id: 40,
+        body: "<!-- revoir:failure:v1 --> human-owned",
+        user: { login: "human" },
+      },
+    ]);
+    assert.equal(
+      requests.filter(
+        (request) => request.url.endsWith("/issues/17/comments") && request.init?.method === "POST",
+      ).length,
+      1,
+    );
+    assert.equal(
+      requests.filter(
+        (request) =>
+          request.url.endsWith("/issues/comments/41") && request.init?.method === "PATCH",
+      ).length,
+      1,
+    );
+  });
+
   it("creates, submits, and deletes exact non-blocking pending reviews", async () => {
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     let reviewId = 80;

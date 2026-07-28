@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
-import { promisify } from "node:util";
 
 import {
   FINDING_CONTRACT_VERSION,
@@ -16,6 +14,7 @@ import {
 
 import { isAttachableRange, parseGitDiff, type DiffFile, type DiffSide } from "./diff.js";
 import { classifyReviewFile } from "./file-classification.js";
+import { SystemCommandRunner } from "./workspace.js";
 
 export {
   FINDING_CONTRACT_VERSION,
@@ -55,7 +54,7 @@ export interface ValidatedReviewOutput {
   diagnostics: readonly FindingDiagnostic[];
 }
 
-const execFileAsync = promisify(execFile);
+const commandRunner = new SystemCommandRunner();
 
 const ALLOWED_IMPACTS: Readonly<Record<FindingDefectKind, readonly FindingImpactKind[]>> = {
   correctness: ["incorrect-result", "operation-failure", "data-loss"],
@@ -123,6 +122,8 @@ async function validatePath(
   checkout: string,
   finding: ModelFindingV1,
   file: DiffFile | undefined,
+  signal: AbortSignal | undefined,
+  shellCommandMs: number,
 ): Promise<void> {
   safeRepositoryPath(finding.path);
   if (file === undefined) {
@@ -132,7 +133,7 @@ async function validatePath(
   if (file.newPath === undefined) {
     return;
   }
-  const entry = await reviewedHeadEntry(checkout, finding.path);
+  const entry = await reviewedHeadEntry(checkout, finding.path, signal, shellCommandMs);
   if (entry === undefined) {
     throw new Error("path does not exist in the reviewed head.");
   }
@@ -175,15 +176,23 @@ interface GitTreeEntry {
 async function reviewedHeadEntry(
   checkout: string,
   repositoryPath: string,
+  signal: AbortSignal | undefined,
+  shellCommandMs: number,
 ): Promise<GitTreeEntry | undefined> {
+  signal?.throwIfAborted();
   let stdout: Buffer;
   try {
-    ({ stdout } = await execFileAsync(
+    const result = await commandRunner.run(
       "git",
       ["-C", checkout, "ls-tree", "-z", "--full-tree", "HEAD", "--", `:(literal)${repositoryPath}`],
-      { encoding: "buffer" },
-    ));
+      {
+        ...(signal === undefined ? {} : { signal }),
+        timeoutMs: shellCommandMs,
+      },
+    );
+    stdout = Buffer.from(result.stdout);
   } catch (error) {
+    signal?.throwIfAborted();
     throw new Error("The reviewed head Git tree could not be inspected.", { cause: error });
   }
 
@@ -323,7 +332,12 @@ function attachment(file: DiffFile, finding: ModelFindingV1): FindingAttachment 
 
 export async function validateModelReviewOutput(
   value: string,
-  options: { checkout: string; diff: string },
+  options: {
+    checkout: string;
+    diff: string;
+    signal?: AbortSignal;
+    shellCommandMs?: number;
+  },
 ): Promise<ValidatedReviewOutput> {
   let envelope;
   try {
@@ -350,7 +364,13 @@ export async function validateModelReviewOutput(
       const file = diff.files.get(repositoryPath);
       // Candidate order is contract-significant for deterministic first-wins deduplication.
       // eslint-disable-next-line no-await-in-loop
-      await validatePath(options.checkout, modelFinding, file);
+      await validatePath(
+        options.checkout,
+        modelFinding,
+        file,
+        options.signal,
+        options.shellCommandMs ?? 120_000,
+      );
       if (file === undefined) {
         throw new Error("path is not part of the reviewed base-to-head diff.");
       }
@@ -370,6 +390,9 @@ export async function validateModelReviewOutput(
         occurrenceKey: occurrenceKey(modelFinding),
       });
     } catch (error) {
+      if (options.signal?.aborted === true) {
+        throw options.signal.reason instanceof Error ? options.signal.reason : error;
+      }
       diagnostics.push({
         index,
         code: "invalid",

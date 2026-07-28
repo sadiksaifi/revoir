@@ -212,6 +212,12 @@ function harness(
     async removeOwnCompletionReaction() {
       events.push("remove-old-thumb");
     },
+    async upsertFailureComment() {
+      events.push("upsert-failure-comment");
+    },
+    async removeOwnFailureComment() {
+      events.push("remove-failure-comment");
+    },
     async removeOwnPendingReview() {
       events.push("remove-pending-review");
       options.pendingReviewState?.clear();
@@ -439,6 +445,7 @@ describe("clean review orchestrator", () => {
       "get-head",
       "add-+1",
       "get-head",
+      "remove-failure-comment",
     ]);
   });
 
@@ -499,7 +506,7 @@ describe("clean review orchestrator", () => {
         },
       ],
     });
-    assert.deepEqual(events.slice(-8), [
+    assert.deepEqual(events.slice(-9), [
       "delete-10",
       "get-head",
       "remove-pending-review",
@@ -508,6 +515,7 @@ describe("clean review orchestrator", () => {
       "create-review",
       "get-head",
       "submit-review-20",
+      "remove-failure-comment",
     ]);
     assert.equal(events.filter((event) => event === "create-review").length, 1);
     assert.equal(events.includes("add-+1"), false);
@@ -1127,6 +1135,75 @@ describe("clean review orchestrator", () => {
       "timed-out review did not finish terminal cleanup",
     );
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
+  });
+
+  it("propagates caller cancellation before releasing the worker slot", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("daemon stopped");
+    let markReviewStarted: (() => void) | undefined;
+    const reviewStarted = new Promise<void>((resolve) => {
+      markReviewStarted = resolve;
+    });
+    let releases = 0;
+    const cancelled = harness({
+      reviewMs: 50,
+      review: async (_input, signal) => {
+        markReviewStarted?.();
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+    const review = cancelled.orchestrator.review(reference, { signal: controller.signal });
+    await reviewStarted;
+    controller.abort(cancellation);
+
+    await assert.rejects(
+      Promise.race([
+        review,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("caller cancellation did not reach the review")), 100);
+        }),
+      ]),
+      cancellation,
+    );
+    assert.equal(cancelled.events.includes("cleanup"), true);
+    assert.equal(cancelled.ownedReactions.has("eyes"), false);
+    assert.equal(releases, 1);
+  });
+
+  it("releases a lock acquired at the caller cancellation boundary", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("daemon stopped during lock acquisition");
+    let releases = 0;
+    const cancelled = harness({
+      lock: {
+        async acquire() {
+          controller.abort(cancellation);
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+
+    await assert.rejects(
+      cancelled.orchestrator.review(reference, { signal: controller.signal }),
+      cancellation,
+    );
+    assert.equal(releases, 1);
+    assert.deepEqual(cancelled.events, []);
   });
 
   it("keeps the process lock while a timed-out review engine is still active", async () => {

@@ -230,6 +230,22 @@ describe("finding validation", () => {
     assert.match(result.findings[0]?.fingerprint ?? "", /^[0-9a-f]{64}$/u);
   });
 
+  it("cancels Git tree inspection at the review deadline", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("review deadline elapsed");
+    controller.abort(cancellation);
+
+    await assert.rejects(
+      validateModelReviewOutput(output([finding()]), {
+        checkout,
+        diff: DIFF,
+        signal: controller.signal,
+        shellCommandMs: 120_000,
+      }),
+      cancellation,
+    );
+  });
+
   it("maps deletions and both sides of renames to GitHub's API path", async () => {
     const result = await validateModelReviewOutput(
       output([

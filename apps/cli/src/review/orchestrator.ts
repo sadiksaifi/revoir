@@ -35,6 +35,7 @@ export type ManualReviewResult =
 
 export interface ManualReviewOptions {
   expectedHeadSha?: string;
+  signal?: AbortSignal;
 }
 
 export interface ManualReviewService {
@@ -213,11 +214,14 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     options?: ManualReviewOptions,
   ): Promise<ManualReviewResult> {
     const deadline = new ReviewDeadline(this.#configuration.timeouts.reviewMs);
-    const acquisition = this.#lock.acquire(deadline.signal);
+    const reviewSignal =
+      options?.signal === undefined
+        ? deadline.signal
+        : AbortSignal.any([deadline.signal, options.signal]);
+    const acquisition = this.#lock.acquire(reviewSignal);
     let lease: Awaited<ReturnType<ReviewLock["acquire"]>>;
     try {
       lease = await deadline.wait(acquisition);
-      throwIfAborted(deadline.signal);
     } catch (error) {
       if (error === deadline.error) {
         this.#retainFinalization(
@@ -231,7 +235,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     }
 
     const finalization = this.#retainFinalization(
-      this.#finalizeReview(reference, options, deadline.signal, lease),
+      this.#finalizeReview(reference, options, reviewSignal, lease),
     );
     try {
       return await deadline.wait(finalization);
@@ -297,6 +301,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     let failure: unknown;
 
     try {
+      throwIfAborted(signal);
       const github = await this.#github.authenticate(this.#configuration.github, reference, signal);
       throwIfAborted(signal);
       const pullRequest = await github.getPullRequest(reference, signal);
@@ -519,6 +524,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
             }
           }
         }
+      }
+      if (result?.status === "clean" || result?.status === "findings") {
+        await github.removeOwnFailureComment(reference, signal);
+        throwIfAborted(signal);
       }
     } catch (error) {
       failure = error;
