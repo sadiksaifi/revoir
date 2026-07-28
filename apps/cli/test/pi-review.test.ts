@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -41,7 +44,7 @@ class FakeSessionFactory implements PiSessionFactory {
   readonly options: PiSessionOptions[] = [];
   readonly prompts: string[] = [];
   disposed = 0;
-  result = '{"findings":[]}';
+  result = '{"version":1,"findings":[]}';
 
   async create(options: PiSessionOptions): Promise<PiSession> {
     this.options.push(options);
@@ -80,10 +83,98 @@ describe("Pi clean review adapter", () => {
     assert.equal(sessions.options[0]?.reasoning, "high");
     assert.match(sessions.options[0]?.systemPrompt ?? "", /read-only/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not modify files/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /"version":1/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /P0\|P1\|P2\|P3/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /formatting or lint automation/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not include a fingerprint/u);
     assert.equal(sessions.prompts.length, 1);
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.baseSha, "u"));
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.headSha, "u"));
     assert.match(sessions.prompts[0] ?? "", /\+const current = true/u);
+    assert.equal(sessions.disposed, 1);
+  });
+
+  it("returns validated findings and diagnostics from mixed fake-model output", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "revoir-pi-findings-"));
+    try {
+      await writeFile(join(checkout, "source.ts"), "const current = true;\n");
+      const sessions = new FakeSessionFactory();
+      sessions.result = JSON.stringify({
+        version: 1,
+        findings: [
+          {
+            priority: "P1",
+            title: "Cancellation is dropped",
+            path: "source.ts",
+            range: { start: 1, end: 1, side: "RIGHT" },
+            issue: "The added operation does not receive cancellation.",
+            impact: "Timed-out work continues consuming resources.",
+            evidence: "The added call has no signal argument.",
+            fixDirection: "Pass the active signal to the call.",
+          },
+          {
+            priority: "P9",
+            title: "Invalid priority",
+            path: "source.ts",
+            range: null,
+            issue: "This candidate is invalid.",
+            impact: "It must not be published.",
+            evidence: "The priority is outside the contract.",
+            fixDirection: "Remove the invalid candidate.",
+          },
+        ],
+      });
+      const engine = new PiReviewEngine(
+        { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+        sessions,
+      );
+      const result = await engine.review(
+        {
+          reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+          pullRequest,
+          workspace: {
+            ...workspace,
+            checkout,
+            diff: `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1 @@
+-const previous = true;
++const current = true;
+`,
+          },
+        },
+        new AbortController().signal,
+      );
+      assert.equal(result.findings.length, 1);
+      assert.equal(result.findings[0]?.priority, "P1");
+      assert.equal(result.diagnostics.length, 1);
+      assert.equal(sessions.disposed, 1);
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unknown contract versions", async () => {
+    const sessions = new FakeSessionFactory();
+    sessions.result = '{"version":2,"findings":[]}';
+    const engine = new PiReviewEngine(
+      { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      sessions,
+    );
+    await assert.rejects(
+      () =>
+        engine.review(
+          {
+            reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+            pullRequest,
+            workspace,
+          },
+          new AbortController().signal,
+        ),
+      /invalid finding envelope/u,
+    );
     assert.equal(sessions.disposed, 1);
   });
 
@@ -163,7 +254,7 @@ describe("Pi clean review adapter", () => {
       },
       async run() {
         runCalls += 1;
-        return '{"findings":[]}';
+        return '{"version":1,"findings":[]}';
       },
       async dispose() {
         disposalStarted = true;
@@ -252,7 +343,7 @@ describe("Pi clean review adapter", () => {
     });
     assert.equal(abortCalls, 1);
     assert.equal(settled, false);
-    finishRun?.('{"findings":[]}');
+    finishRun?.('{"version":1,"findings":[]}');
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
     });

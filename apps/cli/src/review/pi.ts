@@ -8,6 +8,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import type { ReasoningLevel, RevoirConfiguration } from "../config/schema.js";
+import {
+  validateModelReviewOutput,
+  type FindingDiagnostic,
+  type ReviewFindingV1,
+} from "./findings.js";
 import type { PullRequestReference, PullRequestSnapshot } from "./pull-request.js";
 import type { PreparedWorkspace } from "./workspace.js";
 
@@ -15,8 +20,14 @@ const REVIEW_SYSTEM_PROMPT = `You are Revoir's read-only pull-request reviewer.
 Inspect the complete base-to-head change for correctness, regressions, security, and missing tests.
 Use read, search, and host bash only for evidence. Do not modify files, install dependencies, run
 package lifecycle scripts, or use repository-provided Pi extensions, skills, prompts, or settings.
-This tracer accepts only a clean result. If the change has no actionable P0-P3 finding, finish with
-exactly {"findings":[]}. Do not include Markdown, praise, a summary, or any other prose.`;
+Report only observed, actionable P0-P3 issues. Suppress style preferences and anything already
+enforced by standard formatting or lint automation. Return exactly one JSON value with this shape:
+{"version":1,"findings":[{"priority":"P0|P1|P2|P3","title":"concise title","path":"repository/relative/path","range":{"start":1,"end":1,"side":"RIGHT|LEFT"},"issue":"observed defect","impact":"concrete impact","evidence":"supporting evidence","fixDirection":"concise action"}]}.
+Use RIGHT only for added head lines and LEFT only for deleted base lines. Use range:null only for a
+valid file-level issue with no exact changed-line anchor. Do not include a fingerprint; Revoir
+derives it deterministically after validation. Do not include unknown fields, Markdown, praise,
+a summary, severity explanations, merge instructions, boilerplate, or speculative concerns.
+Start fixDirection with a direct action verb such as Add, Guard, Pass, Remove, or Validate.`;
 
 export interface ReviewEngineInput {
   reference: PullRequestReference;
@@ -25,7 +36,12 @@ export interface ReviewEngineInput {
 }
 
 export interface ReviewEngine {
-  review(input: ReviewEngineInput, signal: AbortSignal): Promise<void>;
+  review(input: ReviewEngineInput, signal: AbortSignal): Promise<ReviewEngineResult | void>;
+}
+
+export interface ReviewEngineResult {
+  findings: readonly ReviewFindingV1[];
+  diagnostics: readonly FindingDiagnostic[];
 }
 
 export interface PiSession {
@@ -178,26 +194,6 @@ export class SdkPiSessionFactory implements PiSessionFactory {
   }
 }
 
-function validateCleanResult(value: string): void {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value.trim());
-  } catch (error) {
-    throw new Error('Pi must return exactly {"findings":[]}.', { cause: error });
-  }
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    Array.isArray(parsed) ||
-    Object.keys(parsed).length !== 1 ||
-    !("findings" in parsed) ||
-    !Array.isArray(parsed.findings) ||
-    parsed.findings.length !== 0
-  ) {
-    throw new Error('This tracer accepts only the validated clean result {"findings":[]}.');
-  }
-}
-
 function reviewPrompt(input: ReviewEngineInput): string {
   return `Review ${input.reference.url}.
 Base revision: ${input.pullRequest.baseSha}
@@ -220,7 +216,7 @@ export class PiReviewEngine implements ReviewEngine {
     this.#sessionFactory = sessionFactory;
   }
 
-  async review(input: ReviewEngineInput, signal: AbortSignal): Promise<void> {
+  async review(input: ReviewEngineInput, signal: AbortSignal): Promise<ReviewEngineResult> {
     throwIfAborted(signal);
     const session = await this.#sessionFactory.create(
       {
@@ -247,7 +243,14 @@ export class PiReviewEngine implements ReviewEngine {
       }
       const result = await session.run(reviewPrompt(input), signal);
       throwIfAborted(signal);
-      validateCleanResult(result);
+      const validated = await validateModelReviewOutput(result, {
+        checkout: input.workspace.checkout,
+        diff: input.workspace.diff,
+      });
+      return {
+        findings: validated.findings,
+        diagnostics: validated.diagnostics,
+      };
     } finally {
       signal.removeEventListener("abort", abort);
       try {
