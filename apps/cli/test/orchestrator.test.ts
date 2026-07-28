@@ -128,6 +128,7 @@ function harness(
     pendingSubmissionStarted?: () => void;
     pendingSubmissionError?: Error;
     pendingSubmissionUncertain?: boolean;
+    pendingReviewState?: Set<number>;
     reactionDeletionGate?: Promise<void>;
     reactionDeletionError?: Error;
     reactionDeletionErrorAttempts?: number;
@@ -186,6 +187,7 @@ function harness(
     },
     async removeOwnPendingReview() {
       events.push("remove-pending-review");
+      options.pendingReviewState?.clear();
     },
     async addReaction(_reference, reaction: ReviewReaction) {
       events.push(`add-${reaction}`);
@@ -239,6 +241,7 @@ function harness(
       if (options.mutateHeadDuring === "review-creation") {
         currentSha = "3".repeat(40);
       }
+      options.pendingReviewState?.add(20);
       return {
         id: 20,
         async delete() {
@@ -247,6 +250,7 @@ function harness(
           if (options.pendingDeletionError !== undefined) {
             throw options.pendingDeletionError;
           }
+          options.pendingReviewState?.delete(20);
         },
         async submit(submitSignal, reconciliationSignal) {
           events.push("submit-review-20");
@@ -268,11 +272,13 @@ function harness(
             if (reconciliationSignal === undefined || reconciliationSignal.aborted) {
               throw submitSignal.reason;
             }
+            options.pendingReviewState?.delete(20);
             return;
           }
           if (options.pendingSubmissionError !== undefined) {
             throw options.pendingSubmissionError;
           }
+          options.pendingReviewState?.delete(20);
         },
       };
     },
@@ -372,6 +378,7 @@ describe("clean review orchestrator", () => {
       "cleanup",
       "delete-10",
       "get-head",
+      "remove-pending-review",
       "add-+1",
       "get-head",
     ]);
@@ -494,31 +501,48 @@ describe("clean review orchestrator", () => {
     }
   });
 
-  it("releases the process lock without deleting an ambiguously submitted review", async () => {
+  it("reconciles an ambiguously submitted pending review on a later clean run", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
     const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-submit-unknown-lock-"));
     let allowPendingDeletion: (() => void) | undefined;
     const pendingDeletionGate = new Promise<void>((resolve) => {
       allowPendingDeletion = resolve;
     });
+    let observeSubmission!: () => void;
+    const submissionStarted = new Promise<void>((resolve) => {
+      observeSubmission = resolve;
+    });
+    const pendingReviewState = new Set<number>();
     const first = harness({
       reviewMs: 20,
       lock: new FileReviewLock(stateDirectory),
       pendingDeletionGate,
+      pendingReviewState,
       pendingSubmissionUncertain: true,
+      pendingSubmissionStarted: observeSubmission,
       review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
     });
-    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+    const second = harness({
+      lock: new FileReviewLock(stateDirectory),
+      pendingReviewState,
+    });
     const lockPath = join(stateDirectory, "manual-review.lock");
 
     try {
-      await assert.rejects(first.orchestrator.review(reference), ReviewTimeoutError);
+      const firstReview = assert.rejects(first.orchestrator.review(reference), ReviewTimeoutError);
+      await submissionStarted;
+      context.mock.timers.tick(20);
+      await firstReview;
       await waitFor(
         () => fileIsMissing(lockPath),
         "ambiguous review submission retained the process lock",
       );
 
       assert.equal(first.events.includes("delete-review-20"), false);
+      assert.deepEqual([...pendingReviewState], [20]);
       assert.equal((await second.orchestrator.review(reference)).status, "clean");
+      assert.equal(second.events.includes("remove-pending-review"), true);
+      assert.equal(pendingReviewState.size, 0);
     } finally {
       allowPendingDeletion?.();
       await waitFor(() => fileIsMissing(lockPath), "test cleanup did not release the process lock");
@@ -529,7 +553,12 @@ describe("clean review orchestrator", () => {
   it("removes the active reaction and publishes no completion for stale output", async () => {
     const { events, orchestrator } = harness({ currentSha: "3".repeat(40) });
     assert.equal((await orchestrator.review(reference)).status, "stale");
-    assert.deepEqual(events.slice(-3), ["cleanup", "delete-10", "get-head"]);
+    assert.deepEqual(events.slice(-4), [
+      "cleanup",
+      "delete-10",
+      "get-head",
+      "remove-pending-review",
+    ]);
     assert.equal(events.includes("add-+1"), false);
   });
 
@@ -542,7 +571,12 @@ describe("clean review orchestrator", () => {
           reviewedSha: "2".repeat(40),
           currentSha: "3".repeat(40),
         });
-        assert.deepEqual(events.slice(-3), ["cleanup", "delete-10", "get-head"]);
+        assert.deepEqual(events.slice(-4), [
+          "cleanup",
+          "delete-10",
+          "get-head",
+          "remove-pending-review",
+        ]);
         assert.equal(events.includes("add-+1"), false);
       }),
     );
@@ -564,7 +598,13 @@ describe("clean review orchestrator", () => {
 
     await assert.rejects(() => failed.orchestrator.review(reference), /postcheck failed/u);
 
-    assert.deepEqual(failed.events.slice(-4), ["get-head", "add-+1", "get-head", "delete-11"]);
+    assert.deepEqual(failed.events.slice(-5), [
+      "get-head",
+      "remove-pending-review",
+      "add-+1",
+      "get-head",
+      "delete-11",
+    ]);
     assert.equal(failed.events.includes("remove-own-+1"), false);
   });
 
@@ -615,10 +655,11 @@ describe("clean review orchestrator", () => {
       () => completionFailure.orchestrator.review(reference),
       /reaction failed/u,
     );
-    assert.deepEqual(completionFailure.events.slice(-5), [
+    assert.deepEqual(completionFailure.events.slice(-6), [
       "cleanup",
       "delete-10",
       "get-head",
+      "remove-pending-review",
       "add-+1",
       "remove-own-+1",
     ]);

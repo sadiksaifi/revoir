@@ -305,11 +305,11 @@ export class CleanReviewOrchestrator implements ManualReviewService {
 
       const currentSha = await github.getHeadSha(reference, signal);
       throwIfAborted(signal);
+      await github.removeOwnPendingReview(reference, signal);
+      throwIfAborted(signal);
       if (currentSha === pullRequest.headSha) {
         if (engineResult.findings.length > 0) {
           const publication = createReviewPublication(pullRequest.headSha, engineResult.findings);
-          await github.removeOwnPendingReview(reference, signal);
-          throwIfAborted(signal);
           pendingReviewCleanup = createTerminalHandle(() =>
             github.removeOwnPendingReview(reference, terminalSignal),
           );
