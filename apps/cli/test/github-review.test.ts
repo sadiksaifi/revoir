@@ -288,6 +288,7 @@ describe("GitHub App review gateway", () => {
     const ownThreadBody = renderFileFinding({
       version: 1,
       fingerprint: ownThreadFingerprint,
+      fingerprintAliases: ["9".repeat(64)],
       priority: "P1",
       path: markerShapedSource,
       range: null,
@@ -414,7 +415,14 @@ describe("GitHub App review gateway", () => {
 
     assert.deepEqual(await session.getPriorReviewState(reference, new AbortController().signal), {
       activeFingerprints: [ownBodyFingerprint, ownThreadFingerprint],
-      ownedOpenThreads: [{ id: "THREAD_OWN_OPEN", fingerprint: ownThreadFingerprint }],
+      bodyFindings: [{ fingerprint: ownBodyFingerprint }],
+      ownedOpenThreads: [
+        {
+          id: "THREAD_OWN_OPEN",
+          fingerprint: ownThreadFingerprint,
+          aliases: ["9".repeat(64)],
+        },
+      ],
       runHeadShas: ["2".repeat(40)],
     });
     await assert.rejects(

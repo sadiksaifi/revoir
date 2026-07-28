@@ -9,8 +9,9 @@ import type {
   PullRequestSnapshot,
 } from "./pull-request.js";
 import {
-  findingMarkerFingerprints,
+  findingMarkerIdentities,
   runMarkerHeadShas,
+  type PriorFindingIdentity,
   type PriorReviewState,
 } from "./reconciliation.js";
 
@@ -425,7 +426,7 @@ class InstallationSession implements GitHubReviewSession {
   ): Promise<PriorReviewState> {
     const activeFingerprints = new Set<string>();
     const runHeadShas = new Set<string>();
-    let latestBodyFingerprints: readonly string[] = [];
+    let latestBodyFindings: readonly PriorFindingIdentity[] = [];
     let reviewPage = 1;
     for (;;) {
       throwIfAborted(signal);
@@ -451,7 +452,7 @@ class InstallationSession implements GitHubReviewSession {
             runHeadShas.add(headSha);
           }
           if (reviewHeadShas.length > 0) {
-            latestBodyFingerprints = findingMarkerFingerprints(review.body);
+            latestBodyFindings = findingMarkerIdentities(review.body);
           }
         }
       }
@@ -463,12 +464,18 @@ class InstallationSession implements GitHubReviewSession {
       await yieldToEventLoop(signal);
     }
     if (!this.#priorRunWasClean) {
-      for (const fingerprint of latestBodyFingerprints) {
-        activeFingerprints.add(fingerprint);
+      for (const finding of latestBodyFindings) {
+        activeFingerprints.add(finding.fingerprint);
       }
+    } else {
+      latestBodyFindings = [];
     }
 
-    const ownedOpenThreads: Array<{ id: string; fingerprint: string }> = [];
+    const ownedOpenThreads: Array<{
+      id: string;
+      fingerprint: string;
+      aliases?: readonly string[];
+    }> = [];
     let after: string | null = null;
     for (;;) {
       // GraphQL exposes the review-thread node IDs required by resolveReviewThread.
@@ -526,14 +533,19 @@ class InstallationSession implements GitHubReviewSession {
         const author = record(comment.author, "review thread opening author");
         const authorLogin = string(author.login, "review thread opening author login");
         const body = string(comment.body, "review thread opening comment body");
-        const fingerprints = findingMarkerFingerprints(body);
+        const findingIdentities = findingMarkerIdentities(body);
         if (
           !thread.isResolved &&
           authorLogin.toLowerCase() === this.#botLogin &&
-          fingerprints.length === 1
+          findingIdentities.length === 1
         ) {
-          activeFingerprints.add(fingerprints[0]!);
-          ownedOpenThreads.push({ id, fingerprint: fingerprints[0]! });
+          const findingIdentity = findingIdentities[0]!;
+          activeFingerprints.add(findingIdentity.fingerprint);
+          ownedOpenThreads.push({
+            id,
+            fingerprint: findingIdentity.fingerprint,
+            ...(findingIdentity.aliases === undefined ? {} : { aliases: findingIdentity.aliases }),
+          });
         }
       }
       const pageInfo = record(threads.pageInfo, "review thread page info");
@@ -554,6 +566,7 @@ class InstallationSession implements GitHubReviewSession {
     this.#ownedOpenThreadIds = new Set(sortedThreads.map(({ id }) => id));
     return {
       activeFingerprints: [...activeFingerprints].toSorted(),
+      bodyFindings: latestBodyFindings,
       ownedOpenThreads: sortedThreads,
       runHeadShas: [...runHeadShas].toSorted(),
     };

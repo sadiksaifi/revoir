@@ -86,6 +86,12 @@ function canonicalEvidence(finding: ReviewFindingV1): string {
 
 function details(finding: ReviewFindingV1, location?: string): string {
   const explicit = location ?? explicitLocation(finding);
+  const identityMarkers = [
+    `<!-- revoir:finding:v1:${finding.fingerprint} -->`,
+    ...(finding.fingerprintAliases ?? []).map(
+      (alias) => `<!-- revoir:finding-alias:v1:${finding.fingerprint}:${alias} -->`,
+    ),
+  ];
   return [
     `### ${finding.priority} — ${TITLES[finding.defectKind]}`,
     "",
@@ -95,7 +101,7 @@ function details(finding: ReviewFindingV1, location?: string): string {
     `- Evidence: ${canonicalEvidence(finding)}`,
     `- Fix direction: ${FIX_DIRECTIONS[finding.fixAction](finding.anchor)}`,
     "",
-    `<!-- revoir:finding:v1:${finding.fingerprint} -->`,
+    ...identityMarkers,
   ].join("\n");
 }
 
