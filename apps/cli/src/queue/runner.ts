@@ -5,7 +5,11 @@ import {
   GitHubReviewFailureReporter,
   type ReviewFailureReporter,
 } from "../review/failure-reporter.js";
-import { classifyReviewFailure, reviewFailureForCategory } from "../review/failure.js";
+import {
+  classifyReviewFailure,
+  reviewFailureForCategory,
+  type ReviewFailureCategory,
+} from "../review/failure.js";
 import {
   createDefaultManualReviewService,
   type ManualReviewService,
@@ -22,7 +26,6 @@ export type { OperationalFailureState, OperationalFailureStore } from "./failure
 
 const IDLE_POLL_DELAY_MS = 1_000;
 const MAX_OPERATIONAL_ATTEMPTS = 3;
-const MAX_TERMINAL_REPORT_ATTEMPTS = 3;
 const OPERATIONAL_RETRY_DELAYS_SECONDS = [30, 120] as const;
 
 export interface QueueClient {
@@ -85,8 +88,8 @@ function throwIfCancelled(signal?: AbortSignal): void {
   }
 }
 
-function fallbackOperationalAttempt(transportAttempt: number, minimumAttempt = 1): number {
-  return Math.min(MAX_OPERATIONAL_ATTEMPTS, Math.max(transportAttempt, minimumAttempt));
+function fallbackOperationalAttempt(transportAttempt: number): number {
+  return Math.min(MAX_OPERATIONAL_ATTEMPTS, Math.max(transportAttempt, 1));
 }
 
 class StoreOperationTimeoutError extends Error {
@@ -136,8 +139,6 @@ function waitForStoreOperation<T>(
   });
 }
 
-type FailureReportResult = "reported" | "rejected" | "timed-out";
-
 export class QueueReviewRunner implements QueueRunService {
   readonly #configuration: RevoirConfiguration;
   readonly #failures: ReviewFailureReporter;
@@ -181,7 +182,7 @@ export class QueueReviewRunner implements QueueRunService {
 
     if (!locallyEligible(job, this.#configuration.github)) {
       await this.#queue.acknowledge(delivery.leaseId, signal);
-      await this.#clearFailureState(job.deliveryId, signal);
+      await this.#clearFailureState(job.deliveryId);
       return "settled";
     }
 
@@ -191,24 +192,11 @@ export class QueueReviewRunner implements QueueRunService {
       throwIfCancelled(signal);
     } catch (error) {
       throwIfCancelled(signal);
-      const fallbackAttempt = fallbackOperationalAttempt(delivery.attempt);
-      await this.#reportFailure(referenceFor(job), error, fallbackAttempt, signal);
-      throwIfCancelled(signal);
-      if (fallbackAttempt >= MAX_OPERATIONAL_ATTEMPTS) {
-        await this.#queue.acknowledge(delivery.leaseId, signal);
-        await this.#clearFailureState(job.deliveryId, signal);
-      } else {
-        await this.#queue.retry(
-          delivery.leaseId,
-          OPERATIONAL_RETRY_DELAYS_SECONDS[fallbackAttempt - 1]!,
-          signal,
-        );
-      }
-      return "settled";
+      return this.#settleStoreFailure(delivery, job, error, signal);
     }
 
-    if (operationalState.failures >= MAX_OPERATIONAL_ATTEMPTS) {
-      return this.#settleTerminalFailure(delivery, job, operationalState, signal);
+    if (operationalState.failures === MAX_OPERATIONAL_ATTEMPTS) {
+      return this.#settleTerminalFailure(delivery, job, operationalState.terminalCategory, signal);
     }
 
     try {
@@ -218,53 +206,35 @@ export class QueueReviewRunner implements QueueRunService {
       });
       throwIfCancelled(signal);
       await this.#queue.acknowledge(delivery.leaseId, signal);
-      await this.#clearFailureState(job.deliveryId, signal);
+      await this.#clearFailureState(job.deliveryId);
     } catch (error) {
       if (signal?.aborted === true) {
         throw signal.reason instanceof Error ? signal.reason : error;
       }
       if (error instanceof PullRequestEligibilityError) {
         await this.#queue.acknowledge(delivery.leaseId, signal);
-        await this.#clearFailureState(job.deliveryId, signal);
+        await this.#clearFailureState(job.deliveryId);
       } else {
         const nextFailure = operationalState.failures + 1;
         const failure = classifyReviewFailure(error);
         const nextState: OperationalFailureState =
           nextFailure >= MAX_OPERATIONAL_ATTEMPTS
             ? {
-                failures: nextFailure,
-                terminalReport: {
-                  status: "pending",
-                  attempts: 0,
-                  category: failure.category,
-                },
+                failures: MAX_OPERATIONAL_ATTEMPTS,
+                terminalCategory: failure.category,
               }
             : {
-                failures: nextFailure,
-                terminalReport: { status: "not-required" },
+                failures: nextFailure as 1 | 2,
               };
         try {
           await this.#saveFailureState(job.deliveryId, nextState, signal);
           throwIfCancelled(signal);
         } catch (stateError) {
           throwIfCancelled(signal);
-          const fallbackAttempt = fallbackOperationalAttempt(delivery.attempt, nextFailure);
-          await this.#reportFailure(referenceFor(job), stateError, fallbackAttempt, signal);
-          throwIfCancelled(signal);
-          if (fallbackAttempt >= MAX_OPERATIONAL_ATTEMPTS) {
-            await this.#queue.acknowledge(delivery.leaseId, signal);
-            await this.#clearFailureState(job.deliveryId, signal);
-          } else {
-            await this.#queue.retry(
-              delivery.leaseId,
-              OPERATIONAL_RETRY_DELAYS_SECONDS[fallbackAttempt - 1]!,
-              signal,
-            );
-          }
-          return "settled";
+          return this.#settleStoreFailure(delivery, job, stateError, signal);
         }
         if (nextFailure >= MAX_OPERATIONAL_ATTEMPTS) {
-          return this.#settleTerminalFailure(delivery, job, nextState, signal);
+          return this.#settleTerminalFailure(delivery, job, failure.category, signal);
         }
         await this.#reportFailure(referenceFor(job), failure, nextFailure, signal);
         throwIfCancelled(signal);
@@ -343,11 +313,11 @@ export class QueueReviewRunner implements QueueRunService {
     return waitForStoreOperation(operation, operationName, operationSignal, signal);
   }
 
-  async #clearFailureState(deliveryId: string, signal?: AbortSignal): Promise<void> {
+  async #clearFailureState(deliveryId: string): Promise<void> {
     // Queue settlement has already been confirmed. A stale local file must not resurrect
     // or loop a message that is no longer leased.
     const pendingSave = this.#pendingSaves.get(deliveryId);
-    await this.#clearFailureStateNow(deliveryId, signal);
+    await this.#clearFailureStateNow(deliveryId);
     if (pendingSave !== undefined) {
       void pendingSave.then(
         () => this.#clearFailureStateNow(deliveryId),
@@ -356,102 +326,49 @@ export class QueueReviewRunner implements QueueRunService {
     }
   }
 
-  async #clearFailureStateNow(deliveryId: string, signal?: AbortSignal): Promise<void> {
-    const { operation, operationSignal } = this.#startStoreOperation(
-      (storeSignal) => this.#operationalFailures.clear(deliveryId, storeSignal),
-      signal,
+  async #clearFailureStateNow(deliveryId: string): Promise<void> {
+    const { operation, operationSignal } = this.#startStoreOperation((storeSignal) =>
+      this.#operationalFailures.clear(deliveryId, storeSignal),
     );
-    await waitForStoreOperation(operation, "clear", operationSignal, signal).catch(() => {});
+    await waitForStoreOperation(operation, "clear", operationSignal).catch(() => {});
   }
 
   async #settleTerminalFailure(
     delivery: QueueDelivery,
     job: ReviewJobV1,
-    state: OperationalFailureState,
+    category: ReviewFailureCategory,
     signal?: AbortSignal,
   ): Promise<QueueConsumption> {
-    const terminal = state.terminalReport;
-    if (terminal.status === "confirmed" || terminal.status === "exhausted") {
-      await this.#queue.acknowledge(delivery.leaseId, signal);
-      await this.#clearFailureState(job.deliveryId, signal);
-      return "settled";
-    }
-    if (terminal.status !== "pending" && terminal.status !== "publishing") {
-      throw new Error("Terminal operational review failure state is invalid.");
-    }
-
-    const reportingAttempt =
-      terminal.status === "publishing" ? terminal.attempts : terminal.attempts + 1;
-    if (terminal.status === "pending") {
-      await this.#saveFailureState(
-        job.deliveryId,
-        {
-          failures: MAX_OPERATIONAL_ATTEMPTS,
-          terminalReport: {
-            status: "publishing",
-            attempts: reportingAttempt,
-            category: terminal.category,
-          },
-        },
-        signal,
-      );
-      throwIfCancelled(signal);
-    }
-    const reportResult = await this.#reportFailure(
+    await this.#reportFailure(
       referenceFor(job),
-      reviewFailureForCategory(terminal.category),
+      reviewFailureForCategory(category),
       MAX_OPERATIONAL_ATTEMPTS,
       signal,
     );
     throwIfCancelled(signal);
+    await this.#queue.acknowledge(delivery.leaseId, signal);
+    await this.#clearFailureState(job.deliveryId);
+    return "settled";
+  }
 
-    if (reportResult === "reported") {
-      await this.#saveFailureState(
-        job.deliveryId,
-        {
-          failures: MAX_OPERATIONAL_ATTEMPTS,
-          terminalReport: {
-            status: "confirmed",
-            attempts: reportingAttempt,
-            category: terminal.category,
-          },
-        },
-        signal,
-      );
-      throwIfCancelled(signal);
+  async #settleStoreFailure(
+    delivery: QueueDelivery,
+    job: ReviewJobV1,
+    error: unknown,
+    signal?: AbortSignal,
+  ): Promise<QueueConsumption> {
+    const fallbackAttempt = fallbackOperationalAttempt(delivery.attempt);
+    await this.#reportFailure(referenceFor(job), error, fallbackAttempt, signal);
+    throwIfCancelled(signal);
+    if (fallbackAttempt >= MAX_OPERATIONAL_ATTEMPTS) {
       await this.#queue.acknowledge(delivery.leaseId, signal);
-      await this.#clearFailureState(job.deliveryId, signal);
-    } else if (reportingAttempt >= MAX_TERMINAL_REPORT_ATTEMPTS) {
-      await this.#saveFailureState(
-        job.deliveryId,
-        {
-          failures: MAX_OPERATIONAL_ATTEMPTS,
-          terminalReport: {
-            status: "exhausted",
-            attempts: reportingAttempt,
-            category: terminal.category,
-          },
-        },
-        signal,
-      );
-      throwIfCancelled(signal);
-      await this.#queue.acknowledge(delivery.leaseId, signal);
-      await this.#clearFailureState(job.deliveryId, signal);
+      await this.#clearFailureState(job.deliveryId);
     } else {
-      await this.#saveFailureState(
-        job.deliveryId,
-        {
-          failures: MAX_OPERATIONAL_ATTEMPTS,
-          terminalReport: {
-            status: "pending",
-            attempts: reportingAttempt,
-            category: terminal.category,
-          },
-        },
+      await this.#queue.retry(
+        delivery.leaseId,
+        OPERATIONAL_RETRY_DELAYS_SECONDS[fallbackAttempt - 1]!,
         signal,
       );
-      throwIfCancelled(signal);
-      await this.#queue.retry(delivery.leaseId, OPERATIONAL_RETRY_DELAYS_SECONDS.at(-1)!, signal);
     }
     return "settled";
   }
@@ -461,7 +378,7 @@ export class QueueReviewRunner implements QueueRunService {
     failure: unknown,
     attempt: number,
     signal?: AbortSignal,
-  ): Promise<FailureReportResult> {
+  ): Promise<void> {
     const timeoutSignal = AbortSignal.timeout(this.#configuration.timeouts.shellCommandMs);
     const reportingSignal =
       signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
@@ -470,30 +387,29 @@ export class QueueReviewRunner implements QueueRunService {
     );
     // The report promise is joined when the provider cooperates and safely observed if it
     // ignores cancellation. Queue settlement cannot be held indefinitely by that provider.
-    const result = await new Promise<"reported" | "rejected" | "aborted">((resolve) => {
+    await new Promise<void>((resolve) => {
       let settled = false;
-      function finish(value: "reported" | "rejected" | "aborted"): void {
+      function finish(): void {
         if (settled) {
           return;
         }
         settled = true;
         reportingSignal.removeEventListener("abort", onAbort);
-        resolve(value);
+        resolve();
       }
       function onAbort(): void {
-        finish("aborted");
+        finish();
       }
       reportingSignal.addEventListener("abort", onAbort, { once: true });
       void report.then(
-        () => finish("reported"),
-        () => finish("rejected"),
+        () => finish(),
+        () => finish(),
       );
       if (reportingSignal.aborted) {
         onAbort();
       }
     });
     throwIfCancelled(signal);
-    return result === "aborted" ? "timed-out" : result;
   }
 
   async run(signal?: AbortSignal): Promise<void> {

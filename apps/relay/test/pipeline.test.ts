@@ -7,6 +7,8 @@ import { describe, it } from "node:test";
 import type { ReviewJobV1 } from "@revoir/contracts";
 import {
   QueueReviewRunner,
+  classifyReviewFailure,
+  renderReviewFailureComment,
   type ManualReviewResult,
   type ManualReviewService,
   type OperationalFailureState,
@@ -23,16 +25,12 @@ const silentFailureReporter: ReviewFailureReporter = {
   async report() {},
 };
 
-function memoryFailureStore(): OperationalFailureStore {
-  const states = new Map<string, OperationalFailureState>();
+function memoryFailureStore(
+  states: Map<string, OperationalFailureState> = new Map(),
+): OperationalFailureStore {
   return {
     async load(deliveryId) {
-      return (
-        states.get(deliveryId) ?? {
-          failures: 0,
-          terminalReport: { status: "not-required" },
-        }
-      );
+      return states.get(deliveryId) ?? { failures: 0 };
     },
     async save(deliveryId, state) {
       states.set(deliveryId, state);
@@ -275,5 +273,219 @@ describe("webhook-to-review pipeline", () => {
     assert.deepEqual(acknowledged, []);
     assert.deepEqual(retried, ["lease-operational-failure"]);
     assert.equal(queued.length, 0);
+  });
+
+  it("shares durable state across two failed leases and a successful third lease", async () => {
+    const [job] = await enqueueSignedWebhook("pipeline-two-failures-success");
+    assert.ok(job);
+    const deliveries = [1, 2, 3].map((attempt) => ({
+      leaseId: `lease-${attempt}`,
+      attempt,
+      body: job,
+    }));
+    const acknowledged: string[] = [];
+    const retried: Array<{ leaseId: string; delaySeconds: number }> = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledged.push(leaseId);
+      },
+      async retry(leaseId, delaySeconds) {
+        retried.push({ leaseId, delaySeconds });
+      },
+    };
+    let reviewAttempts = 0;
+    const reviews: ManualReviewService = {
+      async review() {
+        reviewAttempts += 1;
+        if (reviewAttempts < 3) {
+          throw new Error("temporary Pi failure");
+        }
+        return {
+          status: "clean",
+          reviewedSha: job.pullRequest.headSha,
+          currentSha: job.pullRequest.headSha,
+        };
+      },
+    };
+    const reported: number[] = [];
+    const reporter: ReviewFailureReporter = {
+      async report(_reference, _error, attempt) {
+        reported.push(attempt);
+      },
+    };
+    const states = new Map<string, OperationalFailureState>();
+    const runner = new QueueReviewRunner(
+      configuration,
+      queue,
+      reviews,
+      reporter,
+      memoryFailureStore(states),
+    );
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+    await runner.consumeOne();
+
+    assert.equal(reviewAttempts, 3);
+    assert.deepEqual(reported, [1, 2]);
+    assert.deepEqual(retried, [
+      { leaseId: "lease-1", delaySeconds: 30 },
+      { leaseId: "lease-2", delaySeconds: 120 },
+    ]);
+    assert.deepEqual(acknowledged, ["lease-3"]);
+    assert.equal(states.size, 0);
+  });
+
+  it("shares durable state across three failures and terminal settlement", async () => {
+    const [job] = await enqueueSignedWebhook("pipeline-three-failures-terminal");
+    assert.ok(job);
+    const deliveries = [1, 2, 3].map((attempt) => ({
+      leaseId: `terminal-lease-${attempt}`,
+      attempt,
+      body: job,
+    }));
+    const acknowledged: string[] = [];
+    const retried: Array<{ leaseId: string; delaySeconds: number }> = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledged.push(leaseId);
+      },
+      async retry(leaseId, delaySeconds) {
+        retried.push({ leaseId, delaySeconds });
+      },
+    };
+    let reviewAttempts = 0;
+    const reviews: ManualReviewService = {
+      async review() {
+        reviewAttempts += 1;
+        throw new Error("temporary Pi failure");
+      },
+    };
+    const reported: Array<{ attempt: number; body: string }> = [];
+    const reporter: ReviewFailureReporter = {
+      async report(reference, error, attempt, totalAttempts) {
+        reported.push({
+          attempt,
+          body: renderReviewFailureComment(
+            classifyReviewFailure(error),
+            attempt,
+            totalAttempts,
+            reference,
+          ),
+        });
+      },
+    };
+    const states = new Map<string, OperationalFailureState>();
+    const runner = new QueueReviewRunner(
+      configuration,
+      queue,
+      reviews,
+      reporter,
+      memoryFailureStore(states),
+    );
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+    await runner.consumeOne();
+
+    assert.equal(reviewAttempts, 3);
+    assert.deepEqual(
+      reported.map(({ attempt }) => attempt),
+      [1, 2, 3],
+    );
+    assert.match(
+      reported[2]!.body,
+      /revoir review https:\/\/github\.com\/owner\/repository\/pull\/17/u,
+    );
+    assert.deepEqual(retried, [
+      { leaseId: "terminal-lease-1", delaySeconds: 30 },
+      { leaseId: "terminal-lease-2", delaySeconds: 120 },
+    ]);
+    assert.deepEqual(acknowledged, ["terminal-lease-3"]);
+    assert.equal(states.size, 0);
+  });
+
+  it("re-reports idempotently and re-acknowledges after terminal ACK loss", async () => {
+    const [job] = await enqueueSignedWebhook("pipeline-terminal-ack-loss");
+    assert.ok(job);
+    const deliveries = [1, 2, 3, 4].map((attempt) => ({
+      leaseId: `ack-loss-lease-${attempt}`,
+      attempt,
+      body: job,
+    }));
+    const acknowledged: string[] = [];
+    const retried: Array<{ leaseId: string; delaySeconds: number }> = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledged.push(leaseId);
+        if (leaseId === "ack-loss-lease-3") {
+          throw new Error("ACK response was lost");
+        }
+      },
+      async retry(leaseId, delaySeconds) {
+        retried.push({ leaseId, delaySeconds });
+      },
+    };
+    let reviewAttempts = 0;
+    const reviews: ManualReviewService = {
+      async review() {
+        reviewAttempts += 1;
+        throw new Error("temporary Pi failure");
+      },
+    };
+    const terminalBodies: string[] = [];
+    const reportedAttempts: number[] = [];
+    const reporter: ReviewFailureReporter = {
+      async report(reference, error, attempt, totalAttempts) {
+        reportedAttempts.push(attempt);
+        if (attempt === 3) {
+          terminalBodies.push(
+            renderReviewFailureComment(
+              classifyReviewFailure(error),
+              attempt,
+              totalAttempts,
+              reference,
+            ),
+          );
+        }
+      },
+    };
+    const states = new Map<string, OperationalFailureState>();
+    const runner = new QueueReviewRunner(
+      configuration,
+      queue,
+      reviews,
+      reporter,
+      memoryFailureStore(states),
+    );
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+    await assert.rejects(runner.consumeOne(), /ACK response was lost/u);
+    assert.deepEqual(states.get(job.deliveryId), {
+      failures: 3,
+      terminalCategory: "pi",
+    });
+    await runner.consumeOne();
+
+    assert.equal(reviewAttempts, 3);
+    assert.deepEqual(reportedAttempts, [1, 2, 3, 3]);
+    assert.equal(terminalBodies.length, 2);
+    assert.equal(terminalBodies[0], terminalBodies[1]);
+    assert.deepEqual(retried, [
+      { leaseId: "ack-loss-lease-1", delaySeconds: 30 },
+      { leaseId: "ack-loss-lease-2", delaySeconds: 120 },
+    ]);
+    assert.deepEqual(acknowledged, ["ack-loss-lease-3", "ack-loss-lease-4"]);
+    assert.equal(states.size, 0);
   });
 });

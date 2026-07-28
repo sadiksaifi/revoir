@@ -13,17 +13,14 @@ describe("operational failure state", () => {
     try {
       await new FileOperationalFailureStore(stateDirectory).save(deliveryId, {
         failures: 2,
-        terminalReport: { status: "not-required" },
       });
 
       const restartedStore = new FileOperationalFailureStore(stateDirectory);
       assert.deepEqual(await restartedStore.load(deliveryId), {
         failures: 2,
-        terminalReport: { status: "not-required" },
       });
       assert.deepEqual(await restartedStore.load("beec43a9-0a21-4ab8-91e8-22498fa00be9"), {
         failures: 0,
-        terminalReport: { status: "not-required" },
       });
 
       const failureDirectory = join(stateDirectory, "queue-review-failures");
@@ -36,7 +33,6 @@ describe("operational failure state", () => {
       await restartedStore.clear(deliveryId);
       assert.deepEqual(await restartedStore.load(deliveryId), {
         failures: 0,
-        terminalReport: { status: "not-required" },
       });
       assert.deepEqual(await readdir(failureDirectory), []);
     } finally {
@@ -44,44 +40,41 @@ describe("operational failure state", () => {
     }
   });
 
-  it("persists terminal publication progress and confirmation across restarts", async () => {
+  it("persists the terminal category with the absorbing third failure", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-terminal-report-"));
     const deliveryId = "2f5f7475-33ee-4f91-9b68-0f8af72f6640";
     try {
       const store = new FileOperationalFailureStore(stateDirectory);
       await store.save(deliveryId, {
         failures: 3,
-        terminalReport: {
-          status: "publishing",
-          attempts: 1,
-          category: "github",
-        },
+        terminalCategory: "github",
       });
       assert.deepEqual(await new FileOperationalFailureStore(stateDirectory).load(deliveryId), {
         failures: 3,
-        terminalReport: {
-          status: "publishing",
-          attempts: 1,
-          category: "github",
-        },
+        terminalCategory: "github",
       });
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
 
-      await store.save(deliveryId, {
-        failures: 3,
-        terminalReport: {
-          status: "confirmed",
-          attempts: 1,
-          category: "github",
-        },
-      });
-      assert.deepEqual(await new FileOperationalFailureStore(stateDirectory).load(deliveryId), {
-        failures: 3,
-        terminalReport: {
-          status: "confirmed",
-          attempts: 1,
-          category: "github",
-        },
-      });
+  it("rejects persisted shapes outside counts one, two, or terminal three", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-invalid-failure-state-"));
+    const deliveryId = "2f5f7475-33ee-4f91-9b68-0f8af72f6640";
+    const store = new FileOperationalFailureStore(stateDirectory);
+    try {
+      await assert.rejects(
+        store.save(deliveryId, { failures: 0 } as never),
+        /failure state is invalid/u,
+      );
+      await assert.rejects(
+        store.save(deliveryId, { failures: 1, terminalCategory: "pi" } as never),
+        /failure state is invalid/u,
+      );
+      await assert.rejects(
+        store.save(deliveryId, { failures: 3 } as never),
+        /failure state is invalid/u,
+      );
     } finally {
       await rm(stateDirectory, { recursive: true, force: true });
     }

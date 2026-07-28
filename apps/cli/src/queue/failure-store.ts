@@ -7,21 +7,12 @@ import type { ReviewFailureCategory } from "../review/failure.js";
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
 const STATE_DIRECTORY = "queue-review-failures";
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
 const MAX_OPERATIONAL_FAILURES = 3;
 
-export type TerminalReportState =
-  | { readonly status: "not-required" }
-  | {
-      readonly status: "pending" | "publishing" | "confirmed" | "exhausted";
-      readonly attempts: number;
-      readonly category: ReviewFailureCategory;
-    };
-
-export interface OperationalFailureState {
-  readonly failures: number;
-  readonly terminalReport: TerminalReportState;
-}
+export type OperationalFailureState =
+  | { readonly failures: 0 | 1 | 2 }
+  | { readonly failures: 3; readonly terminalCategory: ReviewFailureCategory };
 
 export interface OperationalFailureStore {
   load(deliveryId: string, signal?: AbortSignal): Promise<OperationalFailureState>;
@@ -29,15 +20,12 @@ export interface OperationalFailureStore {
   clear(deliveryId: string, signal?: AbortSignal): Promise<void>;
 }
 
-interface PersistedOperationalFailureState extends OperationalFailureState {
-  version: typeof STATE_VERSION;
-  deliveryId: string;
-}
-
-const EMPTY_STATE: OperationalFailureState = {
-  failures: 0,
-  terminalReport: { status: "not-required" },
+type PersistedOperationalFailureState = OperationalFailureState & {
+  readonly version: typeof STATE_VERSION;
+  readonly deliveryId: string;
 };
+
+const EMPTY_STATE: OperationalFailureState = { failures: 0 };
 const REVIEW_FAILURE_CATEGORIES = new Set<ReviewFailureCategory>([
   "timeout",
   "github",
@@ -59,36 +47,18 @@ function isMissingFile(error: unknown): boolean {
   );
 }
 
-function isValidTerminalReport(value: unknown, failures: number): value is TerminalReportState {
-  if (typeof value !== "object" || value === null || Array.isArray(value) || !("status" in value)) {
+function isValidState(value: OperationalFailureState): boolean {
+  if (!Number.isSafeInteger(value.failures) || value.failures < 1 || value.failures > 3) {
     return false;
   }
-  if (failures < MAX_OPERATIONAL_FAILURES) {
-    return value.status === "not-required" && Object.keys(value).length === 1;
+  if (value.failures < MAX_OPERATIONAL_FAILURES) {
+    return Object.keys(value).length === 1;
   }
   return (
-    (value.status === "pending" ||
-      value.status === "publishing" ||
-      value.status === "confirmed" ||
-      value.status === "exhausted") &&
-    "attempts" in value &&
-    Number.isSafeInteger(value.attempts) &&
-    (value.attempts as number) >= (value.status === "pending" ? 0 : 1) &&
-    (value.attempts as number) <= MAX_OPERATIONAL_FAILURES &&
-    (value.status !== "pending" || (value.attempts as number) < MAX_OPERATIONAL_FAILURES) &&
-    (value.status !== "exhausted" || (value.attempts as number) === MAX_OPERATIONAL_FAILURES) &&
-    "category" in value &&
-    typeof value.category === "string" &&
-    REVIEW_FAILURE_CATEGORIES.has(value.category as ReviewFailureCategory)
-  );
-}
-
-function isValidState(value: OperationalFailureState): boolean {
-  return (
-    Number.isSafeInteger(value.failures) &&
-    value.failures >= 1 &&
-    value.failures <= MAX_OPERATIONAL_FAILURES &&
-    isValidTerminalReport(value.terminalReport, value.failures)
+    Object.keys(value).length === 2 &&
+    "terminalCategory" in value &&
+    typeof value.terminalCategory === "string" &&
+    REVIEW_FAILURE_CATEGORIES.has(value.terminalCategory as ReviewFailureCategory)
   );
 }
 
@@ -113,9 +83,22 @@ function parseState(
     !("failures" in parsed) ||
     !Number.isSafeInteger(parsed.failures) ||
     (parsed.failures as number) < 1 ||
-    (parsed.failures as number) > MAX_OPERATIONAL_FAILURES ||
-    !("terminalReport" in parsed) ||
-    !isValidTerminalReport(parsed.terminalReport, parsed.failures as number)
+    (parsed.failures as number) > MAX_OPERATIONAL_FAILURES
+  ) {
+    throw new Error("Operational review failure state is invalid.");
+  }
+  const failures = parsed.failures as 1 | 2 | 3;
+  const state = (
+    failures === MAX_OPERATIONAL_FAILURES
+      ? {
+          failures,
+          ...("terminalCategory" in parsed ? { terminalCategory: parsed.terminalCategory } : {}),
+        }
+      : { failures }
+  ) as OperationalFailureState;
+  if (
+    !isValidState(state) ||
+    Object.keys(parsed).length !== (failures === MAX_OPERATIONAL_FAILURES ? 4 : 3)
   ) {
     throw new Error("Operational review failure state is invalid.");
   }
@@ -139,10 +122,12 @@ export class FileOperationalFailureStore implements OperationalFailureStore {
         }),
         deliveryId,
       );
-      return {
-        failures: persisted.failures,
-        terminalReport: persisted.terminalReport,
-      };
+      return persisted.failures === MAX_OPERATIONAL_FAILURES
+        ? {
+            failures: MAX_OPERATIONAL_FAILURES,
+            terminalCategory: persisted.terminalCategory,
+          }
+        : { failures: persisted.failures };
     } catch (error) {
       if (isMissingFile(error)) {
         return EMPTY_STATE;
@@ -161,12 +146,11 @@ export class FileOperationalFailureStore implements OperationalFailureStore {
       throw new Error("Operational review failure state is invalid.");
     }
     await this.#ensureDirectory(signal);
-    const persisted: PersistedOperationalFailureState = {
+    const persisted = {
       version: STATE_VERSION,
       deliveryId,
-      failures: state.failures,
-      terminalReport: state.terminalReport,
-    };
+      ...state,
+    } as PersistedOperationalFailureState;
     const temporaryFile = join(
       this.#directory,
       `.${stateFileName(deliveryId)}.${process.pid}.${randomUUID()}.tmp`,
