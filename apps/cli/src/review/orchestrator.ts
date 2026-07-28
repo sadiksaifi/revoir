@@ -520,6 +520,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
           }
         }
       }
+      if (result?.status === "clean" || result?.status === "findings") {
+        await github.removeOwnFailureComment(reference, signal);
+        throwIfAborted(signal);
+      }
     } catch (error) {
       failure = error;
     }

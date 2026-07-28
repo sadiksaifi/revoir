@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { createConfiguration } from "../src/config/schema.js";
 import type { QueueDelivery } from "../src/queue/client.js";
 import { QueueReviewRunner, type QueueClient } from "../src/queue/runner.js";
+import type { ReviewFailureReporter } from "../src/review/failure-reporter.js";
 import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
@@ -54,6 +55,10 @@ function reviewJob(overrides: Record<string, unknown> = {}) {
 function delivery(leaseId: string, body: unknown, attempt = 1): QueueDelivery {
   return { leaseId, attempt, body };
 }
+
+const silentFailureReporter: ReviewFailureReporter = {
+  async report() {},
+};
 
 describe("automatic queue review runner", () => {
   it("acknowledges terminal jobs and retries only operational review failures", async () => {
@@ -110,7 +115,12 @@ describe("automatic queue review runner", () => {
         throw new Error("temporary GitHub failure");
       },
     };
-    const runner = new QueueReviewRunner(configuration(), queue, reviewService);
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviewService,
+      silentFailureReporter,
+    );
 
     while (deliveries.length > 0) {
       // Each call verifies the settlement of exactly one leased delivery.
@@ -205,7 +215,13 @@ describe("automatic queue review runner", () => {
         throw new Error("temporary Pi failure");
       },
     };
-    const runner = new QueueReviewRunner(configuration(), queue, reviews);
+    const reportedAttempts: number[] = [];
+    const reporter: ReviewFailureReporter = {
+      async report(_reference, _error, attempt) {
+        reportedAttempts.push(attempt);
+      },
+    };
+    const runner = new QueueReviewRunner(configuration(), queue, reviews, reporter);
 
     await runner.consumeOne();
     await runner.consumeOne();
@@ -216,5 +232,6 @@ describe("automatic queue review runner", () => {
       { leaseId: "lease-2", delaySeconds: 120 },
     ]);
     assert.deepEqual(acknowledgements, ["lease-3"]);
+    assert.deepEqual(reportedAttempts, [1, 2, 3]);
   });
 });

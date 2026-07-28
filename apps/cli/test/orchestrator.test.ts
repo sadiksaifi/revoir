@@ -212,6 +212,12 @@ function harness(
     async removeOwnCompletionReaction() {
       events.push("remove-old-thumb");
     },
+    async upsertFailureComment() {
+      events.push("upsert-failure-comment");
+    },
+    async removeOwnFailureComment() {
+      events.push("remove-failure-comment");
+    },
     async removeOwnPendingReview() {
       events.push("remove-pending-review");
       options.pendingReviewState?.clear();
@@ -439,6 +445,7 @@ describe("clean review orchestrator", () => {
       "get-head",
       "add-+1",
       "get-head",
+      "remove-failure-comment",
     ]);
   });
 
@@ -499,7 +506,7 @@ describe("clean review orchestrator", () => {
         },
       ],
     });
-    assert.deepEqual(events.slice(-8), [
+    assert.deepEqual(events.slice(-9), [
       "delete-10",
       "get-head",
       "remove-pending-review",
@@ -508,6 +515,7 @@ describe("clean review orchestrator", () => {
       "create-review",
       "get-head",
       "submit-review-20",
+      "remove-failure-comment",
     ]);
     assert.equal(events.filter((event) => event === "create-review").length, 1);
     assert.equal(events.includes("add-+1"), false);

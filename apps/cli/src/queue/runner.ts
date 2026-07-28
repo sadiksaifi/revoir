@@ -2,6 +2,10 @@ import { parseReviewJob, ReviewJobSchemaError, type ReviewJobV1 } from "@revoir/
 
 import type { RevoirConfiguration } from "../config/schema.js";
 import {
+  GitHubReviewFailureReporter,
+  type ReviewFailureReporter,
+} from "../review/failure-reporter.js";
+import {
   createDefaultManualReviewService,
   type ManualReviewService,
 } from "../review/orchestrator.js";
@@ -68,6 +72,7 @@ function waitForNextPoll(signal?: AbortSignal): Promise<void> {
 
 export class QueueReviewRunner implements QueueRunService {
   readonly #configuration: RevoirConfiguration;
+  readonly #failures: ReviewFailureReporter;
   readonly #queue: QueueClient;
   readonly #reviews: ManualReviewService;
 
@@ -75,10 +80,12 @@ export class QueueReviewRunner implements QueueRunService {
     configuration: RevoirConfiguration,
     queue: QueueClient,
     reviews: ManualReviewService,
+    failures: ReviewFailureReporter = new GitHubReviewFailureReporter(configuration.github),
   ) {
     this.#configuration = configuration;
     this.#queue = queue;
     this.#reviews = reviews;
+    this.#failures = failures;
   }
 
   async consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
@@ -111,14 +118,29 @@ export class QueueReviewRunner implements QueueRunService {
     } catch (error) {
       if (error instanceof PullRequestEligibilityError) {
         await this.#queue.acknowledge(delivery.leaseId, signal);
-      } else if (delivery.attempt >= MAX_OPERATIONAL_ATTEMPTS) {
-        await this.#queue.acknowledge(delivery.leaseId, signal);
       } else {
-        await this.#queue.retry(
-          delivery.leaseId,
-          OPERATIONAL_RETRY_DELAYS_SECONDS[delivery.attempt - 1]!,
-          signal,
-        );
+        const reportingSignal = signal ?? new AbortController().signal;
+        try {
+          await this.#failures.report(
+            referenceFor(job),
+            error,
+            delivery.attempt,
+            MAX_OPERATIONAL_ATTEMPTS,
+            reportingSignal,
+          );
+        } catch {
+          // A provider outage may also prevent visible failure reporting. Settlement remains
+          // bounded so the same unavailable provider cannot create an infinite queue loop.
+        }
+        if (delivery.attempt >= MAX_OPERATIONAL_ATTEMPTS) {
+          await this.#queue.acknowledge(delivery.leaseId, signal);
+        } else {
+          await this.#queue.retry(
+            delivery.leaseId,
+            OPERATIONAL_RETRY_DELAYS_SECONDS[delivery.attempt - 1]!,
+            signal,
+          );
+        }
       }
     }
     return "settled";
