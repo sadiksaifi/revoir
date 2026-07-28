@@ -130,6 +130,12 @@ export class QueueReviewRunner implements QueueRunService {
       return "settled";
     }
 
+    if (delivery.attempt > MAX_OPERATIONAL_ATTEMPTS) {
+      throwIfCancelled(signal);
+      await this.#queue.acknowledge(delivery.leaseId, signal);
+      return "settled";
+    }
+
     try {
       await this.#reviews.review(referenceFor(job), {
         expectedHeadSha: job.pullRequest.headSha,

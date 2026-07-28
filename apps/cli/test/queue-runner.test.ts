@@ -236,6 +236,43 @@ describe("automatic queue review runner", () => {
     assert.deepEqual(reportedAttempts, [1, 2, 3]);
   });
 
+  it("acknowledges redeliveries past the retry cap without reviewing or reporting", async () => {
+    const deliveries = [delivery("lease-4", reviewJob(), 4), delivery("lease-9", reviewJob(), 9)];
+    const acknowledgements: string[] = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+      },
+      async retry() {
+        assert.fail("An exhausted delivery must not be retried.");
+      },
+    };
+    let reviewAttempts = 0;
+    const reviews: ManualReviewService = {
+      async review() {
+        reviewAttempts += 1;
+        throw new Error("review must not run");
+      },
+    };
+    let failureReports = 0;
+    const reporter: ReviewFailureReporter = {
+      async report() {
+        failureReports += 1;
+      },
+    };
+    const runner = new QueueReviewRunner(configuration(), queue, reviews, reporter);
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+
+    assert.deepEqual(acknowledgements, ["lease-4", "lease-9"]);
+    assert.equal(reviewAttempts, 0);
+    assert.equal(failureReports, 0);
+  });
+
   it("acknowledges a successful third attempt after two reported operational failures", async () => {
     const deliveries = [1, 2, 3].map((attempt) =>
       delivery(`lease-${attempt}`, reviewJob(), attempt),
