@@ -12,8 +12,8 @@
     "lint": "pnpm --workspace-root run lint apps/relay",
     "lint:fix": "pnpm --workspace-root run lint:fix apps/relay",
     "prebuild": "pnpm --filter @revoir/contracts run build",
-    "pretest": "pnpm --filter @revoir/contracts run build",
-    "pretypecheck": "pnpm --filter @revoir/contracts run build",
+    "pretest": "pnpm --filter cli run build",
+    "pretypecheck": "pnpm --filter cli run build",
     "test": "node --test --import tsx 'test/**/*.test.ts'",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
   },
@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "cli": "workspace:*",
     "esbuild": "0.28.1",
     "miniflare": "4.20260722.0",
     "tsx": "catalog:",

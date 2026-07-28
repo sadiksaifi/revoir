@@ -55,6 +55,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.1.1
+      cli:
+        specifier: workspace:*
+        version: link:../cli
       esbuild:
         specifier: 0.28.1
         version: 0.28.1
