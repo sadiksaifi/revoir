@@ -84,6 +84,7 @@ function harness(
     workspaceCleanupGate?: Promise<void>;
     workspaceCleanupError?: Error;
     lock?: ReviewLock;
+    workspaces?: WorkspacePreparer;
     reviewMs?: number;
   } = {},
 ) {
@@ -173,7 +174,7 @@ function harness(
       return session;
     },
   };
-  const workspaces: WorkspacePreparer = {
+  const workspaces: WorkspacePreparer = options.workspaces ?? {
     async prepare(_reference, _pullRequest, token) {
       events.push(`prepare-${token}`);
       if (options.prepareError !== undefined) {
@@ -525,6 +526,178 @@ describe("clean review orchestrator", () => {
       setImmediate(resolve);
     });
     assert.equal(disposed, 1);
+  });
+
+  it("cleans a workspace that finishes preparation after the review times out", async () => {
+    let finishPreparation: ((workspace: PreparedWorkspace) => void) | undefined;
+    let cleanupCalls = 0;
+    let releases = 0;
+    let engineCalls = 0;
+    const timedOut = harness({
+      reviewMs: 5,
+      workspaces: {
+        prepare: async () =>
+          new Promise<PreparedWorkspace>((resolve) => {
+            finishPreparation = resolve;
+          }),
+      },
+      review: async () => {
+        engineCalls += 1;
+      },
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+
+    await assert.rejects(() => timedOut.orchestrator.review(reference), ReviewTimeoutError);
+    assert.equal(releases, 1);
+    assert.equal(engineCalls, 0);
+
+    assert.ok(finishPreparation);
+    finishPreparation({
+      root: "/tmp/late-review",
+      checkout: "/tmp/late-review/repository",
+      diff: "diff",
+      remoteUrl: "https://github.com/owner/repository.git",
+      async cleanup() {
+        cleanupCalls += 1;
+      },
+    });
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(cleanupCalls, 1);
+  });
+
+  it("cleans a workspace that finishes synchronously at the abort boundary", async () => {
+    let cleanupCalls = 0;
+    let releases = 0;
+    let engineCalls = 0;
+    const workspace: PreparedWorkspace = {
+      root: "/tmp/abort-boundary-review",
+      checkout: "/tmp/abort-boundary-review/repository",
+      diff: "diff",
+      remoteUrl: "https://github.com/owner/repository.git",
+      async cleanup() {
+        cleanupCalls += 1;
+      },
+    };
+    const timedOut = harness({
+      reviewMs: 5,
+      workspaces: {
+        prepare: async (_reference, _pullRequest, _token, signal) =>
+          new Promise<PreparedWorkspace>((resolve) => {
+            signal.addEventListener("abort", () => resolve(workspace), { once: true });
+          }),
+      },
+      review: async () => {
+        engineCalls += 1;
+      },
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+
+    await assert.rejects(() => timedOut.orchestrator.review(reference), ReviewTimeoutError);
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(cleanupCalls, 1);
+    assert.equal(releases, 1);
+    assert.equal(engineCalls, 0);
+  });
+
+  it("swallows a detached late workspace cleanup rejection after the original timeout", async () => {
+    let finishPreparation: ((workspace: PreparedWorkspace) => void) | undefined;
+    let cleanupCalls = 0;
+    const timedOut = harness({
+      reviewMs: 5,
+      workspaces: {
+        prepare: async () =>
+          new Promise<PreparedWorkspace>((resolve) => {
+            finishPreparation = resolve;
+          }),
+      },
+    });
+
+    const failure = await timedOut.orchestrator.review(reference).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    assert.ok(failure instanceof ReviewTimeoutError);
+
+    const unhandledRejections: unknown[] = [];
+    const captureUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections.push(reason);
+    };
+    process.on("unhandledRejection", captureUnhandledRejection);
+    try {
+      assert.ok(finishPreparation);
+      finishPreparation({
+        root: "/tmp/rejected-late-cleanup",
+        checkout: "/tmp/rejected-late-cleanup/repository",
+        diff: "diff",
+        remoteUrl: "https://github.com/owner/repository.git",
+        async cleanup() {
+          cleanupCalls += 1;
+          throw new Error("late cleanup failed");
+        },
+      });
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    } finally {
+      process.removeListener("unhandledRejection", captureUnhandledRejection);
+    }
+
+    assert.equal(cleanupCalls, 1);
+    assert.deepEqual(unhandledRejections, []);
+  });
+
+  it("retains late partial-workspace cleanup after the review times out", async () => {
+    let failPreparation: ((error: Error) => void) | undefined;
+    let cleanupCalls = 0;
+    const timedOut = harness({
+      reviewMs: 5,
+      workspaces: {
+        prepare: async () =>
+          new Promise<PreparedWorkspace>((_resolve, reject) => {
+            failPreparation = reject;
+          }),
+      },
+    });
+
+    await assert.rejects(() => timedOut.orchestrator.review(reference), ReviewTimeoutError);
+
+    assert.ok(failPreparation);
+    failPreparation(
+      new WorkspacePreparationError(
+        new Error("late preparation failed"),
+        new Error("initial late cleanup failed"),
+        async () => {
+          cleanupCalls += 1;
+        },
+      ),
+    );
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(cleanupCalls, 1);
   });
 
   it("aborts a non-settling head request and still cleans every artifact", async () => {

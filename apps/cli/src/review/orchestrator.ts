@@ -244,11 +244,13 @@ export class CleanReviewOrchestrator implements ManualReviewService {
         if (error instanceof WorkspacePreparationError) {
           workspaceCleanup = createTerminalHandle(error.cleanup);
         } else if (error === deadline.error) {
-          void preparation.catch((lateError: unknown) => {
-            if (lateError instanceof WorkspacePreparationError) {
-              void lateError.cleanup().catch(() => {});
-            }
-          });
+          void preparation
+            .then(
+              (lateWorkspace) => lateWorkspace.cleanup(),
+              (lateError: unknown) =>
+                lateError instanceof WorkspacePreparationError ? lateError.cleanup() : undefined,
+            )
+            .catch(() => {});
         }
         throw error;
       }
