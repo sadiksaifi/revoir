@@ -101,6 +101,8 @@ describe("GitHub App review gateway", () => {
           { id: 32, content: "+1", user: { login: "human" } },
           { id: 34, content: "eyes", user: { login: "revoir-test[bot]" } },
           { id: 35, content: "eyes", user: { login: "human" } },
+          { id: 36, content: "confused", user: { login: "revoir-test[bot]" } },
+          { id: 37, content: "confused", user: { login: "human" } },
         ]);
       }
       if (url.endsWith("/issues/17/reactions") && init?.method === "POST") {
@@ -113,7 +115,8 @@ describe("GitHub App review gateway", () => {
       if (
         url.endsWith("/reactions/31") ||
         url.endsWith("/reactions/33") ||
-        url.endsWith("/reactions/34")
+        url.endsWith("/reactions/34") ||
+        url.endsWith("/reactions/36")
       ) {
         return new Response(null, { status: 204 });
       }
@@ -165,6 +168,8 @@ describe("GitHub App review gateway", () => {
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/32")).length, 0);
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/34")).length, 1);
     assert.equal(requests.filter((request) => request.url.endsWith("/reactions/35")).length, 0);
+    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/36")).length, 1);
+    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/37")).length, 0);
     assert.ok(requests.every((request) => request.init?.signal === abortController.signal));
   });
 
@@ -272,6 +277,142 @@ describe("GitHub App review gateway", () => {
 
     await session.removeOwnPendingReview(reference, new AbortController().signal);
     assert.deepEqual(deleted, [71]);
+  });
+
+  it("discovers prior run markers and resolves only obsolete App-owned finding threads", async () => {
+    const mutations: string[] = [];
+    const ownBodyFingerprint = "a".repeat(64);
+    const ownThreadFingerprint = "b".repeat(64);
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+        return json([
+          {
+            id: 201,
+            state: "COMMENTED",
+            body: `<!-- revoir:run:v1:${"2".repeat(40)} -->\n<!-- revoir:finding:v1:${ownBodyFingerprint} -->`,
+            user: { login: "revoir-test[bot]" },
+          },
+          {
+            id: 202,
+            state: "COMMENTED",
+            body: `<!-- revoir:finding:v1:${"c".repeat(64)} -->`,
+            user: { login: "human" },
+          },
+          {
+            id: 203,
+            state: "COMMENTED",
+            body: `<!-- revoir:finding:v1:${"d".repeat(64)} -->`,
+            user: { login: "another-app[bot]" },
+          },
+        ]);
+      }
+      if (url.endsWith("/graphql")) {
+        const request = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables: Record<string, unknown>;
+        };
+        if (request.query.includes("reviewThreads")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      {
+                        id: "THREAD_OWN_OPEN",
+                        isResolved: false,
+                        comments: {
+                          nodes: [
+                            {
+                              body: `<!-- revoir:finding:v1:${ownThreadFingerprint} -->`,
+                              author: { login: "revoir-test[bot]" },
+                            },
+                          ],
+                        },
+                      },
+                      {
+                        id: "THREAD_OWN_RESOLVED",
+                        isResolved: true,
+                        comments: {
+                          nodes: [
+                            {
+                              body: `<!-- revoir:finding:v1:${"e".repeat(64)} -->`,
+                              author: { login: "revoir-test[bot]" },
+                            },
+                          ],
+                        },
+                      },
+                      {
+                        id: "THREAD_HUMAN",
+                        isResolved: false,
+                        comments: {
+                          nodes: [
+                            {
+                              body: `<!-- revoir:finding:v1:${"f".repeat(64)} -->`,
+                              author: { login: "human" },
+                            },
+                          ],
+                        },
+                      },
+                      {
+                        id: "THREAD_OTHER_APP",
+                        isResolved: false,
+                        comments: {
+                          nodes: [
+                            {
+                              body: `<!-- revoir:finding:v1:${"0".repeat(64)} -->`,
+                              author: { login: "another-app[bot]" },
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                  },
+                },
+              },
+            },
+          });
+        }
+        mutations.push(String(request.variables.threadId));
+        return json({
+          data: {
+            resolveReviewThread: {
+              thread: { id: request.variables.threadId, isResolved: true },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    assert.deepEqual(await session.getPriorReviewState(reference, new AbortController().signal), {
+      activeFingerprints: [ownBodyFingerprint, ownThreadFingerprint],
+      ownedOpenThreads: [{ id: "THREAD_OWN_OPEN", fingerprint: ownThreadFingerprint }],
+      runHeadShas: ["2".repeat(40)],
+    });
+    await assert.rejects(
+      () => session.resolveReviewThreads(reference, ["THREAD_HUMAN"], new AbortController().signal),
+      /not owned by this GitHub App/u,
+    );
+    await session.resolveReviewThreads(
+      reference,
+      ["THREAD_OWN_OPEN"],
+      new AbortController().signal,
+    );
+    assert.deepEqual(mutations, ["THREAD_OWN_OPEN"]);
   });
 
   it("uses the bounded state-aware fence while reconciling an owned pending review", async () => {

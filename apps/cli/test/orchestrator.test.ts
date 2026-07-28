@@ -24,6 +24,7 @@ import {
   type ReviewEngine,
 } from "../src/review/pi.js";
 import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pull-request.js";
+import type { PriorReviewState } from "../src/review/reconciliation.js";
 import type { PreparedWorkspace, WorkspacePreparer } from "../src/review/workspace.js";
 import { WorkspacePreparationError } from "../src/review/workspace.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
@@ -111,6 +112,7 @@ function harness(
     currentSha?: string;
     pullRequest?: PullRequestSnapshot;
     review?: ReviewEngine["review"];
+    priorReviewState?: PriorReviewState;
     prepareError?: Error;
     completionError?: Error;
     reactionError?: ReviewReaction;
@@ -196,6 +198,19 @@ function harness(
     async removeOwnPendingReview() {
       events.push("remove-pending-review");
       options.pendingReviewState?.clear();
+    },
+    async getPriorReviewState() {
+      events.push("get-prior-review-state");
+      return (
+        options.priorReviewState ?? {
+          activeFingerprints: [],
+          ownedOpenThreads: [],
+          runHeadShas: [],
+        }
+      );
+    },
+    async resolveReviewThreads(_reference, threadIds) {
+      events.push(`resolve-threads-${threadIds.join(",")}`);
     },
     async addReaction(_reference, reaction: ReviewReaction) {
       events.push(`add-${reaction}`);
