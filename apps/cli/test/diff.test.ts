@@ -125,6 +125,44 @@ index 1111111..2222222 100644
     }
   });
 
+  it("preserves literal backslashes in quoted, octal, and unquoted Git paths", () => {
+    const index = parseGitDiff(`diff --git "a/add\\\\name.ts" "b/add\\\\name.ts"
+new file mode 100644
+--- /dev/null
++++ "b/add\\\\name.ts"
+@@ -0,0 +1 @@
++added
+diff --git "a/delete\\134name.ts" "b/delete\\134name.ts"
+deleted file mode 100644
+--- "a/delete\\134name.ts"
++++ /dev/null
+@@ -1 +0,0 @@
+-deleted
+diff --git a/from\\name.ts b/to\\name.ts
+similarity index 50%
+rename from from\\name.ts
+rename to to\\name.ts
+--- a/from\\name.ts
++++ b/to\\name.ts
+@@ -1 +1 @@
+-old
++new
+`);
+
+    const added = index.files.get("add\\name.ts");
+    assert.ok(added);
+    assert.equal(diffPosition(added, "RIGHT", 1), 1);
+    const deleted = index.files.get("delete\\name.ts");
+    assert.ok(deleted);
+    assert.equal(diffPosition(deleted, "LEFT", 1), 1);
+    const renamed = index.files.get("to\\name.ts");
+    assert.ok(renamed);
+    assert.equal(renamed.oldPath, "from\\name.ts");
+    assert.equal(renamed.newPath, "to\\name.ts");
+    assert.equal(diffPosition(renamed, "LEFT", 1), 1);
+    assert.equal(diffPosition(renamed, "RIGHT", 1), 2);
+  });
+
   it("rejects malformed quoted UTF-8 path bytes", () => {
     assert.throws(
       () =>

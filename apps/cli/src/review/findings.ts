@@ -312,7 +312,6 @@ function validateFindingGrounding(finding: ModelFindingV1, path: string): void {
 function safeRepositoryPath(value: string): string {
   if (
     posix.isAbsolute(value) ||
-    value.includes("\\") ||
     value.startsWith("/") ||
     value.endsWith("/") ||
     value.split("/").some((part) => part === "" || part === "." || part === "..")

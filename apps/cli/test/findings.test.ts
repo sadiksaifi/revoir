@@ -19,6 +19,7 @@ const execFileAsync = promisify(execFile);
 const NFD_PATH = "cafe\u0301.ts";
 const NFC_PATH = NFD_PATH.normalize("NFC");
 const LITERAL_SPACE_PATH = "literal [1] .ts";
+const BACKSLASH_PATH = "slash\\name.ts";
 
 const DIFF = `diff --git a/source.ts b/source.ts
 index 1111111..2222222 100644
@@ -126,6 +127,7 @@ describe("finding validation", () => {
       writeFile(join(checkout, "literal[1].ts"), "literal\n"),
       writeFile(join(checkout, NFD_PATH), "decomposed\n"),
       writeFile(join(checkout, LITERAL_SPACE_PATH), "literal space\n"),
+      writeFile(join(checkout, BACKSLASH_PATH), "const backslash = true;\n"),
       mkdir(join(checkout, "directory")).then(() =>
         writeFile(join(checkout, "directory", "nested.ts"), "nested\n"),
       ),
@@ -302,7 +304,6 @@ describe("finding validation", () => {
     const cases = [
       "../source.ts",
       "/source.ts",
-      "nested\\source.ts",
       "missing.ts",
       "directory",
       "outside.ts",
@@ -320,6 +321,37 @@ describe("finding validation", () => {
         FindingContractError,
       );
     }
+  });
+
+  it("preserves a literal backslash through diff, tree, fingerprint, and payload paths", async () => {
+    const backslashDiff = `diff --git "a/slash\\\\name.ts" "b/slash\\\\name.ts"
+new file mode 100644
+--- /dev/null
++++ "b/slash\\\\name.ts"
+@@ -0,0 +1 @@
++const backslash = true;
+`;
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          path: BACKSLASH_PATH,
+          range: { start: 1, end: 1, side: "RIGHT" },
+          title: "Backslash path is skipped",
+          issue: "The backslash path skips the required validation.",
+          impact: "The skipped backslash validation accepts an invalid entry.",
+          evidence: "The changed backslash declaration bypasses validation.",
+          fixDirection: "Validate the backslash path before use.",
+        }),
+      ]),
+      { checkout, diff: backslashDiff },
+    );
+
+    assert.equal(result.findings[0]?.path, BACKSLASH_PATH);
+    assert.deepEqual(Buffer.from(result.findings[0]?.path ?? ""), Buffer.from(BACKSLASH_PATH));
+    assert.equal(result.findings[0]?.attachment.path, BACKSLASH_PATH);
+    const publication = createReviewPublication("f".repeat(40), result.findings);
+    assert.equal(publication.payload.comments?.[0]?.path, BACKSLASH_PATH);
+    assert.match(publication.payload.comments?.[0]?.body ?? "", /slash\\name\.ts/u);
   });
 
   it("validates exact reviewed-head Git tree entry types including an uninitialized gitlink", async () => {
