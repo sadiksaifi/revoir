@@ -72,6 +72,12 @@ export {
   type ReviewPublication,
 } from "./review/publication.js";
 export {
+  planFindingReconciliation,
+  type FindingReconciliationPlan,
+  type OwnedFindingThread,
+  type PriorReviewState,
+} from "./review/reconciliation.js";
+export {
   assertPullRequestEligible,
   parsePullRequestUrl,
   PullRequestEligibilityError,

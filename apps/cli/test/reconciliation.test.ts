@@ -1,0 +1,68 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import type { ReviewFindingV1 } from "../src/review/findings.js";
+import { planFindingReconciliation } from "../src/review/reconciliation.js";
+
+function finding(fingerprint: string, startLine: number): ReviewFindingV1 {
+  return {
+    version: 1,
+    fingerprint,
+    priority: "P1",
+    path: "source.ts",
+    range: { start: startLine, end: startLine, side: "RIGHT" },
+    defectKind: "correctness",
+    impactKind: "incorrect-result",
+    fixAction: "restore",
+    anchor: "currentValue",
+    attachment: {
+      kind: "inline",
+      path: "source.ts",
+      startLine,
+      endLine: startLine,
+      side: "RIGHT",
+    },
+  };
+}
+
+describe("finding reconciliation", () => {
+  it("keeps unchanged findings, publishes net-new findings, and resolves obsolete owned threads", () => {
+    const unchanged = finding("a".repeat(64), 40);
+    const changed = finding("b".repeat(64), 12);
+
+    assert.deepEqual(
+      planFindingReconciliation([unchanged, changed], {
+        activeFingerprints: ["a".repeat(64)],
+        ownedOpenThreads: [
+          { id: "THREAD_Z", fingerprint: "c".repeat(64) },
+          { id: "THREAD_A", fingerprint: "a".repeat(64) },
+          { id: "THREAD_B", fingerprint: "d".repeat(64) },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [changed],
+        obsoleteThreadIds: ["THREAD_B", "THREAD_Z"],
+      },
+    );
+  });
+
+  it("deduplicates prior GitHub state and produces deterministic resolution order", () => {
+    const current = finding("e".repeat(64), 7);
+    assert.deepEqual(
+      planFindingReconciliation([current], {
+        activeFingerprints: ["e".repeat(64), "e".repeat(64)],
+        ownedOpenThreads: [
+          { id: "THREAD_2", fingerprint: "f".repeat(64) },
+          { id: "THREAD_1", fingerprint: "f".repeat(64) },
+          { id: "THREAD_2", fingerprint: "f".repeat(64) },
+        ],
+        runHeadShas: [],
+      }),
+      {
+        netNewFindings: [],
+        obsoleteThreadIds: ["THREAD_1", "THREAD_2"],
+      },
+    );
+  });
+});
