@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { promisify } from "node:util";
 
 import { FindingContractError } from "../src/review/findings.js";
 import {
@@ -13,6 +15,8 @@ import {
 } from "../src/review/pi.js";
 import { parsePullRequestUrl, type PullRequestSnapshot } from "../src/review/pull-request.js";
 import type { PreparedWorkspace } from "../src/review/workspace.js";
+
+const execFileAsync = promisify(execFile);
 
 const pullRequest: PullRequestSnapshot = {
   number: 17,
@@ -40,6 +44,18 @@ const workspace: PreparedWorkspace = {
   remoteUrl: "https://github.com/owner/repository.git",
   async cleanup() {},
 };
+
+async function commitReviewedHead(checkout: string): Promise<void> {
+  await execFileAsync("git", ["init", "--quiet"], { cwd: checkout });
+  await execFileAsync("git", ["config", "user.name", "Revoir Test"], { cwd: checkout });
+  await execFileAsync("git", ["config", "user.email", "revoir@example.test"], {
+    cwd: checkout,
+  });
+  await execFileAsync("git", ["add", "--all"], { cwd: checkout });
+  await execFileAsync("git", ["commit", "--quiet", "-m", "reviewed head"], {
+    cwd: checkout,
+  });
+}
 
 class FakeSessionFactory implements PiSessionFactory {
   readonly options: PiSessionOptions[] = [];
@@ -99,6 +115,7 @@ describe("Pi clean review adapter", () => {
     const checkout = await mkdtemp(join(tmpdir(), "revoir-pi-findings-"));
     try {
       await writeFile(join(checkout, "source.ts"), "const current = true;\n");
+      await commitReviewedHead(checkout);
       const sessions = new FakeSessionFactory();
       sessions.result = JSON.stringify({
         version: 1,
