@@ -36,6 +36,25 @@ describe("finding contract v1", () => {
     assert.deepEqual(parseModelFinding(parsed.findings[0], 0), value.findings[0]);
   });
 
+  it("preserves exact Git path code points while normalizing prose", () => {
+    const decomposedPath = " dir/cafe\u0301 [literal] .ts ";
+    const candidate = finding();
+    const parsed = parseModelFinding(
+      {
+        ...candidate,
+        title: "Cafe\u0301 signal",
+        path: decomposedPath,
+        issue: "The cafe\u0301 signal is dropped.",
+      },
+      0,
+    );
+
+    assert.equal(parsed.path, decomposedPath);
+    assert.deepEqual(Buffer.from(parsed.path), Buffer.from(decomposedPath));
+    assert.equal(parsed.title, "Café signal");
+    assert.equal(parsed.issue, "The café signal is dropped.");
+  });
+
   it("rejects malformed JSON, unknown versions, fields, and envelope shapes", () => {
     const cases = [
       "not json",
@@ -124,6 +143,8 @@ describe("finding contract v1", () => {
       { ...finding(), fixDirection: "two\nlines" },
       { ...finding(), evidence: null },
       { ...finding(), path: "source\u0000.ts" },
+      { ...finding(), path: "source\ud800.ts" },
+      { ...finding(), path: "source\nline.ts" },
     ];
     for (const candidate of cases) {
       assert.throws(() => parseModelFinding(candidate, 0), FindingSchemaError);

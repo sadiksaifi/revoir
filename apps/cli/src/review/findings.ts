@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { isAbsolute, join, normalize, posix, relative, sep } from "node:path";
+import { posix } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -280,7 +280,7 @@ function validateFindingGrounding(finding: ModelFindingV1, path: string): void {
 
 function safeRepositoryPath(value: string): string {
   if (
-    isAbsolute(value) ||
+    posix.isAbsolute(value) ||
     value.includes("\\") ||
     value.startsWith("/") ||
     value.endsWith("/") ||
@@ -288,7 +288,7 @@ function safeRepositoryPath(value: string): string {
   ) {
     throw new Error("path must be a normalized repository-relative POSIX path.");
   }
-  if (posix.normalize(value) !== value || normalize(value).split(sep).join("/") !== value) {
+  if (posix.normalize(value) !== value) {
     throw new Error("path must be a normalized repository-relative POSIX path.");
   }
   return value;
@@ -302,11 +302,6 @@ async function validatePath(
   safeRepositoryPath(finding.path);
   if (file === undefined) {
     throw new Error("path is not part of the reviewed base-to-head diff.");
-  }
-  const candidate = join(checkout, ...finding.path.split("/"));
-  const inside = relative(checkout, candidate);
-  if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
-    throw new Error("path resolves outside the reviewed workspace.");
   }
 
   if (file.newPath === undefined) {

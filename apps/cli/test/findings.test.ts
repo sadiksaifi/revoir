@@ -16,6 +16,9 @@ import {
 import { createReviewPublication } from "../src/review/publication.js";
 
 const execFileAsync = promisify(execFile);
+const NFD_PATH = "cafe\u0301.ts";
+const NFC_PATH = NFD_PATH.normalize("NFC");
+const LITERAL_SPACE_PATH = "literal [1] .ts";
 
 const DIFF = `diff --git a/source.ts b/source.ts
 index 1111111..2222222 100644
@@ -113,6 +116,8 @@ describe("finding validation", () => {
       writeFile(join(checkout, "mode.sh"), "#!/bin/sh\n"),
       writeFile(join(checkout, "outside.ts"), "unchanged\n"),
       writeFile(join(checkout, "literal[1].ts"), "literal\n"),
+      writeFile(join(checkout, NFD_PATH), "decomposed\n"),
+      writeFile(join(checkout, LITERAL_SPACE_PATH), "literal space\n"),
       mkdir(join(checkout, "directory")).then(() =>
         writeFile(join(checkout, "directory", "nested.ts"), "nested\n"),
       ),
@@ -123,8 +128,32 @@ describe("finding validation", () => {
     await execFileAsync("git", ["config", "user.email", "revoir@example.test"], {
       cwd: checkout,
     });
+    await execFileAsync("git", ["config", "core.precomposeUnicode", "false"], {
+      cwd: checkout,
+    });
     await execFileAsync("git", ["add", "--all"], { cwd: checkout });
     await execFileAsync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: checkout });
+    const { stdout: treeNames } = await execFileAsync(
+      "git",
+      ["ls-tree", "-rz", "--name-only", "HEAD"],
+      { cwd: checkout, encoding: "buffer" },
+    );
+    assert.ok(
+      treeNames
+        .subarray(0, -1)
+        .toString("utf8")
+        .split("\u0000")
+        .some((entry) => Buffer.from(entry).equals(Buffer.from(NFD_PATH))),
+    );
+    const { stdout: sourceBlob } = await execFileAsync("git", ["rev-parse", "HEAD:source.ts"], {
+      cwd: checkout,
+      encoding: "utf8",
+    });
+    await execFileAsync(
+      "git",
+      ["update-index", "--add", "--cacheinfo", `100644,${sourceBlob.trim()},${NFC_PATH}`],
+      { cwd: checkout },
+    );
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
       cwd: checkout,
       encoding: "utf8",
@@ -812,6 +841,104 @@ describe("finding validation", () => {
         range: { start: 2, end: 2, side: "RIGHT" },
       }),
       fingerprint,
+    );
+  });
+
+  it("preserves exact NFD, NFC, metacharacter, and space paths through validation", async () => {
+    const diff = `diff --git "a/cafe\\314\\201.ts" "b/cafe\\314\\201.ts"
+index 1111111..2222222 100644
+--- "a/cafe\\314\\201.ts"
++++ "b/cafe\\314\\201.ts"
+@@ -1 +1 @@
+-old
++decomposed
+diff --git "a/caf\\303\\251.ts" "b/caf\\303\\251.ts"
+index 3333333..4444444 100644
+--- "a/caf\\303\\251.ts"
++++ "b/caf\\303\\251.ts"
+@@ -1 +1 @@
+-old
++composed
+diff --git a/literal [1] .ts b/literal [1] .ts
+index 5555555..6666666 100644
+--- a/literal [1] .ts
++++ b/literal [1] .ts
+@@ -1 +1 @@
+-old
++literal space
+`;
+    const result = await validateModelReviewOutput(
+      output([
+        finding({ path: NFD_PATH, range: { start: 1, end: 1, side: "RIGHT" } }),
+        finding({ path: NFC_PATH, range: { start: 1, end: 1, side: "RIGHT" } }),
+        finding({
+          path: LITERAL_SPACE_PATH,
+          range: { start: 1, end: 1, side: "RIGHT" },
+        }),
+      ]),
+      { checkout, diff },
+    );
+
+    assert.deepEqual(
+      result.findings.map(({ path, fingerprint, attachment: exactAttachment }) => ({
+        path,
+        fingerprint,
+        attachment: exactAttachment,
+      })),
+      [
+        {
+          path: NFD_PATH,
+          fingerprint: findingFingerprint({
+            ...(finding() as ModelFindingV1),
+            path: NFD_PATH,
+            range: { start: 1, end: 1, side: "RIGHT" },
+          }),
+          attachment: {
+            kind: "inline",
+            path: NFD_PATH,
+            startLine: 1,
+            endLine: 1,
+            side: "RIGHT",
+          },
+        },
+        {
+          path: NFC_PATH,
+          fingerprint: findingFingerprint({
+            ...(finding() as ModelFindingV1),
+            path: NFC_PATH,
+            range: { start: 1, end: 1, side: "RIGHT" },
+          }),
+          attachment: {
+            kind: "inline",
+            path: NFC_PATH,
+            startLine: 1,
+            endLine: 1,
+            side: "RIGHT",
+          },
+        },
+        {
+          path: LITERAL_SPACE_PATH,
+          fingerprint: findingFingerprint({
+            ...(finding() as ModelFindingV1),
+            path: LITERAL_SPACE_PATH,
+            range: { start: 1, end: 1, side: "RIGHT" },
+          }),
+          attachment: {
+            kind: "inline",
+            path: LITERAL_SPACE_PATH,
+            startLine: 1,
+            endLine: 1,
+            side: "RIGHT",
+          },
+        },
+      ],
+    );
+    assert.notEqual(result.findings[0]?.fingerprint, result.findings[1]?.fingerprint);
+    assert.deepEqual(
+      createReviewPublication("1".repeat(40), result.findings).payload.comments?.map(
+        ({ path }) => path,
+      ),
+      [NFD_PATH, NFC_PATH, LITERAL_SPACE_PATH],
     );
   });
 

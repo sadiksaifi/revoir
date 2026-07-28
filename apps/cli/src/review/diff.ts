@@ -1,3 +1,5 @@
+import { TextDecoder, TextEncoder } from "node:util";
+
 export type DiffSide = "LEFT" | "RIGHT";
 
 export interface FindingRange {
@@ -27,11 +29,19 @@ function decodeGitQuotedPath(value: string): string {
   }
 
   const source = value.slice(1, -1);
-  let result = "";
+  const bytes: number[] = [];
+  const encoder = new TextEncoder();
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index]!;
     if (character !== "\\") {
-      result += character;
+      const codePoint = source.codePointAt(index)!;
+      if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+        throw new Error("Git diff quoted path contains invalid Unicode.");
+      }
+      bytes.push(...encoder.encode(String.fromCodePoint(codePoint)));
+      if (codePoint > 0xffff) {
+        index += 1;
+      }
       continue;
     }
 
@@ -40,20 +50,20 @@ function decodeGitQuotedPath(value: string): string {
     if (escaped === undefined) {
       throw new Error("Git diff contains an invalid quoted path escape.");
     }
-    const simpleEscapes: Readonly<Record<string, string>> = {
-      '"': '"',
-      "\\": "\\",
-      a: "\u0007",
-      b: "\b",
-      f: "\f",
-      n: "\n",
-      r: "\r",
-      t: "\t",
-      v: "\u000b",
+    const simpleEscapes: Readonly<Record<string, number>> = {
+      '"': 0x22,
+      "\\": 0x5c,
+      a: 0x07,
+      b: 0x08,
+      f: 0x0c,
+      n: 0x0a,
+      r: 0x0d,
+      t: 0x09,
+      v: 0x0b,
     };
     const simple = simpleEscapes[escaped];
     if (simple !== undefined) {
-      result += simple;
+      bytes.push(simple);
       continue;
     }
     if (/[0-7]/u.test(escaped)) {
@@ -66,12 +76,25 @@ function decodeGitQuotedPath(value: string): string {
         index += 1;
         octal += source[index]!;
       }
-      result += String.fromCodePoint(Number.parseInt(octal, 8));
+      const byte = Number.parseInt(octal, 8);
+      if (byte > 0xff) {
+        throw new Error("Git diff contains an unsupported quoted path escape.");
+      }
+      bytes.push(byte);
       continue;
     }
     throw new Error("Git diff contains an unsupported quoted path escape.");
   }
-  return Buffer.from(result, "binary").toString("utf8");
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+  } catch (error) {
+    throw new Error("Git diff quoted path must contain valid UTF-8.", { cause: error });
+  }
+  if (decoded.includes("\u0000")) {
+    throw new Error("Git diff quoted path contains an unsupported null byte.");
+  }
+  return decoded;
 }
 
 function patchPath(value: string): string | undefined {

@@ -80,6 +80,38 @@ function boundedString(
   return value.normalize("NFC");
 }
 
+function hasOnlyUnicodeScalarValues(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        return false;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function findingPath(value: unknown, path: string): string {
+  if (typeof value !== "string") {
+    throw new FindingSchemaError(`${path} must be a string.`);
+  }
+  if (value.length === 0 || value.length > 1024) {
+    throw new FindingSchemaError(`${path} must contain 1-1024 characters.`);
+  }
+  if (value.includes("\u0000")) {
+    throw new FindingSchemaError(`${path} contains an unsupported null byte.`);
+  }
+  if (/[\r\n]/u.test(value) || !hasOnlyUnicodeScalarValues(value)) {
+    throw new FindingSchemaError(`${path} contains unsupported path characters.`);
+  }
+  return value;
+}
+
 function positiveInteger(value: unknown, path: string): number {
   if (!Number.isSafeInteger(value) || (value as number) <= 0) {
     throw new FindingSchemaError(`${path} must be a positive integer.`);
@@ -144,7 +176,7 @@ export function parseModelFinding(value: unknown, index: number): ModelFindingV1
   return {
     priority: finding.priority as FindingPriority,
     title: boundedString(finding.title, `${path}.title`, 120, { singleLine: true }),
-    path: boundedString(finding.path, `${path}.path`, 1024, { singleLine: true }),
+    path: findingPath(finding.path, `${path}.path`),
     range: parseRange(finding.range, `${path}.range`),
     issue: boundedString(finding.issue, `${path}.issue`, 2_000, { singleLine: true }),
     impact: boundedString(finding.impact, `${path}.impact`, 2_000, { singleLine: true }),

@@ -97,6 +97,45 @@ index 1111111..2222222 100644
     assert.equal(diffPosition(file, "RIGHT", 1), 2);
   });
 
+  it("decodes octal and raw Unicode paths without changing canonical form", () => {
+    const decomposedPath = "src/cafe\u0301.ts";
+    const octal = parseGitDiff(`diff --git "a/src/cafe\\314\\201.ts" "b/src/cafe\\314\\201.ts"
+index 1111111..2222222 100644
+--- "a/src/cafe\\314\\201.ts"
++++ "b/src/cafe\\314\\201.ts"
+@@ -1 +1 @@
+-old
++new
+`);
+    const raw = parseGitDiff(`diff --git "a/${decomposedPath}" "b/${decomposedPath}"
+index 1111111..2222222 100644
+--- "a/${decomposedPath}"
++++ "b/${decomposedPath}"
+@@ -1 +1 @@
+-old
++new
+`);
+
+    for (const index of [octal, raw]) {
+      const file = index.files.get(decomposedPath);
+      assert.ok(file);
+      assert.equal(file.apiPath, decomposedPath);
+      assert.deepEqual(Buffer.from(file.apiPath), Buffer.from(decomposedPath));
+      assert.equal(index.files.has(decomposedPath.normalize("NFC")), false);
+    }
+  });
+
+  it("rejects malformed quoted UTF-8 path bytes", () => {
+    assert.throws(
+      () =>
+        parseGitDiff(`diff --git "a/src/bad\\377.ts" "b/src/bad\\377.ts"
+--- "a/src/bad\\377.ts"
++++ "b/src/bad\\377.ts"
+`),
+      /valid UTF-8/u,
+    );
+  });
+
   it("does not confuse changed content with patch path headers", () => {
     const index = parseGitDiff(`diff --git a/operators.txt b/operators.txt
 index 1111111..2222222 100644
