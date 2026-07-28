@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, lstat, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { devNull, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { promisify } from "node:util";
@@ -47,7 +47,7 @@ async function repositoryFixture(): Promise<{
     writeFile(join(root, "file with spaces.txt"), "base\n"),
     writeFile(join(root, "old-name.ts"), "keep one\nkeep two\nold value\nkeep four\n"),
     writeFile(join(root, NFD_OLD_PATH), "keep one\nkeep two\nold value\nkeep four\n"),
-    writeFile(join(root, ".gitattributes"), "attribute.bin binary\n"),
+    writeFile(join(root, ".gitattributes"), "*.ts text !diff\nattribute.bin binary\n"),
     writeFile(join(root, "attribute.bin"), Buffer.from([0x00, 0x01])),
   ]);
   await git(
@@ -129,6 +129,8 @@ class HostileGitConfigRunner implements CommandRunner {
         ["diff.context", "0"],
         ["diff.suppressBlankEmpty", "true"],
         ["diff.external", this.#externalDiff],
+        ["diff.hostile.command", this.#externalDiff],
+        ["diff.hostile.textconv", this.#externalDiff],
         ["diff.submodule", "log"],
         ["color.ui", "always"],
         ["color.diff", "always"],
@@ -216,9 +218,22 @@ describe("Git review workspace", () => {
       const origin = await repositoryFixture();
       const cache = await temporaryDirectory("revoir-cache-hostile-git-config-");
       const configDirectory = await temporaryDirectory("revoir-git-config-");
+      const xdgDirectory = await temporaryDirectory("revoir-git-xdg-");
+      const templateDirectory = await temporaryDirectory("revoir-git-template-");
       const globalConfig = join(configDirectory, "config");
+      const globalAttributes = join(configDirectory, "global-attributes");
+      const systemAttributes = join(configDirectory, "system-attributes");
       const marker = join(configDirectory, "external-diff-ran");
       const externalDiff = join(configDirectory, "external-diff.sh");
+      await mkdir(join(xdgDirectory, "git"), { recursive: true });
+      await mkdir(join(templateDirectory, "info"), { recursive: true });
+      const hostileAttributes = "*.ts binary diff=hostile\n*.txt binary diff=hostile\n*.bin text\n";
+      await Promise.all([
+        writeFile(join(xdgDirectory, "git", "attributes"), hostileAttributes),
+        writeFile(globalAttributes, hostileAttributes),
+        writeFile(systemAttributes, hostileAttributes),
+        writeFile(join(templateDirectory, "info", "attributes"), hostileAttributes),
+      ]);
       await writeFile(
         externalDiff,
         `#!/bin/sh\ntouch "${marker}"\nprintf '\\033[31mhelper\\033[0m\\n'\n`,
@@ -245,12 +260,24 @@ describe("Git review workspace", () => {
       );
       const previousEnvironment = {
         GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+        GIT_ATTR_GLOBAL: process.env.GIT_ATTR_GLOBAL,
+        GIT_ATTR_NOSYSTEM: process.env.GIT_ATTR_NOSYSTEM,
+        GIT_ATTR_SOURCE: process.env.GIT_ATTR_SOURCE,
+        GIT_ATTR_SYSTEM: process.env.GIT_ATTR_SYSTEM,
         GIT_EXTERNAL_DIFF: process.env.GIT_EXTERNAL_DIFF,
         GIT_DIFF_OPTS: process.env.GIT_DIFF_OPTS,
+        GIT_TEMPLATE_DIR: process.env.GIT_TEMPLATE_DIR,
+        XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
       };
       process.env.GIT_CONFIG_GLOBAL = globalConfig;
+      process.env.GIT_ATTR_GLOBAL = globalAttributes;
+      process.env.GIT_ATTR_NOSYSTEM = "0";
+      process.env.GIT_ATTR_SOURCE = origin.baseSha;
+      process.env.GIT_ATTR_SYSTEM = systemAttributes;
       process.env.GIT_EXTERNAL_DIFF = externalDiff;
       process.env.GIT_DIFF_OPTS = "--unified=0";
+      process.env.GIT_TEMPLATE_DIR = templateDirectory;
+      process.env.XDG_CONFIG_HOME = xdgDirectory;
       const runner = new HostileGitConfigRunner(externalDiff);
       const preparer = new GitWorkspacePreparer(cache, 10_000, runner);
       const snapshot: PullRequestSnapshot = {
@@ -293,6 +320,9 @@ describe("Git review workspace", () => {
         );
         assert.equal(await git(workspace.checkout, "diff", "--name-only", "HEAD", "--"), "");
         assert.equal(await git(workspace.checkout, "config", "--local", "diff.renames"), "false");
+        await assert.rejects(() => lstat(join(workspace.checkout, ".git", "info", "attributes")), {
+          code: "ENOENT",
+        });
 
         const parsed = parseGitDiff(workspace.diff);
         assert.equal(parsed.files.size, 4);
@@ -346,12 +376,18 @@ describe("Git review workspace", () => {
           "diff.suppressBlankEmpty=false",
           "diff.submodule=short",
           "core.quotePath=true",
+          `core.attributesFile=${devNull}`,
+          `--attr-source=${origin.headSha}`,
         ]) {
           assert.ok(diffCall.arguments.includes(argument), `missing ${argument}`);
         }
         assert.equal(diffCall.environment.GIT_EXTERNAL_DIFF, undefined);
         assert.equal(diffCall.environment.GIT_DIFF_OPTS, undefined);
         assert.equal(diffCall.environment.GIT_CONFIG_NOSYSTEM, "1");
+        assert.equal(diffCall.environment.GIT_ATTR_NOSYSTEM, "1");
+        assert.equal(diffCall.environment.GIT_ATTR_GLOBAL, undefined);
+        assert.equal(diffCall.environment.GIT_ATTR_SOURCE, undefined);
+        assert.equal(diffCall.environment.GIT_ATTR_SYSTEM, undefined);
         assert.notEqual(diffCall.environment.GIT_CONFIG_GLOBAL, globalConfig);
         const cloneCall = runner.calls.find(({ arguments: arguments_ }) =>
           arguments_.includes("clone"),

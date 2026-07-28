@@ -154,6 +154,7 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
     );
     const askpass = join(root, "git-askpass.sh");
     const checkout = join(root, "repository");
+    const emptyTemplate = join(root, "git-template");
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
       GIT_ASKPASS: askpass,
@@ -181,10 +182,12 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
     try {
       await writeFile(askpass, ASKPASS, { mode: 0o700 });
       await chmod(askpass, 0o700);
+      await mkdir(emptyTemplate, { mode: 0o700 });
       await runGit([
         "clone",
         "--no-checkout",
         "--filter=blob:none",
+        `--template=${emptyTemplate}`,
         "--origin",
         "origin",
         pullRequest.baseRepository.cloneUrl,
@@ -198,6 +201,10 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
       const diffEnvironment = { ...environment };
       delete diffEnvironment.GIT_EXTERNAL_DIFF;
       delete diffEnvironment.GIT_DIFF_OPTS;
+      delete diffEnvironment.GIT_ATTR_GLOBAL;
+      delete diffEnvironment.GIT_ATTR_SOURCE;
+      delete diffEnvironment.GIT_ATTR_SYSTEM;
+      diffEnvironment.GIT_ATTR_NOSYSTEM = "1";
       diffEnvironment.GIT_CONFIG_NOSYSTEM = "1";
       diffEnvironment.GIT_CONFIG_GLOBAL = devNull;
       const diff = await runGit(
@@ -228,6 +235,9 @@ export class GitWorkspacePreparer implements WorkspacePreparer {
           "diff.submodule=short",
           "-c",
           "core.quotePath=true",
+          "-c",
+          `core.attributesFile=${devNull}`,
+          `--attr-source=${pullRequest.headSha}`,
           "diff",
           "--patch",
           "--find-renames=50%",
