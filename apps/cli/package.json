@@ -13,6 +13,7 @@
   "scripts": {
     "prebuild": "pnpm --filter @revoir/contracts run build",
     "build": "tsc",
+    "predev": "pnpm --filter @revoir/contracts run build",
     "dev": "tsx src/main.ts",
     "format": "pnpm --workspace-root run format apps/cli",
     "format:check": "pnpm --workspace-root run format:check apps/cli",
