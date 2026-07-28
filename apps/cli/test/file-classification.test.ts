@@ -45,4 +45,26 @@ describe("review file classification", () => {
       });
     }
   });
+
+  it("excludes common ecosystem lockfiles while retaining them as supporting evidence", () => {
+    const paths = [
+      "Podfile.lock",
+      "ios/Podfile.lock",
+      "Package.resolved",
+      ".swiftpm/Package.resolved",
+      "go.sum",
+      "services/api/go.sum",
+      "go.work.sum",
+      "workspace/go.work.sum",
+    ];
+
+    for (const path of paths) {
+      assert.deepEqual(classifyReviewFile(path), {
+        path,
+        category: "lock",
+        detailedReview: false,
+        supportingEvidence: true,
+      });
+    }
+  });
 });
