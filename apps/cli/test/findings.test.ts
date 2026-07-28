@@ -320,6 +320,44 @@ describe("finding validation", () => {
     }
   });
 
+  it("rejects structurally empty required prose while preserving terse technical findings", async () => {
+    const terseFinding = finding({
+      title: "Deadlock",
+      issue: "Lock reenters.",
+      impact: "Worker stalls.",
+      evidence: "Callback reacquires lock.",
+      fixDirection: "Defer callback.",
+    });
+    const result = await validateModelReviewOutput(
+      output([
+        terseFinding,
+        finding({ title: "TBD" }),
+        finding({ issue: "TBD" }),
+        finding({ impact: "TBD" }),
+        finding({ evidence: "TBD" }),
+        finding({ fixDirection: "Add." }),
+      ]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.equal(result.findings.length, 1);
+    assert.equal(result.findings[0]?.title, "Deadlock");
+    assert.deepEqual(
+      result.diagnostics.map(({ index, message }) => ({ index, message })),
+      [
+        { index: 1, message: "findings[1].title must state a substantive title." },
+        { index: 2, message: "findings[2].issue must describe an observed issue." },
+        { index: 3, message: "findings[3].impact must describe a concrete impact." },
+        { index: 4, message: "findings[4].evidence must describe supporting evidence." },
+        { index: 5, message: "findings[5].fixDirection must state a concrete action." },
+      ],
+    );
+    const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
+    assert.equal(publication.includes("TBD"), false);
+    assert.equal(publication.includes("Add."), false);
+    assert.equal(JSON.stringify(result.diagnostics).includes("TBD"), false);
+  });
+
   it("rejects common speculative and merge-instruction prose before publication", async () => {
     const cases: readonly [Record<string, unknown>, RegExp][] = [
       [{ title: "Cancellation could be dropped" }, /speculative language/u],

@@ -51,9 +51,11 @@ const PRAISE_OR_SUMMARY =
   /(?:\b(?:excellent|good|great|nice|solid)\s+(?:approach|change|implementation|job|work)\b|\blooks?\s+good\b|\bwell[ -]done\b|\bthe rest of (?:the )?(?:change|code|implementation)\b|^(?:(?:general|overall)\s+)?(?:overview|summary)\b|\boverall(?:,|\s+(?:the|this|change|code|implementation)))/iu;
 const MARKDOWN =
   /(?:`|\[[^\]\r\n]+\]\([^)\r\n]+\)|\*\*|__|^(?:\s{0,3}#{1,6}|\s{0,3}>|\s*(?:[-+*]|\d+\.))\s)/u;
-const PLACEHOLDER = /^(?:n\/?a|none|not (?:applicable|available|provided)|unknown)[.!?]?$/iu;
+const PLACEHOLDER =
+  /^(?:n\/?a|none|not (?:applicable|available|provided)|pending|placeholder|tbc|tbd|todo|to be (?:added|completed|confirmed|decided|defined|determined|provided)|unknown)[.!?]?$/iu;
 const ACTION_VERB =
   /^(?:add|await|bound|call|cancel|check|clone|close|compare|compute|convert|create|decode|defer|delete|derive|discard|encode|ensure|escape|expose|filter|forward|guard|handle|include|initialize|limit|map|move|parse|pass|preserve|propagate|publish|read|reconcile|record|refactor|reject|release|remove|rename|replace|resolve|restore|retry|return|sanitize|serialize|set|skip|sort|stop|submit|throw|update|use|validate|verify|wrap|write)\b/iu;
+const NON_ACTIONABLE_DETAIL = /^(?:a|an|it|one|ones|something|that|the|these|this|those)$/iu;
 
 export class FindingContractError extends Error {
   readonly diagnostics: readonly FindingDiagnostic[];
@@ -79,18 +81,22 @@ function validateFindingProse(finding: ModelFindingV1, index: number): ModelFind
     throw new Error(`${path} uses speculative language instead of observed evidence.`);
   }
   const substantiveFields = [
-    ["title", finding.title, "must state a substantive title"],
-    ["issue", finding.issue, "must describe an observed issue"],
-    ["impact", finding.impact, "must describe a concrete impact"],
-    ["evidence", finding.evidence, "must describe supporting evidence"],
+    ["title", finding.title, 1, "must state a substantive title"],
+    ["issue", finding.issue, 2, "must describe an observed issue"],
+    ["impact", finding.impact, 2, "must describe a concrete impact"],
+    ["evidence", finding.evidence, 2, "must describe supporting evidence"],
   ] as const;
-  for (const [field, value, reason] of substantiveFields) {
-    if (PLACEHOLDER.test(value)) {
+  for (const [field, value, minimumWords, reason] of substantiveFields) {
+    if (PLACEHOLDER.test(value) || proseTokens(value).length < minimumWords) {
       throw new Error(`${path}.${field} ${reason}.`);
     }
   }
+  const actionDetails = proseTokens(finding.fixDirection)
+    .slice(1)
+    .filter((token) => !NON_ACTIONABLE_DETAIL.test(token));
   if (
     !ACTION_VERB.test(finding.fixDirection) ||
+    actionDetails.length === 0 ||
     /^(?:consider|fix this|investigate|look into|review)\b/iu.test(finding.fixDirection)
   ) {
     throw new Error(`${path}.fixDirection must state a concrete action.`);
@@ -117,6 +123,10 @@ function validateFindingProse(finding: ModelFindingV1, index: number): ModelFind
     throw new Error(`${path} contains Markdown instead of concise finding prose.`);
   }
   return finding;
+}
+
+function proseTokens(value: string): readonly string[] {
+  return value.match(/[\p{L}\p{N}]+/gu) ?? [];
 }
 
 function safeRepositoryPath(value: string): string {
