@@ -89,8 +89,9 @@ function finding(overrides: Record<string, unknown> = {}) {
     path: "source.ts",
     range: { start: 2, end: 3, side: "RIGHT" },
     issue: "The added branch does not forward the cancellation signal.",
-    impact: "Timed-out work continues consuming the single review slot.",
-    evidence: "Both added calls omit the signal argument required by the invoked operation.",
+    impact: "The missing signal lets timed-out work consume the single review slot.",
+    evidence:
+      "Both added calls omit the cancellation signal argument required by the invoked operation.",
     fixDirection: "Pass the active cancellation signal to both calls.",
     ...overrides,
   };
@@ -169,17 +170,26 @@ describe("finding validation", () => {
         finding({
           path: "deleted.ts",
           range: { start: 1, end: 2, side: "LEFT" },
+          title: "Validation guard is deleted",
           issue: "The deleted guard was the only validation before persistence.",
+          evidence: "The deleted validation guard is absent before persistence.",
+          fixDirection: "Restore the validation guard before persistence.",
         }),
         finding({
           path: "new-name.ts",
           range: { start: 1, end: 1, side: "LEFT" },
+          title: "Compatibility export is deleted",
           issue: "The renamed file removes the exported compatibility alias.",
+          evidence: "The deleted export is the compatibility alias.",
+          fixDirection: "Restore the compatibility export.",
         }),
         finding({
           path: "new-name.ts",
           range: { start: 1, end: 1, side: "RIGHT" },
+          title: "Runtime export name changes",
           issue: "The replacement export has a different runtime name.",
+          evidence: "The added export declares a different runtime name.",
+          fixDirection: "Restore the exported runtime name.",
         }),
       ]),
       { checkout, diff: DIFF },
@@ -218,16 +228,25 @@ describe("finding validation", () => {
         finding({
           path: "logo.png",
           range: null,
+          title: "Alpha channel is removed",
           issue: "The binary replacement removes the required alpha channel.",
+          evidence: "The replacement bytes contain no alpha channel.",
+          fixDirection: "Restore the alpha channel.",
         }),
         finding({
           path: "mode.sh",
           range: null,
+          title: "Fixture becomes executable",
           issue: "The executable bit makes this untrusted fixture directly runnable.",
+          evidence: "The changed mode marks the fixture executable.",
+          fixDirection: "Remove the executable bit from the fixture.",
         }),
         finding({
           range: null,
+          title: "Shared resource closes early",
           issue: "The file-level initialization order closes the shared resource early.",
+          evidence: "The initialization closes the shared resource before its final use.",
+          fixDirection: "Defer closing the shared resource.",
         }),
       ]),
       { checkout, diff: DIFF },
@@ -272,43 +291,64 @@ describe("finding validation", () => {
         finding({
           path: "source.ts",
           range: null,
+          title: "Regular file initializes early",
           issue: "The regular file initializes the shared resource before validation.",
+          evidence: "The regular file entry initializes the resource before validation.",
+          fixDirection: "Defer regular file initialization until after validation.",
         }),
         finding({
           path: "symlink.ts",
           range: null,
+          title: "Symlink redirects consumers",
           issue: "The symlink redirects review consumers to the changed implementation.",
+          evidence: "The symlink target redirects consumers to source.ts.",
+          fixDirection: "Update the symlink to the validated implementation.",
         }),
         finding({
           path: "vendor",
           range: null,
+          title: "Gitlink omits compatibility fix",
           issue: "The gitlink advances to a revision without the required compatibility fix.",
+          evidence: "The changed gitlink revision lacks the compatibility fix.",
+          fixDirection: "Update the gitlink to a revision containing the compatibility fix.",
         }),
         finding({
           path: "literal[1].ts",
           range: null,
+          title: "Literal path initializes early",
           issue: "The literal bracket path initializes the shared resource before validation.",
+          evidence: "The literal path entry initializes the resource before validation.",
+          fixDirection: "Defer literal path initialization until after validation.",
         }),
         finding({
           path: "directory",
           range: null,
+          title: "Directory is not publishable",
           issue: "The directory entry does not identify a publishable file.",
+          evidence: "The directory tree entry has no publishable blob.",
+          fixDirection: "Use a publishable file instead of the directory.",
         }),
         finding({
           path: "missing.ts",
           range: null,
+          title: "Tree entry is missing",
           issue: "The missing entry does not exist in the reviewed head tree.",
+          evidence: "The head tree contains no matching entry.",
+          fixDirection: "Use an existing head tree entry.",
         }),
         finding({
           path: "deleted.ts",
           range: null,
+          title: "Validation file is deleted",
           issue: "The deleted file removes the only validation before persistence.",
+          evidence: "The deleted file contained the validation before persistence.",
+          fixDirection: "Restore the deleted validation.",
         }),
       ]),
       { checkout, diff: GIT_TREE_DIFF },
     );
 
-    assert.equal(result.findings.length, 5);
+    assert.equal(result.findings.length, 5, JSON.stringify(result.diagnostics));
     assert.deepEqual(
       result.findings.map(({ path, attachment: findingAttachment }) => ({
         path,
@@ -383,6 +423,7 @@ describe("finding validation", () => {
       title: "Terminal status bypasses cancellation",
       issue: "The branch maps an unknown terminal status to success.",
       impact: "No cancellation reaches the child process after that mapping.",
+      evidence: "The terminal status branch returns success before cancellation.",
     });
     const result = await validateModelReviewOutput(
       output([
@@ -438,11 +479,11 @@ describe("finding validation", () => {
 
   it("rejects structurally empty required prose while preserving terse technical findings", async () => {
     const terseFinding = finding({
-      title: "Deadlock",
+      title: "Lock",
       issue: "Lock reenters.",
       impact: "Worker stalls.",
-      evidence: "Callback reacquires lock.",
-      fixDirection: "Defer callback.",
+      evidence: "Lock reacquires recursively.",
+      fixDirection: "Defer lock reacquisition.",
     });
     const result = await validateModelReviewOutput(
       output([
@@ -457,7 +498,7 @@ describe("finding validation", () => {
     );
 
     assert.equal(result.findings.length, 1);
-    assert.equal(result.findings[0]?.title, "Deadlock");
+    assert.equal(result.findings[0]?.title, "Lock");
     assert.deepEqual(
       result.diagnostics.map(({ index, message }) => ({ index, message })),
       [
@@ -578,6 +619,46 @@ describe("finding validation", () => {
     }
   });
 
+  it("grounds every prose role in shared technical evidence", async () => {
+    const disconnected = [
+      { title: "Excellent" },
+      { title: "Parser overflow" },
+      {
+        issue: "The parser truncates bytes.",
+        evidence: "The added call omits the cancellation signal argument.",
+      },
+      { impact: "Great implementation throughout." },
+      { evidence: "The parser trace contains a truncated byte." },
+      { fixDirection: "Guard the parser byte count." },
+    ];
+    const terse = finding({
+      title: "callback_queue",
+      issue: "callback_queue reenters.",
+      impact: "callback_queue stalls.",
+      evidence: "callback_queue reacquires lock.",
+      fixDirection: "Defer callback_queue.",
+    });
+    const result = await validateModelReviewOutput(
+      output([finding(), terse, ...disconnected.map((overrides) => finding(overrides))]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.deepEqual(
+      result.findings.map(({ title }) => title),
+      ["Cancellation is dropped", "callback_queue"],
+    );
+    assert.equal(result.diagnostics.length, disconnected.length);
+    for (const diagnostic of result.diagnostics) {
+      assert.match(diagnostic.message, /ground|praise|share|target/u);
+      assert.equal(
+        disconnected.some((candidate) =>
+          Object.values(candidate).some((value) => diagnostic.message.includes(value)),
+        ),
+        false,
+      );
+    }
+  });
+
   it("applies every global prose policy to all five published fields", async () => {
     const fields = ["title", "issue", "impact", "evidence", "fixDirection"] as const;
     const policies = [
@@ -643,8 +724,8 @@ describe("finding validation", () => {
     const result = await validateModelReviewOutput(
       output([
         finding({
-          title: "HTTP_server stalls",
-          issue: "state_machine reenters.",
+          title: "callback_queue stalls",
+          issue: "callback_queue reenters.",
           impact: "Worker stalls.",
           evidence: "callback_queue reacquires lock.",
           fixDirection: "Defer callback_queue.",
@@ -663,7 +744,7 @@ describe("finding validation", () => {
     );
 
     assert.equal(result.findings.length, 1);
-    assert.equal(result.findings[0]?.title, "HTTP_server stalls");
+    assert.equal(result.findings[0]?.title, "callback_queue stalls");
     assert.equal(result.diagnostics.length, prohibited.length);
     const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
     for (const candidate of prohibited) {
@@ -697,9 +778,9 @@ describe("finding validation", () => {
         finding(),
         finding({
           priority: "P3",
-          title: "Different presentation",
+          title: "Signal presentation differs",
           impact: "Different impact wording.",
-          evidence: "Different observed evidence wording.",
+          evidence: "Different cancellation signal evidence wording.",
           fixDirection: "Guard the call with the active signal.",
         }),
       ]),

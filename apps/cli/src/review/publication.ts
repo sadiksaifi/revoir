@@ -27,10 +27,10 @@ function code(value: string): string {
 }
 
 function details(finding: ReviewFindingV1, location?: string): string {
+  const explicit = location ?? explicitLocation(finding);
   return [
-    `### ${finding.priority} — ${finding.title}`,
+    `### ${finding.priority} — ${code(explicit)}`,
     "",
-    ...(location === undefined ? [] : [`- Location: ${code(location)}`]),
     `- Issue: ${finding.issue}`,
     `- Impact: ${finding.impact}`,
     `- Evidence: ${finding.evidence}`,

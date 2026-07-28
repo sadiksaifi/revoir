@@ -58,6 +58,55 @@ const PLACEHOLDER =
 const ACTION_VERB =
   /^(?:add|await|bound|call|cancel|check|clone|close|compare|compute|convert|create|decode|defer|delete|derive|discard|encode|ensure|escape|expose|filter|forward|guard|handle|include|initialize|limit|map|move|parse|pass|preserve|propagate|publish|read|reconcile|record|refactor|reject|release|remove|rename|replace|resolve|restore|retry|return|sanitize|serialize|set|skip|sort|stop|submit|throw|update|use|validate|verify|wrap|write)\b/iu;
 const NON_ACTIONABLE_DETAIL = /^(?:a|an|it|one|ones|something|that|the|these|this|those)$/iu;
+const NON_CONCRETE_ANCHORS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "because",
+  "both",
+  "by",
+  "change",
+  "changed",
+  "code",
+  "does",
+  "each",
+  "finding",
+  "for",
+  "from",
+  "has",
+  "have",
+  "in",
+  "implementation",
+  "into",
+  "is",
+  "it",
+  "its",
+  "of",
+  "on",
+  "only",
+  "or",
+  "our",
+  "review",
+  "same",
+  "that",
+  "the",
+  "their",
+  "these",
+  "this",
+  "those",
+  "through",
+  "to",
+  "was",
+  "were",
+  "when",
+  "while",
+  "with",
+  "without",
+]);
 
 type ProseField = keyof Pick<
   ModelFindingV1,
@@ -139,6 +188,7 @@ function validateFindingProse(finding: ModelFindingV1, index: number): ModelFind
       validateFixDirection(value, path);
     }
   }
+  validateFindingGrounding(finding, path);
   return finding;
 }
 
@@ -170,6 +220,62 @@ function isPlainGfmText(value: string): boolean {
 
 function proseTokens(value: string): readonly string[] {
   return value.match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
+interface AnchorToken {
+  raw: string;
+  normalized: string;
+}
+
+function anchorTokens(value: string): readonly AnchorToken[] {
+  return (value.match(/[\p{L}\p{N}_$]+/gu) ?? [])
+    .map((raw) => ({
+      raw,
+      normalized: raw.normalize("NFC").toLocaleLowerCase("en-US"),
+    }))
+    .filter(
+      ({ raw, normalized }) =>
+        !NON_CONCRETE_ANCHORS.has(normalized) && (normalized.length >= 3 || /[_$\p{N}]/u.test(raw)),
+    );
+}
+
+function anchorSet(value: string): ReadonlySet<string> {
+  return new Set(anchorTokens(value).map(({ normalized }) => normalized));
+}
+
+function intersects(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  for (const value of left) {
+    if (right.has(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function validateFindingGrounding(finding: ModelFindingV1, path: string): void {
+  const issue = anchorSet(finding.issue);
+  const evidence = anchorSet(finding.evidence);
+  const observed = new Set([...issue, ...evidence]);
+  if (!intersects(issue, evidence)) {
+    throw new Error(`${path}.issue and evidence must share a concrete technical anchor.`);
+  }
+
+  const titleTokens = anchorTokens(finding.title);
+  const titleGrounded =
+    titleTokens.length === 1
+      ? [...anchorTokens(`${finding.issue} ${finding.evidence}`)].some(
+          ({ raw }) => raw === titleTokens[0]?.raw,
+        )
+      : intersects(new Set(titleTokens.map(({ normalized }) => normalized)), observed);
+  if (titleTokens.length === 0 || !titleGrounded) {
+    throw new Error(`${path}.title must be grounded in observed technical evidence.`);
+  }
+
+  const action = ACTION_VERB.exec(finding.fixDirection);
+  const target = action === null ? "" : finding.fixDirection.slice(action[0].length);
+  if (!intersects(anchorSet(target), observed)) {
+    throw new Error(`${path}.fixDirection must target the observed issue or evidence.`);
+  }
 }
 
 function safeRepositoryPath(value: string): string {

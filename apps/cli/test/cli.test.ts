@@ -567,4 +567,55 @@ describe("CLI", () => {
     }
     assert.equal(stdout.output, "");
   });
+
+  it("prints only static diagnostics for disconnected model prose", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const modelTitle = "Excellent PRIVATE_SOURCE_TOKEN";
+    const allInvalid: ManualReviewService = {
+      async review() {
+        await validateModelReviewOutput(
+          JSON.stringify({
+            version: 1,
+            findings: [
+              {
+                priority: "P1",
+                title: modelTitle,
+                path: "source.ts",
+                range: null,
+                issue: "The cancellation signal is not forwarded.",
+                impact: "The missing signal retains the review slot.",
+                evidence: "The changed call omits the signal argument.",
+                fixDirection: "Pass the cancellation signal to the call.",
+              },
+            ],
+          }),
+          { checkout: root, diff: "" },
+        );
+        throw new Error("Expected disconnected prose to be rejected.");
+      },
+    };
+
+    assert.equal(
+      await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: allInvalid,
+      }),
+      1,
+    );
+    assert.match(stderr.output, /title must be grounded in observed technical evidence/u);
+    assert.doesNotMatch(stderr.output, new RegExp(modelTitle, "u"));
+    assert.doesNotMatch(stderr.output, /PRIVATE_SOURCE_TOKEN/u);
+    assert.equal(stdout.output, "");
+  });
 });

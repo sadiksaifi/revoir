@@ -198,7 +198,7 @@ index 1111111..2222222 100644
             title: "Invalid path",
             path: `../${sourceSecret}.ts`,
             range: null,
-            issue: "The candidate points outside the checkout.",
+            issue: "The path points outside the checkout.",
             impact: "It must not be published.",
             evidence: "The path traverses above the repository root.",
             fixDirection: "Use a repository-relative path.",

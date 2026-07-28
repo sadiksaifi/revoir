@@ -108,7 +108,8 @@ describe("findings-only review publication", () => {
     const inline = renderInlineFinding(candidate);
     const file = renderFileFinding(candidate);
     for (const text of [inline, file]) {
-      assert.match(text, /^### P1 — Cancellation is dropped/mu);
+      assert.match(text, /^### P1 — ``src\/name`with-tick\.ts:10-12 \(RIGHT\)``/mu);
+      assert.doesNotMatch(text, /Cancellation is dropped/u);
       assert.match(text, /- Issue: /u);
       assert.match(text, /- Impact: /u);
       assert.match(text, /- Evidence: /u);
@@ -120,7 +121,7 @@ describe("findings-only review publication", () => {
       );
     }
     assert.doesNotMatch(inline, /- Location:/u);
-    assert.match(file, /- Location: ``src\/name`with-tick\.ts:10-12 \(RIGHT\)``/u);
+    assert.doesNotMatch(file, /- Location:/u);
   });
 
   it("rejects an empty findings review", () => {
