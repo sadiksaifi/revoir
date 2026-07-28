@@ -169,6 +169,78 @@ describe("GitHub review evidence", () => {
     );
   });
 
+  it("matches only the exact Actions job when owner and repository casing differs", async () => {
+    const requestedJobIds: string[] = [];
+    const fetchImplementation: FetchLike = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.includes("/check-runs?")) {
+        return json({
+          total_count: 4,
+          check_runs: [
+            {
+              name: "mixed case",
+              status: "completed",
+              conclusion: "failure",
+              details_url: "https://github.com/Owner/Repository/actions/runs/500/job/501",
+              output: { title: null, summary: null },
+            },
+            {
+              name: "different repository",
+              status: "completed",
+              conclusion: "failure",
+              details_url: "https://github.com/Owner/Repository-Other/actions/runs/500/job/502",
+              output: { title: null, summary: null },
+            },
+            {
+              name: "extra path",
+              status: "completed",
+              conclusion: "failure",
+              details_url: "https://github.com/Owner/Repository/actions/runs/500/job/503/extra",
+              output: { title: null, summary: null },
+            },
+            {
+              name: "different structure casing",
+              status: "completed",
+              conclusion: "failure",
+              details_url: "https://github.com/Owner/Repository/Actions/runs/500/job/504",
+              output: { title: null, summary: null },
+            },
+          ],
+        });
+      }
+      const jobId = /\/actions\/jobs\/(\d+)\/logs$/u.exec(url)?.[1];
+      if (jobId !== undefined) {
+        requestedJobIds.push(jobId);
+        return new Response(`FAIL job ${jobId}\n`, { status: 200 });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const evidence = await session.getReviewEvidence(
+      reference,
+      "2".repeat(40),
+      new AbortController().signal,
+    );
+
+    assert.deepEqual(requestedJobIds, ["501"]);
+    assert.equal(evidence.completedChecks[0]?.failedActionsLog, "FAIL job 501\n");
+    assert.ok(
+      evidence.completedChecks
+        .slice(1)
+        .every(({ failedActionsLog }) => failedActionsLog === undefined),
+    );
+  });
+
   it("retains mixed completed checks when individual Actions logs are unavailable", async () => {
     const privateFailure = `socket failed with ${"PRIVATE_TRANSIENT_DETAIL_".repeat(20)}`;
     const fetchImplementation: FetchLike = async (input) => {

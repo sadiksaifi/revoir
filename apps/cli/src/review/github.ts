@@ -332,6 +332,22 @@ function actionsJobLogUnavailableDiagnostic(error: unknown): string {
     : "GitHub Actions job log unavailable (request failed).";
 }
 
+function asciiCaseInsensitiveEqual(left: string, right: string): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftCode = left.charCodeAt(index);
+    const rightCode = right.charCodeAt(index);
+    const normalizedLeft = leftCode >= 65 && leftCode <= 90 ? leftCode + 32 : leftCode;
+    const normalizedRight = rightCode >= 65 && rightCode <= 90 ? rightCode + 32 : rightCode;
+    if (normalizedLeft !== normalizedRight) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function truncateActionsLogText(value: string, maximumBytes: number): string {
   const bytes = Buffer.from(value);
   if (bytes.length <= maximumBytes) {
@@ -419,15 +435,17 @@ function actionsJobId(detailsUrl: string, reference: PullRequestReference): numb
   if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port !== "") {
     return undefined;
   }
-  const path = `/${reference.owner}/${reference.repository}/actions/runs/`;
-  if (!url.pathname.startsWith(path)) {
+  const match = /^\/([^/]+)\/([^/]+)\/actions\/runs\/([1-9][0-9]*)\/job\/([1-9][0-9]*)$/u.exec(
+    url.pathname,
+  );
+  if (
+    match === null ||
+    !asciiCaseInsensitiveEqual(match[1]!, reference.owner) ||
+    !asciiCaseInsensitiveEqual(match[2]!, reference.repository)
+  ) {
     return undefined;
   }
-  const match = /^([1-9][0-9]*)\/job\/([1-9][0-9]*)$/u.exec(url.pathname.slice(path.length));
-  if (match === null) {
-    return undefined;
-  }
-  const jobId = Number(match[2]);
+  const jobId = Number(match[4]);
   return Number.isSafeInteger(jobId) ? jobId : undefined;
 }
 
