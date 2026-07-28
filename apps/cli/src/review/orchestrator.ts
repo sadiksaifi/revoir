@@ -35,6 +35,7 @@ export type ManualReviewResult =
 
 export interface ManualReviewOptions {
   expectedHeadSha?: string;
+  signal?: AbortSignal;
 }
 
 export interface ManualReviewService {
@@ -213,7 +214,11 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     options?: ManualReviewOptions,
   ): Promise<ManualReviewResult> {
     const deadline = new ReviewDeadline(this.#configuration.timeouts.reviewMs);
-    const acquisition = this.#lock.acquire(deadline.signal);
+    const reviewSignal =
+      options?.signal === undefined
+        ? deadline.signal
+        : AbortSignal.any([deadline.signal, options.signal]);
+    const acquisition = this.#lock.acquire(reviewSignal);
     let lease: Awaited<ReturnType<ReviewLock["acquire"]>>;
     try {
       lease = await deadline.wait(acquisition);
@@ -231,7 +236,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     }
 
     const finalization = this.#retainFinalization(
-      this.#finalizeReview(reference, options, deadline.signal, lease),
+      this.#finalizeReview(reference, options, reviewSignal, lease),
     );
     try {
       return await deadline.wait(finalization);

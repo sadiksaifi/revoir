@@ -22,6 +22,14 @@ export interface QueueRunService {
   run(signal?: AbortSignal): Promise<void>;
 }
 
+export interface QueueRunLogger {
+  write(event: string, data?: Readonly<Record<string, unknown>>): Promise<void>;
+}
+
+const NOOP_LOGGER: QueueRunLogger = {
+  async write() {},
+};
+
 function locallyEligible(job: ReviewJobV1, configuration: RevoirConfiguration["github"]): boolean {
   if (
     job.installationId !== configuration.installationId ||
@@ -64,19 +72,26 @@ function waitForNextPoll(signal?: AbortSignal): Promise<void> {
   });
 }
 
+function aborted(signal?: AbortSignal): boolean {
+  return signal?.aborted === true;
+}
+
 export class QueueReviewRunner implements QueueRunService {
   readonly #configuration: RevoirConfiguration;
   readonly #queue: QueueClient;
   readonly #reviews: ManualReviewService;
+  readonly #logger: QueueRunLogger;
 
   constructor(
     configuration: RevoirConfiguration,
     queue: QueueClient,
     reviews: ManualReviewService,
+    logger: QueueRunLogger = NOOP_LOGGER,
   ) {
     this.#configuration = configuration;
     this.#queue = queue;
     this.#reviews = reviews;
+    this.#logger = logger;
   }
 
   async consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
@@ -92,25 +107,49 @@ export class QueueReviewRunner implements QueueRunService {
       if (!(error instanceof ReviewJobSchemaError)) {
         throw error;
       }
-      await this.#queue.acknowledge(delivery.leaseId, signal);
+      await this.#queue.acknowledge(delivery.leaseId);
       return "settled";
     }
 
     if (!locallyEligible(job, this.#configuration.github)) {
-      await this.#queue.acknowledge(delivery.leaseId, signal);
+      await this.#queue.acknowledge(delivery.leaseId);
       return "settled";
     }
 
+    const metadata = {
+      deliveryId: job.deliveryId,
+      repository: `${job.repository.owner}/${job.repository.name}`,
+      pullRequest: job.pullRequest.number,
+      headSha: job.pullRequest.headSha,
+    };
+    const startedAt = Date.now();
+    await this.#logger.write("queue_review_started", metadata);
     try {
-      await this.#reviews.review(referenceFor(job), {
+      const result = await this.#reviews.review(referenceFor(job), {
         expectedHeadSha: job.pullRequest.headSha,
+        ...(signal === undefined ? {} : { signal }),
       });
-      await this.#queue.acknowledge(delivery.leaseId, signal);
+      await this.#queue.acknowledge(delivery.leaseId);
+      await this.#logger.write("queue_review_settled", {
+        ...metadata,
+        outcome: result.status,
+        durationMs: Date.now() - startedAt,
+      });
     } catch (error) {
       if (error instanceof PullRequestEligibilityError) {
-        await this.#queue.acknowledge(delivery.leaseId, signal);
+        await this.#queue.acknowledge(delivery.leaseId);
+        await this.#logger.write("queue_review_rejected", {
+          ...metadata,
+          durationMs: Date.now() - startedAt,
+          error,
+        });
       } else {
-        await this.#queue.retry(delivery.leaseId, signal);
+        await this.#queue.retry(delivery.leaseId);
+        await this.#logger.write("queue_review_retried", {
+          ...metadata,
+          durationMs: Date.now() - startedAt,
+          error,
+        });
       }
     }
     return "settled";
@@ -118,12 +157,20 @@ export class QueueReviewRunner implements QueueRunService {
 
   async run(signal?: AbortSignal): Promise<void> {
     for (;;) {
-      if (signal?.aborted === true) {
+      if (aborted(signal)) {
         return;
       }
       // Pull and settlement are deliberately serialized to keep one review in flight.
-      // eslint-disable-next-line no-await-in-loop
-      const result = await this.consumeOne(signal);
+      let result: QueueConsumption;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        result = await this.consumeOne(signal);
+      } catch (error) {
+        if (aborted(signal)) {
+          return;
+        }
+        throw error;
+      }
       if (result === "idle") {
         // eslint-disable-next-line no-await-in-loop
         await waitForNextPoll(signal);
@@ -132,10 +179,14 @@ export class QueueReviewRunner implements QueueRunService {
   }
 }
 
-export function createDefaultQueueRunService(configuration: RevoirConfiguration): QueueRunService {
+export function createDefaultQueueRunService(
+  configuration: RevoirConfiguration,
+  logger: QueueRunLogger = NOOP_LOGGER,
+): QueueRunService {
   return new QueueReviewRunner(
     configuration,
     new CloudflareQueueClient(configuration.cloudflare, configuration.timeouts.reviewMs),
     createDefaultManualReviewService(configuration),
+    logger,
   );
 }

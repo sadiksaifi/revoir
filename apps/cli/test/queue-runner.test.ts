@@ -182,4 +182,47 @@ describe("automatic queue review runner", () => {
     assert.equal(pulls, 3);
     assert.equal(maximumActiveReviews, 1);
   });
+
+  it("cancels active review work, settles its lease, and logs shutdown before returning", async () => {
+    const controller = new AbortController();
+    let delivered = false;
+    const retries: string[] = [];
+    const events: Array<{ event: string; data: Readonly<Record<string, unknown>> }> = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        if (delivered) {
+          return undefined;
+        }
+        delivered = true;
+        return delivery("shutdown-lease", reviewJob());
+      },
+      async acknowledge() {},
+      async retry(leaseId) {
+        retries.push(leaseId);
+      },
+    };
+    const reviewService: ManualReviewService = {
+      async review(_reference, options) {
+        controller.abort(new Error("SIGTERM requested graceful shutdown"));
+        assert.equal(options?.signal?.aborted, true);
+        throw options?.signal?.reason;
+      },
+    };
+    const logger = {
+      async write(event: string, data: Readonly<Record<string, unknown>> = {}) {
+        events.push({ event, data });
+      },
+    };
+
+    await new QueueReviewRunner(configuration(), queue, reviewService, logger).run(
+      controller.signal,
+    );
+
+    assert.deepEqual(retries, ["shutdown-lease"]);
+    assert.deepEqual(
+      events.map(({ event }) => event),
+      ["queue_review_started", "queue_review_retried"],
+    );
+    assert.equal(events[1]?.data["deliveryId"], reviewJob().deliveryId);
+  });
 });

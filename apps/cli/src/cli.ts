@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 
@@ -24,6 +24,12 @@ import {
   PullRequestEligibilityError,
   PullRequestUrlError,
 } from "./review/pull-request.js";
+import {
+  JsonLineServiceLogger,
+  readServiceLogs,
+  serviceLogPaths,
+  type ServiceLogger,
+} from "./service/logging.js";
 import {
   createDefaultServiceManager,
   type ServiceManager,
@@ -97,6 +103,8 @@ export interface CliDependencies {
   reviewService?: ManualReviewService;
   runService?: QueueRunService;
   serviceManager?: ServiceManager;
+  serviceLogger?: ServiceLogger;
+  shutdownSignal?: AbortSignal;
   prompt?: PromptFunction;
 }
 
@@ -253,6 +261,30 @@ export async function runCli(
   const configFile =
     common.configFile === undefined ? paths.configFile : resolve(io.cwd, common.configFile);
 
+  if (command === "logs") {
+    if (common.json) {
+      write(io.stderr, "Error: --json is not supported by the logs command.\n");
+      return 2;
+    }
+    if (common.arguments.length > 0) {
+      write(io.stderr, "Error: logs does not accept positional arguments.\n");
+      return 2;
+    }
+    let stateDir = paths.stateDir;
+    try {
+      stateDir = (await loadConfiguration(configFile)).paths.stateDir;
+    } catch {
+      // Logs remain available for diagnosing a missing or unsafe configuration.
+    }
+    try {
+      write(io.stdout, await readServiceLogs(stateDir));
+      return 0;
+    } catch (error) {
+      write(io.stderr, `Error: ${new SecretRedactor().error(error, common.verbose)}\n`);
+      return 1;
+    }
+  }
+
   if (["install", "start", "stop", "status", "uninstall"].includes(command ?? "")) {
     if (common.json) {
       write(io.stderr, `Error: --json is not supported by the ${String(command)} command.\n`);
@@ -284,7 +316,7 @@ export async function runCli(
       configuration === undefined
         ? paths
         : {
-            configDir: dirname(configFile),
+            configDir: paths.configDir,
             configFile,
             cacheDir: configuration.paths.cacheDir,
             stateDir: configuration.paths.stateDir,
@@ -488,13 +520,58 @@ export async function runCli(
       return 2;
     }
     const redactor = new SecretRedactor(configuration);
+    let logger: ServiceLogger;
     try {
-      await (dependencies.runService ?? createDefaultQueueRunService(configuration)).run();
-      return 0;
+      logger =
+        dependencies.serviceLogger ??
+        (await JsonLineServiceLogger.open(
+          serviceLogPaths(configuration.paths.stateDir).structured,
+          redactor,
+        ));
     } catch (error) {
       write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
       return 1;
     }
+
+    let exitCode = 0;
+    try {
+      await logger.write("daemon_started", {
+        pid: process.pid,
+        model: configuration.model.id,
+        reasoning: configuration.model.reasoning,
+      });
+      await (dependencies.runService ?? createDefaultQueueRunService(configuration, logger)).run(
+        dependencies.shutdownSignal,
+      );
+      await logger.write("daemon_stopped", {
+        pid: process.pid,
+        reason: dependencies.shutdownSignal?.aborted === true ? "shutdown" : "completed",
+      });
+    } catch (error) {
+      if (dependencies.shutdownSignal?.aborted === true) {
+        try {
+          await logger.write("daemon_stopped", {
+            pid: process.pid,
+            reason: "shutdown",
+          });
+        } catch (logError) {
+          write(io.stderr, `Error: ${redactor.error(logError, common.verbose)}\n`);
+          exitCode = 1;
+        }
+      } else {
+        await logger.write("daemon_failed", { pid: process.pid, error }).catch(() => {});
+        write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
+        exitCode = 1;
+      }
+    }
+    try {
+      await logger.flush();
+      await logger.close();
+    } catch (error) {
+      write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
+      exitCode = 1;
+    }
+    return exitCode;
   }
 
   write(io.stderr, `Error: Unknown command "${String(command)}".\n\n${HELP}`);

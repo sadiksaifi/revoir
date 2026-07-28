@@ -37,7 +37,7 @@ async function createFixture(): Promise<{
   await Promise.all([
     mkdir(join(homeDir, ".local", "bin"), { recursive: true }),
     mkdir(join(homeDir, ".config", "revoir"), { recursive: true }),
-    mkdir(join(homeDir, ".local", "state", "revoir"), { recursive: true }),
+    mkdir(join(homeDir, ".local", "state", "revoir"), { recursive: true, mode: 0o700 }),
   ]);
   await Promise.all([
     writeFile(executable, "#!/bin/sh\n", { mode: 0o700 }),
@@ -151,6 +151,15 @@ describe("launchd service manager", () => {
       state: "starting",
       detail: "LaunchAgent is loaded and waiting for launchd to start it.",
     });
+    const operationsBeforeStartingStart = operations.length;
+    await manager.start();
+    assert.equal(operations.length, operationsBeforeStartingStart + 1);
+
+    setInspection({ state: "exited", pid: undefined, lastExitCode: 0 });
+    assert.deepEqual(await manager.status(), {
+      state: "stopped",
+      detail: 'LaunchAgent is loaded but stopped. Run "revoir start".',
+    });
 
     setInspection({ state: "exited", pid: undefined, lastExitCode: 78 });
     assert.deepEqual(await manager.status(), {
@@ -158,6 +167,8 @@ describe("launchd service manager", () => {
       detail:
         'LaunchAgent failed with exit code 78. Inspect "revoir logs", fix the reported configuration or executable problem, then run "revoir start".',
     });
+    await manager.start();
+    assert.equal(operations.at(-1), "kickstart");
 
     setInspection({ state: "running", pid: undefined, lastExitCode: undefined });
     assert.deepEqual(await manager.status(), {
@@ -165,5 +176,17 @@ describe("launchd service manager", () => {
       detail:
         'launchd reports the service as "running" without a process identifier. Run "revoir stop", then "revoir start"; reinstall if the problem persists.',
     });
+  });
+
+  it("refuses an unavailable executable before mutating launchd or the plist", async () => {
+    const { executable, manager, operations } = await createFixture();
+    await rm(executable);
+
+    await assert.rejects(
+      manager.install(),
+      /executable .* is unavailable or not executable.*absolute executable path/iu,
+    );
+    assert.deepEqual(operations, []);
+    await assert.rejects(readFile(manager.plistFile, "utf8"), { code: "ENOENT" });
   });
 });

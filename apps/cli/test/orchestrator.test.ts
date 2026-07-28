@@ -1129,6 +1129,30 @@ describe("clean review orchestrator", () => {
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
   });
 
+  it("propagates daemon shutdown cancellation and completes terminal review cleanup", async () => {
+    const controller = new AbortController();
+    let markReviewStarted: (() => void) | undefined;
+    const reviewStarted = new Promise<void>((resolve) => {
+      markReviewStarted = resolve;
+    });
+    const shutdown = harness({
+      review: async (_input, signal) => {
+        markReviewStarted?.();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    });
+    const shutdownError = new Error("SIGTERM requested graceful shutdown");
+    const review = shutdown.orchestrator.review(reference, { signal: controller.signal });
+
+    await reviewStarted;
+    controller.abort(shutdownError);
+
+    await assert.rejects(review, shutdownError);
+    assert.deepEqual(shutdown.events.slice(-2), ["cleanup", "delete-10"]);
+  });
+
   it("keeps the process lock while a timed-out review engine is still active", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-orchestrator-lock-"));
     let finishReview: (() => void) | undefined;

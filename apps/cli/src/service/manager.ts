@@ -20,6 +20,7 @@ import {
   LAUNCH_AGENT_LABEL,
   renderLaunchAgentPlist,
 } from "./launchd.js";
+import { prepareServiceLogFiles } from "./logging.js";
 
 const PLIST_MODE = 0o600;
 
@@ -127,6 +128,7 @@ export class LaunchdServiceManager {
   readonly #executable: string;
   readonly #expectedPlist: string;
   readonly #launchctl: LaunchctlGateway;
+  readonly #stateDir: string;
   readonly #target: string;
   readonly plistFile: string;
 
@@ -144,6 +146,7 @@ export class LaunchdServiceManager {
     }
     this.#executable = executable;
     this.#domain = `gui/${input.uid}`;
+    this.#stateDir = input.paths.stateDir;
     this.#target = `${this.#domain}/${LAUNCH_AGENT_LABEL}`;
     this.plistFile = join(input.homeDir, "Library", "LaunchAgents", `${LAUNCH_AGENT_LABEL}.plist`);
     this.#launchctl = launchctl;
@@ -151,6 +154,7 @@ export class LaunchdServiceManager {
 
   async install(): Promise<void> {
     await validateExecutable(this.#executable);
+    await prepareServiceLogFiles(this.#stateDir);
     if ((await this.#launchctl.inspect(this.#target)) !== undefined) {
       await this.#launchctl.bootout(this.#target);
     }
@@ -237,6 +241,15 @@ export class LaunchdServiceManager {
       return {
         state: "failed",
         detail: `LaunchAgent failed with exit code ${inspection.lastExitCode}. Inspect "revoir logs", fix the reported configuration or executable problem, then run "revoir start".`,
+      };
+    }
+    if (
+      inspection.lastExitCode === 0 &&
+      ["exited", "stopped", "not running"].includes(inspection.state?.toLowerCase() ?? "stopped")
+    ) {
+      return {
+        state: "stopped",
+        detail: 'LaunchAgent is loaded but stopped. Run "revoir start".',
       };
     }
     if (

@@ -1,6 +1,7 @@
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 
 import type { ApplicationPaths } from "../config/paths.js";
+import { serviceLogPaths } from "./logging.js";
 
 export const LAUNCH_AGENT_LABEL = "io.github.sadiksaifi.revoir";
 export const LAUNCH_AGENT_THROTTLE_SECONDS = 30;
@@ -41,6 +42,7 @@ export function createLaunchAgentDefinition(input: LaunchAgentInput): LaunchAgen
   requireAbsolutePath(input.configFile, "The configuration file");
   requireAbsolutePath(input.homeDir, "The user home directory");
 
+  const logs = serviceLogPaths(input.paths.stateDir);
   return {
     label: LAUNCH_AGENT_LABEL,
     programArguments: [...input.executableArguments, "run", "--config", input.configFile],
@@ -51,8 +53,8 @@ export function createLaunchAgentDefinition(input: LaunchAgentInput): LaunchAgen
       XDG_DATA_HOME: dirname(input.paths.dataDir),
       XDG_STATE_HOME: dirname(input.paths.stateDir),
     },
-    standardOutputPath: join(input.paths.stateDir, "logs", "launchd.stdout.log"),
-    standardErrorPath: join(input.paths.stateDir, "logs", "launchd.stderr.log"),
+    standardOutputPath: logs.launchdStdout,
+    standardErrorPath: logs.launchdStderr,
     throttleIntervalSeconds: LAUNCH_AGENT_THROTTLE_SECONDS,
     exitTimeoutSeconds: LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS,
   };
