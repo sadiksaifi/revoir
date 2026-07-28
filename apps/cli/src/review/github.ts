@@ -338,6 +338,7 @@ class InstallationSession implements GitHubReviewSession {
   readonly #fetch: FetchLike;
   readonly #pendingFenceAttemptMs: number;
   #ownedOpenThreadIds = new Set<string>();
+  #priorRunWasClean = false;
 
   constructor(
     installationToken: string,
@@ -390,13 +391,14 @@ class InstallationSession implements GitHubReviewSession {
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<void> {
-    settledValues(
+    const removed = settledValues(
       await Promise.allSettled([
-        this.removeOwnReaction(reference, "+1", signal),
-        this.removeOwnReaction(reference, "confused", signal),
+        this.#removeOwnReaction(reference, "+1", signal),
+        this.#removeOwnReaction(reference, "confused", signal),
       ]),
       "GitHub completion reaction reconciliation failed.",
     );
+    this.#priorRunWasClean = removed[0]!;
   }
 
   async #graphql(
@@ -423,6 +425,7 @@ class InstallationSession implements GitHubReviewSession {
   ): Promise<PriorReviewState> {
     const activeFingerprints = new Set<string>();
     const runHeadShas = new Set<string>();
+    let latestBodyFingerprints: readonly string[] = [];
     let reviewPage = 1;
     for (;;) {
       throwIfAborted(signal);
@@ -443,11 +446,12 @@ class InstallationSession implements GitHubReviewSession {
           review.state.toUpperCase() !== "PENDING" &&
           review.userLogin.toLowerCase() === this.#botLogin
         ) {
-          for (const fingerprint of findingMarkerFingerprints(review.body)) {
-            activeFingerprints.add(fingerprint);
-          }
-          for (const headSha of runMarkerHeadShas(review.body)) {
+          const reviewHeadShas = runMarkerHeadShas(review.body);
+          for (const headSha of reviewHeadShas) {
             runHeadShas.add(headSha);
+          }
+          if (reviewHeadShas.length > 0) {
+            latestBodyFingerprints = findingMarkerFingerprints(review.body);
           }
         }
       }
@@ -457,6 +461,11 @@ class InstallationSession implements GitHubReviewSession {
       reviewPage += 1;
       // eslint-disable-next-line no-await-in-loop
       await yieldToEventLoop(signal);
+    }
+    if (!this.#priorRunWasClean) {
+      for (const fingerprint of latestBodyFingerprints) {
+        activeFingerprints.add(fingerprint);
+      }
     }
 
     const ownedOpenThreads: Array<{ id: string; fingerprint: string }> = [];
@@ -629,11 +638,11 @@ class InstallationSession implements GitHubReviewSession {
     );
   }
 
-  async removeOwnReaction(
+  async #removeOwnReaction(
     reference: PullRequestReference,
     reaction: ReviewReaction,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const ownedReactionIds = new Set<number>();
     let page = 1;
     for (;;) {
@@ -674,6 +683,15 @@ class InstallationSession implements GitHubReviewSession {
       ),
       "GitHub reaction reconciliation failed.",
     );
+    return ownedReactionIds.size > 0;
+  }
+
+  async removeOwnReaction(
+    reference: PullRequestReference,
+    reaction: ReviewReaction,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.#removeOwnReaction(reference, reaction, signal);
   }
 
   async addReaction(

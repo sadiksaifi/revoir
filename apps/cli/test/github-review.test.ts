@@ -11,6 +11,7 @@ import {
 } from "../src/review/github.js";
 import { createReviewPublication, renderFileFinding } from "../src/review/publication.js";
 import { parsePullRequestUrl } from "../src/review/pull-request.js";
+import { planFindingReconciliation } from "../src/review/reconciliation.js";
 import { createTestConfiguration, TEST_PRIVATE_KEY } from "./helpers.js";
 
 const reference = parsePullRequestUrl("https://github.com/owner/repository/pull/17");
@@ -426,6 +427,121 @@ describe("GitHub App review gateway", () => {
       new AbortController().signal,
     );
     assert.deepEqual(mutations, ["THREAD_OWN_OPEN"]);
+  });
+
+  it("retires historical body fingerprints after later findings and clean runs", async () => {
+    const historicalFingerprint = "a".repeat(64);
+    const latestFingerprint = "b".repeat(64);
+    const fileFinding: ReviewFindingV1 = {
+      version: 1,
+      fingerprint: historicalFingerprint,
+      priority: "P1",
+      path: "source.ts",
+      range: null,
+      defectKind: "correctness",
+      impactKind: "incorrect-result",
+      fixAction: "restore",
+      anchor: "source.ts",
+      attachment: { kind: "file", path: "source.ts" },
+    };
+    const fallbackFinding: ReviewFindingV1 = {
+      ...fileFinding,
+      range: { start: 2, end: 2, side: "RIGHT" },
+      attachment: {
+        kind: "inline",
+        path: "source.ts",
+        startLine: 2,
+        endLine: 2,
+        side: "RIGHT",
+      },
+    };
+    const historicalBodies = [
+      createReviewPublication("1".repeat(40), [fileFinding]).payload.body!,
+      createReviewPublication("1".repeat(40), [fallbackFinding]).fallbackPayload.body!,
+    ];
+
+    await Promise.all(
+      historicalBodies.flatMap((historicalBody, index) =>
+        (["findings", "clean"] as const).map(async (priorRun) => {
+          const returnedFinding = index === 0 ? fileFinding : fallbackFinding;
+          const fetchImplementation: FetchLike = async (input, init) => {
+            const url = String(input);
+            if (url.endsWith("/app")) {
+              return json({ slug: "revoir-test" });
+            }
+            if (url.endsWith("/app/installations/8/access_tokens")) {
+              return json({ token: "installation-secret" });
+            }
+            if (url.includes("/reactions?per_page=100&page=1")) {
+              return json(
+                priorRun === "clean"
+                  ? [
+                      {
+                        id: 301,
+                        content: "+1",
+                        user: { login: "revoir-test[bot]" },
+                      },
+                    ]
+                  : [],
+              );
+            }
+            if (url.endsWith("/reactions/301") && init?.method === "DELETE") {
+              return new Response(null, { status: 204 });
+            }
+            if (url.endsWith("/pulls/17/reviews?per_page=100&page=1")) {
+              return json([
+                {
+                  id: 201,
+                  state: "COMMENTED",
+                  body: historicalBody,
+                  user: { login: "revoir-test[bot]" },
+                },
+                ...(priorRun === "findings"
+                  ? [
+                      {
+                        id: 202,
+                        state: "COMMENTED",
+                        body: `<!-- revoir:finding:v1:${latestFingerprint} -->\n<!-- revoir:run:v1:${"2".repeat(40)} -->`,
+                        user: { login: "revoir-test[bot]" },
+                      },
+                    ]
+                  : []),
+              ]);
+            }
+            if (url.endsWith("/graphql")) {
+              return json({
+                data: {
+                  repository: {
+                    pullRequest: {
+                      reviewThreads: {
+                        nodes: [],
+                        pageInfo: { hasNextPage: false, endCursor: null },
+                      },
+                    },
+                  },
+                },
+              });
+            }
+            throw new Error(`Unexpected request ${url}`);
+          };
+          const session = await new GitHubAppReviewGateway(
+            fetchImplementation,
+            "https://api.test",
+            () => 1_000,
+          ).authenticate(configuration.github, reference, new AbortController().signal);
+
+          await session.removeOwnCompletionReaction(reference, new AbortController().signal);
+          const prior = await session.getPriorReviewState(reference, new AbortController().signal);
+          assert.deepEqual(
+            prior.activeFingerprints,
+            priorRun === "findings" ? [latestFingerprint] : [],
+          );
+          assert.deepEqual(planFindingReconciliation([returnedFinding], prior).netNewFindings, [
+            returnedFinding,
+          ]);
+        }),
+      ),
+    );
   });
 
   it("uses the bounded state-aware fence while reconciling an owned pending review", async () => {
