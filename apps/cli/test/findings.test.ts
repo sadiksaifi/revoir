@@ -14,6 +14,7 @@ import {
   validateModelReviewOutput,
 } from "../src/review/findings.js";
 import { createReviewPublication } from "../src/review/publication.js";
+import { planFindingReconciliation } from "../src/review/reconciliation.js";
 
 const execFileAsync = promisify(execFile);
 const NFD_PATH = "cafe\u0301.ts";
@@ -589,6 +590,66 @@ index 1111111..2222222 100644
     assert.equal(result.findings.length, 2);
     assert.equal(result.diagnostics.length, 0);
     assert.notEqual(result.findings[0]?.fingerprint, result.findings[1]?.fingerprint);
+  });
+
+  it("keeps a surviving same-anchor occurrence stable after its peer disappears", async () => {
+    const withPeer = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,4 @@
+ const retained = true;
++throwIfAborted(signal);
++const between = true;
++throwIfAborted(signal);
+`;
+    const withoutPeer = `diff --git a/source.ts b/source.ts
+index 1111111..3333333 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1,3 @@
+ const retained = true;
++const between = true;
++throwIfAborted(signal);
+`;
+    const peer = finding({
+      range: { start: 2, end: 2, side: "RIGHT" },
+      anchor: "throwIfAborted(signal);",
+    });
+    const survivingWithPeer = finding({
+      range: { start: 4, end: 4, side: "RIGHT" },
+      anchor: "throwIfAborted(signal);",
+    });
+    const survivingWithoutPeer = finding({
+      range: { start: 3, end: 3, side: "RIGHT" },
+      anchor: "throwIfAborted(signal);",
+    });
+    const firstRun = await validateModelReviewOutput(output([peer, survivingWithPeer]), {
+      checkout,
+      diff: withPeer,
+    });
+    const secondRun = await validateModelReviewOutput(output([survivingWithoutPeer]), {
+      checkout,
+      diff: withoutPeer,
+    });
+    const peerFingerprint = firstRun.findings[0]!.fingerprint;
+    const survivingFingerprint = firstRun.findings[1]!.fingerprint;
+
+    assert.equal(secondRun.findings[0]?.fingerprint, survivingFingerprint);
+    assert.deepEqual(
+      planFindingReconciliation(secondRun.findings, {
+        activeFingerprints: [peerFingerprint, survivingFingerprint],
+        ownedOpenThreads: [
+          { id: "THREAD_PEER", fingerprint: peerFingerprint },
+          { id: "THREAD_SURVIVOR", fingerprint: survivingFingerprint },
+        ],
+        runHeadShas: ["1".repeat(40)],
+      }),
+      {
+        netNewFindings: [],
+        obsoleteThreadIds: ["THREAD_PEER"],
+      },
+    );
   });
 
   it("keeps Unicode case-fold lookalikes as distinct exact anchors", async () => {

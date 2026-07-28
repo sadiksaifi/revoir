@@ -224,7 +224,7 @@ export function findingFingerprint(
     ModelFindingV1,
     "path" | "range" | "defectKind" | "impactKind" | "fixAction" | "anchor"
   >,
-  occurrenceIndex?: number,
+  occurrenceContext?: string,
 ): string {
   const identityParts: unknown[] = [
     FINDING_CONTRACT_VERSION,
@@ -233,8 +233,8 @@ export function findingFingerprint(
     finding.impactKind,
     finding.anchor,
   ];
-  if (occurrenceIndex !== undefined) {
-    identityParts.push(occurrenceIndex);
+  if (occurrenceContext !== undefined) {
+    identityParts.push(occurrenceContext);
   }
   return createHash("sha256").update(JSON.stringify(identityParts)).digest("hex");
 }
@@ -259,26 +259,34 @@ export function prerequisiteFindingFingerprint(
   return createHash("sha256").update(identity).digest("hex");
 }
 
-function anchorOccurrence(file: DiffFile, finding: ModelFindingV1): number | undefined {
+function anchorOccurrenceContext(file: DiffFile, finding: ModelFindingV1): string | undefined {
   if (finding.range === null) {
     return undefined;
   }
-  const matchingLines = [...file.changedLineText.entries()]
+  const changedLines = [...file.changedLineText.entries()]
     .flatMap(([key, text]) => {
       const [side, lineText] = key.split(":");
       const line = Number(lineText);
-      return side === finding.range!.side && text.includes(finding.anchor) && Number.isInteger(line)
-        ? [line]
-        : [];
+      return side === finding.range!.side && Number.isInteger(line) ? [{ line, text }] : [];
     })
-    .toSorted((left, right) => left - right);
-  if (matchingLines.length <= 1) {
+    .toSorted((left, right) => left.line - right.line);
+  const occurrence = changedLines.findIndex(
+    ({ line, text }) =>
+      line >= finding.range!.start && line <= finding.range!.end && text.includes(finding.anchor),
+  );
+  if (occurrence < 0) {
     return undefined;
   }
-  const occurrence = matchingLines.findIndex(
-    (line) => line >= finding.range!.start && line <= finding.range!.end,
-  );
-  return occurrence < 0 ? undefined : occurrence;
+  const before = changedLines
+    .slice(0, occurrence)
+    .findLast(({ text }) => !text.includes(finding.anchor))?.text;
+  const after = changedLines
+    .slice(occurrence + 1)
+    .find(({ text }) => !text.includes(finding.anchor))?.text;
+  if (before === undefined && after === undefined) {
+    return undefined;
+  }
+  return JSON.stringify([before ?? null, after ?? null]);
 }
 
 function attachment(file: DiffFile, finding: ModelFindingV1): FindingAttachment {
@@ -329,7 +337,10 @@ export async function validateModelReviewOutput(
         throw new Error("range is not a contiguous changed-line range in the reviewed diff.");
       }
       validateTechnicalAnchor(modelFinding, file);
-      const fingerprint = findingFingerprint(modelFinding, anchorOccurrence(file, modelFinding));
+      const fingerprint = findingFingerprint(
+        modelFinding,
+        anchorOccurrenceContext(file, modelFinding),
+      );
       if (fingerprints.has(fingerprint)) {
         diagnostics.push({
           index,

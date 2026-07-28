@@ -1,4 +1,8 @@
-import { prerequisiteFindingFingerprint, type ReviewFindingV1 } from "./findings.js";
+import {
+  findingFingerprint,
+  prerequisiteFindingFingerprint,
+  type ReviewFindingV1,
+} from "./findings.js";
 
 const FINDING_MARKER = /^<!-- revoir:finding:v1:([0-9a-f]{64}) -->\r?$/gmu;
 const RUN_MARKER = /^<!-- revoir:run:v1:([0-9a-f]{40,64}) -->\r?$/gmu;
@@ -37,6 +41,7 @@ export function planFindingReconciliation(
 ): FindingReconciliationPlan {
   const findingFingerprints = findings.map((finding) => [
     finding.fingerprint,
+    findingFingerprint(finding),
     prerequisiteFindingFingerprint(finding),
   ]);
   const currentFingerprints = new Set(findingFingerprints.flat());
