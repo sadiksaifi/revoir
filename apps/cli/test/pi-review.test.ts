@@ -46,6 +46,7 @@ class FakeSessionFactory implements PiSessionFactory {
   async create(options: PiSessionOptions): Promise<PiSession> {
     this.options.push(options);
     return {
+      async abort() {},
       run: async (prompt) => {
         this.prompts.push(prompt);
         return this.result;
@@ -110,5 +111,161 @@ describe("Pi clean review adapter", () => {
         },
       ),
     );
+  });
+
+  it("joins late session creation and asynchronous disposal after cancellation", async () => {
+    let finishCreation: ((session: PiSession) => void) | undefined;
+    let finishAbort: (() => void) | undefined;
+    let finishDisposal: (() => void) | undefined;
+    let abortStarted = false;
+    let disposalStarted = false;
+    let runCalls = 0;
+    const sessions: PiSessionFactory = {
+      create: async () =>
+        new Promise<PiSession>((resolve) => {
+          finishCreation = resolve;
+        }),
+    };
+    const engine = new PiReviewEngine(
+      { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      sessions,
+    );
+    const cancellation = new Error("cancel late Pi creation");
+    const abortController = new AbortController();
+    let settled = false;
+    const review = engine
+      .review(
+        {
+          reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+          pullRequest,
+          workspace,
+        },
+        abortController.signal,
+      )
+      .finally(() => {
+        settled = true;
+      });
+    void review.catch(() => {});
+
+    abortController.abort(cancellation);
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(settled, false);
+
+    assert.ok(finishCreation);
+    finishCreation({
+      async abort() {
+        abortStarted = true;
+        await new Promise<void>((resolve) => {
+          finishAbort = resolve;
+        });
+      },
+      async run() {
+        runCalls += 1;
+        return '{"findings":[]}';
+      },
+      async dispose() {
+        disposalStarted = true;
+        await new Promise<void>((resolve) => {
+          finishDisposal = resolve;
+        });
+      },
+    });
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(abortStarted, true);
+    assert.equal(disposalStarted, false);
+    assert.equal(settled, false);
+    finishAbort?.();
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(disposalStarted, true);
+    assert.equal(settled, false);
+    assert.equal(runCalls, 0);
+
+    finishDisposal?.();
+    await assert.rejects(review, cancellation);
+  });
+
+  it("memoizes and joins abort before asynchronously disposing an active session", async () => {
+    let finishRun: ((value: string) => void) | undefined;
+    let finishAbort: (() => void) | undefined;
+    let finishDisposal: (() => void) | undefined;
+    let markRunStarted: (() => void) | undefined;
+    const runStarted = new Promise<void>((resolve) => {
+      markRunStarted = resolve;
+    });
+    let abortCalls = 0;
+    let disposalStarted = false;
+    const sessions: PiSessionFactory = {
+      async create() {
+        return {
+          async abort() {
+            abortCalls += 1;
+            await new Promise<void>((resolve) => {
+              finishAbort = resolve;
+            });
+          },
+          async run() {
+            markRunStarted?.();
+            return new Promise<string>((resolve) => {
+              finishRun = resolve;
+            });
+          },
+          async dispose() {
+            disposalStarted = true;
+            await new Promise<void>((resolve) => {
+              finishDisposal = resolve;
+            });
+          },
+        };
+      },
+    };
+    const engine = new PiReviewEngine(
+      { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      sessions,
+    );
+    const abortController = new AbortController();
+    const cancellation = new Error("cancel active Pi session");
+    let settled = false;
+    const review = engine
+      .review(
+        {
+          reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+          pullRequest,
+          workspace,
+        },
+        abortController.signal,
+      )
+      .finally(() => {
+        settled = true;
+      });
+    void review.catch(() => {});
+    await runStarted;
+
+    abortController.abort(cancellation);
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(abortCalls, 1);
+    assert.equal(settled, false);
+    finishRun?.('{"findings":[]}');
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(disposalStarted, false);
+    assert.equal(settled, false);
+
+    finishAbort?.();
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(disposalStarted, true);
+    assert.equal(abortCalls, 1);
+    finishDisposal?.();
+    await assert.rejects(review, cancellation);
   });
 });

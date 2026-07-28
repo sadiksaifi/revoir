@@ -63,10 +63,6 @@ class ReviewDeadline {
     return Promise.race([operation, this.#expiration]);
   }
 
-  run<T>(operation: () => Promise<T>): Promise<T> {
-    return this.wait(Promise.resolve().then(operation));
-  }
-
   dispose(): void {
     clearTimeout(this.#timeout);
   }
@@ -104,42 +100,36 @@ function combineFailures(
   return new AggregateError([...primaryErrors, ...unique], message);
 }
 
-async function acquireReviewLock(lock: ReviewLock, signal: AbortSignal) {
-  throwIfAborted(signal);
-  const acquisition = lock.acquire(signal);
-  return new Promise<Awaited<ReturnType<ReviewLock["acquire"]>>>((resolve, reject) => {
-    let abandoned = false;
-    const onAbort = (): void => {
-      abandoned = true;
-      reject(signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled."));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    void acquisition.then(
-      async (lease) => {
-        signal.removeEventListener("abort", onAbort);
-        if (abandoned || signal.aborted) {
-          await lease.release().catch(() => {});
-          if (!abandoned) {
-            reject(
-              signal.reason instanceof Error ? signal.reason : new Error("Review was cancelled."),
-            );
-          }
-          return;
-        }
-        resolve(lease);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        if (!abandoned) {
-          reject(error);
-        }
-      },
-    );
+function terminalBackoff(attempt: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.min(50, 2 ** Math.min(attempt, 5)));
   });
+}
+
+async function completeTerminal(operation: TerminalHandle): Promise<Error[]> {
+  const failures: Error[] = [];
+  let attempts = 0;
+  for (;;) {
+    try {
+      // Terminal attempts must remain serialized.
+      // eslint-disable-next-line no-await-in-loop
+      await operation();
+      return failures;
+    } catch (error) {
+      if (failures.length === 0) {
+        failures.push(asError(error));
+      }
+      attempts += 1;
+      // Terminal work remains serialized and retryable until its side effect is confirmed.
+      // eslint-disable-next-line no-await-in-loop
+      await terminalBackoff(attempts);
+    }
+  }
 }
 
 export class CleanReviewOrchestrator implements ManualReviewService {
   readonly #configuration: RevoirConfiguration;
+  readonly #finalizations = new Set<Promise<unknown>>();
   readonly #github: GitHubReviewGateway;
   readonly #lock: ReviewLock;
   readonly #reviewEngine: ReviewEngine;
@@ -163,39 +153,69 @@ export class CleanReviewOrchestrator implements ManualReviewService {
 
   async review(reference: PullRequestReference): Promise<ManualReviewResult> {
     const deadline = new ReviewDeadline(this.#configuration.timeouts.reviewMs);
+    const acquisition = this.#lock.acquire(deadline.signal);
+    let lease: Awaited<ReturnType<ReviewLock["acquire"]>>;
+    try {
+      lease = await deadline.wait(acquisition);
+      throwIfAborted(deadline.signal);
+    } catch (error) {
+      if (error === deadline.error) {
+        this.#retainFinalization(
+          acquisition.then(async (lateLease) => {
+            await completeTerminal(createTerminalHandle(lateLease.release));
+          }),
+        );
+      }
+      deadline.dispose();
+      throw error;
+    }
 
-    let lease: Awaited<ReturnType<ReviewLock["acquire"]>> | undefined;
+    const finalization = this.#retainFinalization(
+      this.#finalizeReview(reference, deadline.signal, lease),
+    );
+    try {
+      return await deadline.wait(finalization);
+    } finally {
+      deadline.dispose();
+    }
+  }
+
+  #retainFinalization<T>(finalization: Promise<T>): Promise<T> {
+    this.#finalizations.add(finalization);
+    void finalization.then(
+      () => {
+        this.#finalizations.delete(finalization);
+      },
+      () => {
+        this.#finalizations.delete(finalization);
+      },
+    );
+    return finalization;
+  }
+
+  async #finalizeReview(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+    lease: Awaited<ReturnType<ReviewLock["acquire"]>>,
+  ): Promise<ManualReviewResult> {
     let result: ManualReviewResult | undefined;
     let failure: unknown;
     try {
-      lease = await deadline.wait(acquireReviewLock(this.#lock, deadline.signal));
-      throwIfAborted(deadline.signal);
-      result = await this.#reviewWithLease(reference, deadline);
+      result = await this.#reviewWithLease(reference, signal);
     } catch (error) {
       failure = error;
     }
 
-    let releaseFailure: unknown;
-    if (lease !== undefined) {
-      try {
-        await deadline.run(() => lease.release());
-      } catch (error) {
-        releaseFailure = error;
-      }
-    }
-    deadline.dispose();
-    if (failure !== undefined && releaseFailure !== undefined) {
+    const releaseFailures = await completeTerminal(createTerminalHandle(lease.release));
+    if (failure !== undefined) {
       throw combineFailures(
         failure,
-        [releaseFailure],
-        "Review failed and the process lock could not be released.",
+        releaseFailures,
+        "Review failed and the process lock could not be released cleanly.",
       );
     }
-    if (releaseFailure !== undefined) {
-      throw releaseFailure;
-    }
-    if (failure !== undefined) {
-      throw failure;
+    if (releaseFailures.length > 0) {
+      throw new AggregateError(releaseFailures, "The process lock required release retries.");
     }
     if (result === undefined) {
       throw new Error("Review ended without a result.");
@@ -205,9 +225,8 @@ export class CleanReviewOrchestrator implements ManualReviewService {
 
   async #reviewWithLease(
     reference: PullRequestReference,
-    deadline: ReviewDeadline,
+    signal: AbortSignal,
   ): Promise<ManualReviewResult> {
-    const signal = deadline.signal;
     const terminalSignal = new AbortController().signal;
     let workspaceCleanup: TerminalHandle | undefined;
     let activeReaction: TerminalHandle | undefined;
@@ -215,70 +234,65 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     let failure: unknown;
 
     try {
-      const github = await deadline.run(() =>
-        this.#github.authenticate(this.#configuration.github, reference, signal),
-      );
-      const pullRequest = await deadline.run(() => github.getPullRequest(reference, signal));
+      const github = await this.#github.authenticate(this.#configuration.github, reference, signal);
+      throwIfAborted(signal);
+      const pullRequest = await github.getPullRequest(reference, signal);
       assertPullRequestEligible(reference, pullRequest, this.#configuration.github);
       throwIfAborted(signal);
 
-      await deadline.run(() => github.removeOwnCompletionReaction(reference, signal));
+      await github.removeOwnCompletionReaction(reference, signal);
+      throwIfAborted(signal);
       activeReaction = createTerminalHandle(() =>
         github.removeOwnReaction(reference, "eyes", terminalSignal),
       );
-      const reactionId = await deadline.run(() => github.addReaction(reference, "eyes", signal));
+      const reactionId = await github.addReaction(reference, "eyes", signal);
       activeReaction = createTerminalHandle(() =>
         github.deleteReaction(reference, reactionId, terminalSignal),
       );
+      throwIfAborted(signal);
 
-      const preparation = this.#workspaces.prepare(
-        reference,
-        pullRequest,
-        github.installationToken,
-        signal,
-      );
       let workspace;
       try {
-        workspace = await deadline.wait(preparation);
+        workspace = await this.#workspaces.prepare(
+          reference,
+          pullRequest,
+          github.installationToken,
+          signal,
+        );
       } catch (error) {
         if (error instanceof WorkspacePreparationError) {
           workspaceCleanup = createTerminalHandle(error.cleanup);
-        } else if (error === deadline.error) {
-          void preparation
-            .then(
-              (lateWorkspace) => lateWorkspace.cleanup(),
-              (lateError: unknown) =>
-                lateError instanceof WorkspacePreparationError ? lateError.cleanup() : undefined,
-            )
-            .catch(() => {});
         }
         throw error;
       }
       workspaceCleanup = createTerminalHandle(workspace.cleanup);
       throwIfAborted(signal);
-      await deadline.run(() =>
-        this.#reviewEngine.review({ reference, pullRequest, workspace }, signal),
-      );
+      await this.#reviewEngine.review({ reference, pullRequest, workspace }, signal);
       throwIfAborted(signal);
 
-      await deadline.run(workspaceCleanup);
+      const workspaceFailures = await completeTerminal(workspaceCleanup);
       workspaceCleanup = undefined;
-      await deadline.run(activeReaction);
+      if (workspaceFailures.length > 0) {
+        throw new AggregateError(workspaceFailures, "Workspace cleanup required retries.");
+      }
+      const reactionFailures = await completeTerminal(activeReaction);
       activeReaction = undefined;
+      if (reactionFailures.length > 0) {
+        throw new AggregateError(reactionFailures, "Reaction cleanup required retries.");
+      }
 
-      const currentSha = await deadline.run(() => github.getHeadSha(reference, signal));
+      const currentSha = await github.getHeadSha(reference, signal);
       throwIfAborted(signal);
       if (currentSha === pullRequest.headSha) {
         activeReaction = createTerminalHandle(() =>
           github.removeOwnReaction(reference, "+1", terminalSignal),
         );
-        const completionReactionId = await deadline.run(() =>
-          github.addReaction(reference, "+1", signal),
-        );
+        const completionReactionId = await github.addReaction(reference, "+1", signal);
         activeReaction = createTerminalHandle(() =>
           github.deleteReaction(reference, completionReactionId, terminalSignal),
         );
-        const postCompletionSha = await deadline.run(() => github.getHeadSha(reference, signal));
+        throwIfAborted(signal);
+        const postCompletionSha = await github.getHeadSha(reference, signal);
         throwIfAborted(signal);
         if (postCompletionSha === pullRequest.headSha) {
           activeReaction = undefined;
@@ -288,8 +302,14 @@ export class CleanReviewOrchestrator implements ManualReviewService {
             currentSha: postCompletionSha,
           };
         } else {
-          await deadline.run(activeReaction);
+          const completionCleanupFailures = await completeTerminal(activeReaction);
           activeReaction = undefined;
+          if (completionCleanupFailures.length > 0) {
+            throw new AggregateError(
+              completionCleanupFailures,
+              "Completion reaction cleanup required retries.",
+            );
+          }
           result = {
             status: "stale",
             reviewedSha: pullRequest.headSha,
@@ -309,20 +329,12 @@ export class CleanReviewOrchestrator implements ManualReviewService {
 
     const cleanupFailures: Error[] = [];
     if (workspaceCleanup !== undefined) {
-      try {
-        await deadline.run(workspaceCleanup);
-        workspaceCleanup = undefined;
-      } catch (error) {
-        cleanupFailures.push(asError(error));
-      }
+      cleanupFailures.push(...(await completeTerminal(workspaceCleanup)));
+      workspaceCleanup = undefined;
     }
     if (activeReaction !== undefined) {
-      try {
-        await deadline.run(activeReaction);
-        activeReaction = undefined;
-      } catch (error) {
-        cleanupFailures.push(asError(error));
-      }
+      cleanupFailures.push(...(await completeTerminal(activeReaction)));
+      activeReaction = undefined;
     }
 
     if (failure !== undefined) {

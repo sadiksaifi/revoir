@@ -29,8 +29,9 @@ export interface ReviewEngine {
 }
 
 export interface PiSession {
+  abort(): void | Promise<void>;
   run(prompt: string, signal: AbortSignal): Promise<string>;
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 export interface PiSessionOptions {
@@ -52,52 +53,6 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) {
     throw abortReason(signal);
   }
-}
-
-function waitForSessionCreation(
-  creation: Promise<PiSession>,
-  signal: AbortSignal,
-): Promise<PiSession> {
-  return new Promise((resolve, reject) => {
-    let state: "pending" | "resolved" | "aborted" = "pending";
-    const abort = () => {
-      if (state !== "pending") {
-        return;
-      }
-      state = "aborted";
-      signal.removeEventListener("abort", abort);
-      reject(abortReason(signal));
-    };
-
-    signal.addEventListener("abort", abort, { once: true });
-    if (signal.aborted) {
-      abort();
-    }
-
-    void creation.then(
-      (session) => {
-        if (state === "aborted") {
-          try {
-            session.dispose();
-          } catch {
-            // The review has already failed; best-effort disposal prevents a late session leak.
-          }
-          return;
-        }
-        state = "resolved";
-        signal.removeEventListener("abort", abort);
-        resolve(session);
-      },
-      (error: unknown) => {
-        if (state !== "pending") {
-          return;
-        }
-        state = "resolved";
-        signal.removeEventListener("abort", abort);
-        reject(error);
-      },
-    );
-  });
 }
 
 function emptyResourceLoader(systemPrompt: string): ResourceLoader {
@@ -181,46 +136,43 @@ export class SdkPiSessionFactory implements PiSessionFactory {
       }),
     });
     if (signal.aborted) {
-      session.dispose();
+      try {
+        await session.abort();
+      } finally {
+        await session.dispose();
+      }
       throw abortReason(signal);
     }
 
+    let abortPromise: Promise<void> | undefined;
+    const abortSession = (): Promise<void> => {
+      abortPromise ??= Promise.resolve().then(() => session.abort());
+      return abortPromise;
+    };
+
     return {
+      abort: abortSession,
       async run(prompt, runSignal) {
-        if (runSignal.aborted) {
-          await session.abort();
-          throw runSignal.reason instanceof Error
-            ? runSignal.reason
-            : new Error("Review was cancelled.");
-        }
+        throwIfAborted(runSignal);
         let finalText: string | undefined;
         const unsubscribe = session.subscribe((event) => {
           if (event.type === "message_end") {
             finalText = assistantText(event.message) ?? finalText;
           }
         });
-        const abort = () => {
-          void session.abort();
-        };
-        runSignal.addEventListener("abort", abort, { once: true });
         try {
           await session.prompt(prompt);
-          if (runSignal.aborted) {
-            throw runSignal.reason instanceof Error
-              ? runSignal.reason
-              : new Error("Review was cancelled.");
-          }
+          throwIfAborted(runSignal);
           if (finalText === undefined) {
             throw new Error("Pi completed without a structured review result.");
           }
           return finalText;
         } finally {
-          runSignal.removeEventListener("abort", abort);
           unsubscribe();
         }
       },
-      dispose() {
-        session.dispose();
+      async dispose() {
+        await session.dispose();
       },
     };
   }
@@ -270,22 +222,41 @@ export class PiReviewEngine implements ReviewEngine {
 
   async review(input: ReviewEngineInput, signal: AbortSignal): Promise<void> {
     throwIfAborted(signal);
-    const session = await waitForSessionCreation(
-      this.#sessionFactory.create(
-        {
-          cwd: input.workspace.checkout,
-          model: this.#model.id,
-          reasoning: this.#model.reasoning,
-          systemPrompt: REVIEW_SYSTEM_PROMPT,
-        },
-        signal,
-      ),
+    const session = await this.#sessionFactory.create(
+      {
+        cwd: input.workspace.checkout,
+        model: this.#model.id,
+        reasoning: this.#model.reasoning,
+        systemPrompt: REVIEW_SYSTEM_PROMPT,
+      },
       signal,
     );
+    let abortPromise: Promise<void> | undefined;
+    const abortSession = (): Promise<void> => {
+      abortPromise ??= Promise.resolve().then(() => session.abort());
+      return abortPromise;
+    };
+    const abort = (): void => {
+      void abortSession().catch(() => {});
+    };
+    signal.addEventListener("abort", abort, { once: true });
     try {
-      validateCleanResult(await session.run(reviewPrompt(input), signal));
+      if (signal.aborted) {
+        await abortSession();
+        throw abortReason(signal);
+      }
+      const result = await session.run(reviewPrompt(input), signal);
+      throwIfAborted(signal);
+      validateCleanResult(result);
     } finally {
-      session.dispose();
+      signal.removeEventListener("abort", abort);
+      try {
+        if (abortPromise !== undefined) {
+          await abortPromise;
+        }
+      } finally {
+        await session.dispose();
+      }
     }
   }
 }

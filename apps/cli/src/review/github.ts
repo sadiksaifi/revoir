@@ -96,24 +96,41 @@ function throwIfAborted(signal: AbortSignal): void {
   }
 }
 
-async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  throwIfAborted(signal);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => {
-      reject(abortReason(signal));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    void operation.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+async function settleEffect<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  try {
+    const value = await operation;
+    throwIfAborted(signal);
+    return value;
+  } catch (error) {
+    throwIfAborted(signal);
+    throw error;
+  }
+}
+
+function settledValues<T>(results: readonly PromiseSettledResult<T>[], message: string): T[] {
+  const values: T[] = [];
+  const failures: Error[] = [];
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      values.push(result.value);
+    } else {
+      const error = asError(result.reason);
+      if (!failures.includes(error)) {
+        failures.push(error);
+      }
+    }
+  }
+  if (failures.length === 1) {
+    throw failures[0];
+  }
+  if (failures.length > 1) {
+    throw new AggregateError(failures, message);
+  }
+  return values;
 }
 
 async function yieldToEventLoop(signal: AbortSignal): Promise<void> {
@@ -136,11 +153,12 @@ async function responseJson(
   action: string,
   signal: AbortSignal,
 ): Promise<unknown> {
+  throwIfAborted(signal);
   if (!response.ok) {
     throw new Error(`GitHub ${action} failed with HTTP ${response.status}.`);
   }
   try {
-    return await abortable(response.json(), signal);
+    return await settleEffect(response.json(), signal);
   } catch (error) {
     if (signal.aborted) {
       throw abortReason(signal);
@@ -240,7 +258,8 @@ class InstallationSession implements GitHubReviewSession {
   }
 
   async #request(path: string, signal: AbortSignal, init: RequestInit = {}): Promise<Response> {
-    return abortable(
+    throwIfAborted(signal);
+    return settleEffect(
       this.#fetch(`${this.#apiBase}${path}`, {
         ...init,
         headers: {
@@ -315,8 +334,13 @@ class InstallationSession implements GitHubReviewSession {
       // eslint-disable-next-line no-await-in-loop
       await yieldToEventLoop(signal);
     }
-    await Promise.all(
-      [...ownedReactionIds].map((reactionId) => this.deleteReaction(reference, reactionId, signal)),
+    settledValues(
+      await Promise.allSettled(
+        [...ownedReactionIds].map((reactionId) =>
+          this.deleteReaction(reference, reactionId, signal),
+        ),
+      ),
+      "GitHub reaction reconciliation failed.",
     );
   }
 
@@ -389,25 +413,34 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
       "User-Agent": "revoir",
       "X-GitHub-Api-Version": "2022-11-28",
     };
-    const [appResponse, tokenResponse] = await Promise.all([
-      abortable(this.#fetch(`${this.#apiBase}/app`, { headers, signal }), signal),
-      abortable(
-        this.#fetch(
-          `${this.#apiBase}/app/installations/${configuration.installationId}/access_tokens`,
-          {
-            method: "POST",
-            body: JSON.stringify({ repository_ids: [configuredRepository.id] }),
-            headers: { ...headers, "Content-Type": "application/json" },
-            signal,
-          },
+    throwIfAborted(signal);
+    const authenticationResponses = settledValues(
+      await Promise.allSettled([
+        settleEffect(this.#fetch(`${this.#apiBase}/app`, { headers, signal }), signal),
+        settleEffect(
+          this.#fetch(
+            `${this.#apiBase}/app/installations/${configuration.installationId}/access_tokens`,
+            {
+              method: "POST",
+              body: JSON.stringify({ repository_ids: [configuredRepository.id] }),
+              headers: { ...headers, "Content-Type": "application/json" },
+              signal,
+            },
+          ),
+          signal,
         ),
-        signal,
-      ),
-    ]);
-    const app = parseApp(await responseJson(appResponse, "App authentication", signal));
-    const installation = parseInstallationToken(
-      await responseJson(tokenResponse, "installation authentication", signal),
+      ]),
+      "GitHub App authentication requests failed.",
     );
+    const authenticationValues = settledValues(
+      await Promise.allSettled([
+        responseJson(authenticationResponses[0]!, "App authentication", signal),
+        responseJson(authenticationResponses[1]!, "installation authentication", signal),
+      ]),
+      "GitHub App authentication responses failed.",
+    );
+    const app = parseApp(authenticationValues[0]);
+    const installation = parseInstallationToken(authenticationValues[1]);
     return new InstallationSession(installation.token, app.slug, this.#fetch, this.#apiBase);
   }
 }

@@ -400,10 +400,14 @@ describe("GitHub App review gateway", () => {
     assert.ok(pages > 0);
   });
 
-  it("cancels non-settling authentication requests", async () => {
+  it("joins authentication fetch settlement after cancellation", async () => {
+    const completions: Array<(response: Response) => void> = [];
     const abortController = new AbortController();
     const gateway = new GitHubAppReviewGateway(
-      async () => new Promise<Response>(() => {}),
+      async () =>
+        new Promise<Response>((resolve) => {
+          completions.push(resolve);
+        }),
       "https://api.test",
       () => 1_000,
     );
@@ -413,17 +417,133 @@ describe("GitHub App review gateway", () => {
       reference,
       abortController.signal,
     );
+    let settled = false;
+    void authentication
+      .finally(() => {
+        settled = true;
+      })
+      .catch(() => {});
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(completions.length, 2);
     abortController.abort(cancellation);
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(settled, false);
 
-    await assert.rejects(
-      Promise.race([
-        authentication,
-        new Promise<never>((_resolve, reject) => {
-          setTimeout(() => reject(new Error("authentication did not cancel")), 100);
-        }),
-      ]),
-      cancellation,
+    completions[0]?.(json({ slug: "revoir-test" }));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(settled, false);
+    completions[1]?.(json({ token: "installation-secret" }));
+    await assert.rejects(authentication, cancellation);
+  });
+
+  it("joins response body settlement after cancellation", async () => {
+    let finishAppBody: ((value: unknown) => void) | undefined;
+    let markBodyStarted: (() => void) | undefined;
+    const bodyStarted = new Promise<void>((resolve) => {
+      markBodyStarted = resolve;
+    });
+    const appResponse = {
+      ok: true,
+      status: 200,
+      json: async () => {
+        markBodyStarted?.();
+        return new Promise<unknown>((resolve) => {
+          finishAppBody = resolve;
+        });
+      },
+    } as Response;
+    const gateway = new GitHubAppReviewGateway(
+      async (input) =>
+        String(input).endsWith("/app") ? appResponse : json({ token: "installation-secret" }),
+      "https://api.test",
+      () => 1_000,
     );
+    const abortController = new AbortController();
+    const cancellation = new Error("cancel response body");
+    let settled = false;
+    const authentication = gateway
+      .authenticate(configuration.github, reference, abortController.signal)
+      .finally(() => {
+        settled = true;
+      });
+    void authentication.catch(() => {});
+    await bodyStarted;
+
+    abortController.abort(cancellation);
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(settled, false);
+    finishAppBody?.({ slug: "revoir-test" });
+    await assert.rejects(authentication, cancellation);
+  });
+
+  it("joins every in-flight reaction deletion after cancellation", async () => {
+    const deletionCompletions: Array<(response: Response) => void> = [];
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.endsWith("/issues/17/reactions?per_page=100&page=1")) {
+        return json([
+          { id: 71, content: "eyes", user: { login: "revoir-test[bot]" } },
+          { id: 72, content: "eyes", user: { login: "revoir-test[bot]" } },
+        ]);
+      }
+      if (init?.method === "DELETE") {
+        return new Promise<Response>((resolve) => {
+          deletionCompletions.push(resolve);
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const abortController = new AbortController();
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, abortController.signal);
+    let settled = false;
+    const reconciliation = session
+      .removeOwnReaction(reference, "eyes", abortController.signal)
+      .finally(() => {
+        settled = true;
+      });
+    void reconciliation.catch(() => {});
+    while (deletionCompletions.length < 2) {
+      // Wait only for both controlled deletes to begin.
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    }
+
+    const cancellation = new Error("cancel reaction deletes");
+    abortController.abort(cancellation);
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(settled, false);
+    deletionCompletions[0]?.(new Response(null, { status: 204 }));
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+    assert.equal(settled, false);
+    deletionCompletions[1]?.(new Response(null, { status: 204 }));
+    await assert.rejects(reconciliation, (error: unknown) => {
+      assert.match(String(error), /cancel reaction deletes/u);
+      return true;
+    });
   });
 
   it("rejects disallowed repositories before authentication", async () => {

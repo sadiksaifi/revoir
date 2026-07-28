@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { access, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { createConfiguration } from "../src/config/schema.js";
@@ -7,7 +10,7 @@ import type {
   GitHubReviewSession,
   ReviewReaction,
 } from "../src/review/github.js";
-import type { ReviewLock } from "../src/review/lock.js";
+import { FileReviewLock, ReviewInProgressError, type ReviewLock } from "../src/review/lock.js";
 import { CleanReviewOrchestrator, ReviewTimeoutError } from "../src/review/orchestrator.js";
 import {
   PiReviewEngine,
@@ -21,6 +24,38 @@ import { WorkspacePreparationError } from "../src/review/workspace.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
 
 const reference = parsePullRequestUrl("https://github.com/owner/repository/pull/17");
+
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  message: string,
+): Promise<void> {
+  const expiresAt = Date.now() + 1_000;
+  // Test predicates may observe asynchronous filesystem state.
+  // eslint-disable-next-line no-await-in-loop
+  while (!(await predicate())) {
+    if (Date.now() >= expiresAt) {
+      throw new Error(message);
+    }
+    // Poll only test-owned terminal work.
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 1);
+    });
+  }
+}
+
+async function fileIsMissing(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return false;
+  } catch (error) {
+    return (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    );
+  }
+}
 
 function configuration(reviewMs = 60_000) {
   return createConfiguration({
@@ -75,14 +110,17 @@ function harness(
     completionError?: Error;
     reactionError?: ReviewReaction;
     reconciliationNeverSettles?: boolean;
+    reactionReconciliationGate?: Promise<void>;
     headError?: Error;
     postcheckError?: Error;
     headNeverSettles?: boolean;
     mutateHeadDuring?: "workspace-cleanup" | "reaction-removal" | "completion-creation";
     reactionDeletionGate?: Promise<void>;
     reactionDeletionError?: Error;
+    reactionDeletionErrorAttempts?: number;
     workspaceCleanupGate?: Promise<void>;
     workspaceCleanupError?: Error;
+    workspaceCleanupErrorAttempts?: number;
     lock?: ReviewLock;
     workspaces?: WorkspacePreparer;
     reviewMs?: number;
@@ -93,6 +131,14 @@ function harness(
   let currentSha = options.currentSha ?? snapshot.headSha;
   let headRequests = 0;
   let nextReactionId = 10;
+  let reactionDeletionFailures =
+    options.reactionDeletionError === undefined
+      ? 0
+      : (options.reactionDeletionErrorAttempts ?? Number.POSITIVE_INFINITY);
+  let workspaceCleanupFailures =
+    options.workspaceCleanupError === undefined
+      ? 0
+      : (options.workspaceCleanupErrorAttempts ?? Number.POSITIVE_INFINITY);
   const ownedReactions = new Set<ReviewReaction>();
   const session: GitHubReviewSession = {
     installationToken: "installation-secret",
@@ -141,6 +187,7 @@ function harness(
     },
     async removeOwnReaction(_reference, reaction, signal) {
       events.push(`remove-own-${reaction}`);
+      await options.reactionReconciliationGate;
       if (options.reconciliationNeverSettles) {
         return new Promise<void>((_resolve, reject) => {
           signal.addEventListener(
@@ -157,7 +204,8 @@ function harness(
     async deleteReaction(_reference, id) {
       events.push(`delete-${id}`);
       await options.reactionDeletionGate;
-      if (options.reactionDeletionError !== undefined) {
+      if (options.reactionDeletionError !== undefined && reactionDeletionFailures > 0) {
+        reactionDeletionFailures -= 1;
         throw options.reactionDeletionError;
       }
       if (id === 10) {
@@ -188,7 +236,8 @@ function harness(
         async cleanup() {
           events.push("cleanup");
           await options.workspaceCleanupGate;
-          if (options.workspaceCleanupError !== undefined) {
+          if (options.workspaceCleanupError !== undefined && workspaceCleanupFailures > 0) {
+            workspaceCleanupFailures -= 1;
             throw options.workspaceCleanupError;
           }
           if (options.mutateHeadDuring === "workspace-cleanup") {
@@ -401,11 +450,7 @@ describe("clean review orchestrator", () => {
           setTimeout(() => reject(new Error("reaction reconciliation did not time out")), 100);
         }),
       ]),
-      (error: unknown) => {
-        assert.ok(error instanceof AggregateError);
-        assert.ok(error.errors.some((item) => item instanceof ReviewTimeoutError));
-        return true;
-      },
+      ReviewTimeoutError,
     );
     assert.equal(ambiguous.events.includes("remove-own-eyes"), true);
   });
@@ -426,7 +471,163 @@ describe("clean review orchestrator", () => {
       },
     });
     await assert.rejects(() => timedOut.orchestrator.review(reference), ReviewTimeoutError);
+    await waitFor(
+      () => timedOut.events.includes("delete-10"),
+      "timed-out review did not finish terminal cleanup",
+    );
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
+  });
+
+  it("keeps the process lock while a timed-out review engine is still active", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-orchestrator-lock-"));
+    let finishReview: (() => void) | undefined;
+    const reviewGate = new Promise<void>((resolve) => {
+      finishReview = resolve;
+    });
+    let markReviewStarted: (() => void) | undefined;
+    const reviewStarted = new Promise<void>((resolve) => {
+      markReviewStarted = resolve;
+    });
+    const first = harness({
+      reviewMs: 50,
+      lock: new FileReviewLock(stateDirectory),
+      review: async () => {
+        markReviewStarted?.();
+        await reviewGate;
+      },
+    });
+    const second = harness({
+      lock: new FileReviewLock(stateDirectory),
+    });
+
+    try {
+      const firstReview = first.orchestrator.review(reference);
+      await reviewStarted;
+      await assert.rejects(firstReview, ReviewTimeoutError);
+      await assert.rejects(() => second.orchestrator.review(reference), ReviewInProgressError);
+
+      finishReview?.();
+      await waitFor(
+        () => fileIsMissing(join(stateDirectory, "manual-review.lock")),
+        "the timed-out review did not finish terminal finalization",
+      );
+      assert.deepEqual(await second.orchestrator.review(reference), {
+        status: "clean",
+        reviewedSha: "2".repeat(40),
+        currentSha: "2".repeat(40),
+      });
+    } finally {
+      finishReview?.();
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the process lock for work that never settles in the live owner process", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-orchestrator-lock-"));
+    let markReviewStarted: (() => void) | undefined;
+    const reviewStarted = new Promise<void>((resolve) => {
+      markReviewStarted = resolve;
+    });
+    const first = harness({
+      reviewMs: 50,
+      lock: new FileReviewLock(stateDirectory),
+      review: async () => {
+        markReviewStarted?.();
+        return new Promise<void>(() => {});
+      },
+    });
+    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+
+    try {
+      const firstReview = first.orchestrator.review(reference);
+      await reviewStarted;
+      await assert.rejects(firstReview, ReviewTimeoutError);
+      await assert.rejects(() => second.orchestrator.review(reference), ReviewInProgressError);
+      assert.equal(await fileIsMissing(join(stateDirectory, "manual-review.lock")), false);
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the process lock while timed-out workspace preparation is still active", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-orchestrator-lock-"));
+    let finishPreparation: ((workspace: PreparedWorkspace) => void) | undefined;
+    const first = harness({
+      reviewMs: 50,
+      lock: new FileReviewLock(stateDirectory),
+      workspaces: {
+        prepare: async () =>
+          new Promise<PreparedWorkspace>((resolve) => {
+            finishPreparation = resolve;
+          }),
+      },
+    });
+    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+
+    try {
+      const firstReview = first.orchestrator.review(reference);
+      await waitFor(() => finishPreparation !== undefined, "workspace preparation did not start");
+      await assert.rejects(firstReview, ReviewTimeoutError);
+      await assert.rejects(() => second.orchestrator.review(reference), ReviewInProgressError);
+
+      finishPreparation?.({
+        root: "/tmp/late-review",
+        checkout: "/tmp/late-review/repository",
+        diff: "diff",
+        remoteUrl: "https://github.com/owner/repository.git",
+        async cleanup() {},
+      });
+      await waitFor(
+        () => fileIsMissing(join(stateDirectory, "manual-review.lock")),
+        "late workspace finalization did not finish",
+      );
+      assert.equal((await second.orchestrator.review(reference)).status, "clean");
+    } finally {
+      finishPreparation?.({
+        root: "/tmp/late-review",
+        checkout: "/tmp/late-review/repository",
+        diff: "diff",
+        remoteUrl: "https://github.com/owner/repository.git",
+        async cleanup() {},
+      });
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps generic reaction compensation ahead of the next review", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-orchestrator-lock-"));
+    let finishReconciliation: (() => void) | undefined;
+    const reconciliationGate = new Promise<void>((resolve) => {
+      finishReconciliation = resolve;
+    });
+    const first = harness({
+      reviewMs: 50,
+      lock: new FileReviewLock(stateDirectory),
+      reactionError: "eyes",
+      reactionReconciliationGate: reconciliationGate,
+    });
+    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+
+    try {
+      const firstReview = first.orchestrator.review(reference);
+      await waitFor(
+        () => first.events.includes("remove-own-eyes"),
+        "generic reconciliation did not start",
+      );
+      await assert.rejects(firstReview, ReviewTimeoutError);
+      await assert.rejects(() => second.orchestrator.review(reference), ReviewInProgressError);
+      assert.deepEqual(second.events, []);
+
+      finishReconciliation?.();
+      await waitFor(
+        () => fileIsMissing(join(stateDirectory, "manual-review.lock")),
+        "generic reconciliation did not release the process lock",
+      );
+      assert.equal((await second.orchestrator.review(reference)).status, "clean");
+    } finally {
+      finishReconciliation?.();
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
   });
 
   it("starts the review deadline before lock acquisition and never starts a late review", async () => {
@@ -510,25 +711,26 @@ describe("clean review orchestrator", () => {
       ReviewTimeoutError,
     );
     assert.equal(creationSignal?.aborted, true);
-    assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
-    assert.equal(releases, 1);
+    assert.equal(timedOut.events.includes("cleanup"), false);
+    assert.equal(timedOut.events.includes("delete-10"), false);
+    assert.equal(releases, 0);
 
     assert.ok(finishCreatingSession);
     finishCreatingSession({
+      async abort() {},
       async run() {
         throw new Error("late session must not run");
       },
-      dispose() {
+      async dispose() {
         disposed += 1;
       },
     });
-    await new Promise<void>((resolve) => {
-      setImmediate(resolve);
-    });
+    await waitFor(() => releases === 1, "late Pi finalization did not release the lock");
     assert.equal(disposed, 1);
+    assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
   });
 
-  it("cleans a workspace that finishes preparation after the review times out", async () => {
+  it("retries late workspace cleanup to success before releasing the process lock", async () => {
     let finishPreparation: ((workspace: PreparedWorkspace) => void) | undefined;
     let cleanupCalls = 0;
     let releases = 0;
@@ -556,7 +758,7 @@ describe("clean review orchestrator", () => {
     });
 
     await assert.rejects(() => timedOut.orchestrator.review(reference), ReviewTimeoutError);
-    assert.equal(releases, 1);
+    assert.equal(releases, 0);
     assert.equal(engineCalls, 0);
 
     assert.ok(finishPreparation);
@@ -567,12 +769,14 @@ describe("clean review orchestrator", () => {
       remoteUrl: "https://github.com/owner/repository.git",
       async cleanup() {
         cleanupCalls += 1;
+        if (cleanupCalls === 1) {
+          throw new Error("transient late cleanup failure");
+        }
       },
     });
-    await new Promise<void>((resolve) => {
-      setImmediate(resolve);
-    });
-    assert.equal(cleanupCalls, 1);
+    await waitFor(() => releases === 1, "late workspace finalization did not release the lock");
+    assert.equal(cleanupCalls, 2);
+    assert.equal(timedOut.events.includes("delete-10"), true);
   });
 
   it("cleans a workspace that finishes synchronously at the abort boundary", async () => {
@@ -619,9 +823,10 @@ describe("clean review orchestrator", () => {
     assert.equal(engineCalls, 0);
   });
 
-  it("swallows a detached late workspace cleanup rejection after the original timeout", async () => {
+  it("retains and retries late workspace cleanup after the original timeout", async () => {
     let finishPreparation: ((workspace: PreparedWorkspace) => void) | undefined;
     let cleanupCalls = 0;
+    let releases = 0;
     const timedOut = harness({
       reviewMs: 5,
       workspaces: {
@@ -629,6 +834,15 @@ describe("clean review orchestrator", () => {
           new Promise<PreparedWorkspace>((resolve) => {
             finishPreparation = resolve;
           }),
+      },
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
       },
     });
 
@@ -652,20 +866,17 @@ describe("clean review orchestrator", () => {
         remoteUrl: "https://github.com/owner/repository.git",
         async cleanup() {
           cleanupCalls += 1;
-          throw new Error("late cleanup failed");
+          if (cleanupCalls === 1) {
+            throw new Error("transient late cleanup failure");
+          }
         },
       });
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
-      });
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
-      });
+      await waitFor(() => releases === 1, "retrying late cleanup did not release the lock");
     } finally {
       process.removeListener("unhandledRejection", captureUnhandledRejection);
     }
 
-    assert.equal(cleanupCalls, 1);
+    assert.equal(cleanupCalls, 2);
     assert.deepEqual(unhandledRejections, []);
   });
 
@@ -747,9 +958,11 @@ describe("clean review orchestrator", () => {
 
     assert.ok(Date.now() - started < 100);
     assert.equal(timedOut.events.filter((event) => event === "cleanup").length, 1);
-    assert.equal(timedOut.events.includes("delete-10"), true);
-    assert.equal(releases, 1);
+    assert.equal(timedOut.events.includes("delete-10"), false);
+    assert.equal(releases, 0);
     finishCleanup?.();
+    await waitFor(() => releases === 1, "workspace cleanup did not finish before release");
+    assert.equal(timedOut.events.includes("delete-10"), true);
   });
 
   it("bounds non-settling reaction cleanup without renewing the review timer", async () => {
@@ -785,11 +998,9 @@ describe("clean review orchestrator", () => {
 
     assert.ok(Date.now() - started < 100);
     assert.equal(timedOut.events.filter((event) => event === "delete-10").length, 1);
-    assert.equal(releases, 1);
+    assert.equal(releases, 0);
     finishDeletion?.();
-    await new Promise<void>((resolve) => {
-      setImmediate(resolve);
-    });
+    await waitFor(() => releases === 1, "reaction cleanup did not finish before release");
     assert.equal(timedOut.ownedReactions.has("eyes"), false);
   });
 
@@ -842,12 +1053,18 @@ describe("clean review orchestrator", () => {
         throw new Error("primary review failure");
       },
       workspaceCleanupError: new Error("workspace cleanup failure"),
+      workspaceCleanupErrorAttempts: 1,
       reactionDeletionError: new Error("reaction cleanup failure"),
+      reactionDeletionErrorAttempts: 1,
       lock: {
         async acquire() {
+          let releaseAttempts = 0;
           return {
             async release() {
-              throw new Error("release failure");
+              releaseAttempts += 1;
+              if (releaseAttempts === 1) {
+                throw new Error("release failure");
+              }
             },
           };
         },
