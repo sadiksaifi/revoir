@@ -59,6 +59,13 @@ export interface ServiceManager {
   uninstall(): Promise<void>;
 }
 
+export interface ServiceExecutableRuntime {
+  executable: string;
+  entryPoint: string | undefined;
+  runtimeArguments: readonly string[];
+  packaged: boolean;
+}
+
 export class ServiceManagementError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -344,13 +351,27 @@ export class LaunchdServiceManager {
   }
 }
 
-function currentExecutableArguments(): readonly string[] {
-  const executable = resolve(process.execPath);
-  const entryPoint = process.argv[1] === undefined ? undefined : resolve(process.argv[1]);
+export function resolveServiceExecutableArguments(
+  runtime: ServiceExecutableRuntime,
+): readonly string[] {
+  const executable = resolve(runtime.executable);
+  if (runtime.packaged) {
+    return [executable];
+  }
+  const entryPoint = runtime.entryPoint === undefined ? undefined : resolve(runtime.entryPoint);
   if (entryPoint === undefined || entryPoint === executable) {
     return [executable];
   }
-  return [executable, ...process.execArgv, entryPoint];
+  return [executable, ...runtime.runtimeArguments, entryPoint];
+}
+
+function currentExecutableArguments(): readonly string[] {
+  return resolveServiceExecutableArguments({
+    executable: process.execPath,
+    entryPoint: process.argv[1],
+    runtimeArguments: process.execArgv,
+    packaged: "pkg" in process,
+  });
 }
 
 export function createDefaultServiceManager(input: {

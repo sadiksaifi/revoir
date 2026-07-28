@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 
 import {
   LaunchdServiceManager,
+  resolveServiceExecutableArguments,
   type LaunchctlGateway,
   type LaunchctlInspection,
 } from "../src/service/manager.js";
@@ -96,6 +97,27 @@ async function createFixture(): Promise<{
 }
 
 describe("launchd service manager", () => {
+  it("runs a packaged service directly from its standalone executable", () => {
+    assert.deepEqual(
+      resolveServiceExecutableArguments({
+        executable: "/Users/test/.local/bin/revoir",
+        entryPoint: "/snapshot/revoir/apps/cli/dist/main.js",
+        runtimeArguments: ["--enable-source-maps"],
+        packaged: true,
+      }),
+      ["/Users/test/.local/bin/revoir"],
+    );
+    assert.deepEqual(
+      resolveServiceExecutableArguments({
+        executable: "/opt/homebrew/bin/node",
+        entryPoint: "/workspace/apps/cli/dist/main.js",
+        runtimeArguments: ["--enable-source-maps"],
+        packaged: false,
+      }),
+      ["/opt/homebrew/bin/node", "--enable-source-maps", "/workspace/apps/cli/dist/main.js"],
+    );
+  });
+
   it("installs and upgrades one service definition, then uninstalls only the plist", async () => {
     const { configFile, manager, operations, unrelatedFile } = await createFixture();
 
