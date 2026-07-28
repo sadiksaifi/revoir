@@ -9,7 +9,7 @@ import { CLI_VERSION, runCli, type CliIo } from "../src/cli.js";
 import { resolveApplicationPaths } from "../src/config/paths.js";
 import { loadConfiguration } from "../src/config/store.js";
 import { createDefaultDiagnosticGateway, type DiagnosticGateway } from "../src/diagnostics.js";
-import { FindingContractError } from "../src/review/findings.js";
+import { FindingContractError, validateModelReviewOutput } from "../src/review/findings.js";
 import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
 import { passingGateway, TEST_PRIVATE_KEY } from "./helpers.js";
@@ -505,6 +505,66 @@ describe("CLI", () => {
     assert.match(stderr.output, /#1: findings\[0\]\.priority must be one of P0, P1, P2, or P3/u);
     assert.match(stderr.output, /#2: findings\[1\]\.evidence contained \[REDACTED\]/u);
     assert.doesNotMatch(stderr.output, /cli-cloudflare-secret/u);
+    assert.equal(stdout.output, "");
+  });
+
+  it("never prints model-controlled contract versions or field names", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+    stderr.output = "";
+
+    const sourceSecret = "PRIVATE_SOURCE_TOKEN";
+    const outputs: readonly [string, RegExp][] = [
+      [`{"version":"${sourceSecret}","findings":[]}`, /expected version 1/u],
+      [
+        JSON.stringify({
+          version: 1,
+          findings: [
+            {
+              priority: "P1",
+              title: "Unknown field",
+              path: "source.ts",
+              range: null,
+              issue: "The candidate has an unsupported shape.",
+              impact: "The finding cannot be validated.",
+              evidence: "The candidate includes a field outside the contract.",
+              fixDirection: "Remove the unsupported field.",
+              [sourceSecret]: "echo",
+            },
+          ],
+        }),
+        /findings\[0\] contains an unknown field/u,
+      ],
+    ];
+
+    for (const [value, safeReason] of outputs) {
+      const allInvalid: ManualReviewService = {
+        async review() {
+          await validateModelReviewOutput(value, { checkout: root, diff: "" });
+          throw new Error("Expected model output to be rejected.");
+        },
+      };
+
+      // Keep each source-bearing rejection isolated so every CLI rendering path is checked.
+      // eslint-disable-next-line no-await-in-loop
+      const exitCode = await runCli(["review", "https://github.com/owner/repository/pull/17"], {
+        io,
+        reviewService: allInvalid,
+      });
+      assert.equal(exitCode, 1);
+      assert.match(stderr.output, /Rejected model findings/u);
+      assert.match(stderr.output, safeReason);
+      assert.doesNotMatch(stderr.output, new RegExp(sourceSecret, "u"));
+      stderr.output = "";
+    }
     assert.equal(stdout.output, "");
   });
 });

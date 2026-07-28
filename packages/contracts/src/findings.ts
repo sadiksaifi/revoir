@@ -49,7 +49,7 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], path
   const expected = new Set(keys);
   for (const key of Object.keys(value)) {
     if (!expected.has(key)) {
-      throw new FindingSchemaError(`${path} contains unknown field "${key}".`);
+      throw new FindingSchemaError(`${path} contains an unknown field.`);
     }
   }
   for (const key of keys) {
@@ -118,7 +118,7 @@ export function parseModelReviewOutput(value: string): ModelReviewOutputV1 {
   exactKeys(envelope, ["version", "findings"], "review output");
   if (envelope.version !== FINDING_CONTRACT_VERSION) {
     throw new FindingSchemaError(
-      `Unsupported finding contract version "${String(envelope.version)}".`,
+      `Finding contract version is unsupported; expected version ${FINDING_CONTRACT_VERSION}.`,
     );
   }
   if (!Array.isArray(envelope.findings)) {

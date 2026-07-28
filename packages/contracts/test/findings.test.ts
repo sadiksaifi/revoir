@@ -49,6 +49,41 @@ describe("finding contract v1", () => {
     }
   });
 
+  it("keeps model-controlled contract versions and field names out of diagnostics", () => {
+    const sourceSecret = "PRIVATE_SOURCE_TOKEN";
+    const cases: readonly [string, RegExp][] = [
+      [`{"version":"${sourceSecret}","findings":[]}`, /expected version 1/u],
+      [
+        JSON.stringify({ version: 1, findings: [], [sourceSecret]: "echo" }),
+        /review output contains an unknown field/u,
+      ],
+      [
+        JSON.stringify({
+          version: 1,
+          findings: [{ ...finding(), [sourceSecret]: "echo" }],
+        }),
+        /findings\[0\] contains an unknown field/u,
+      ],
+    ];
+
+    for (const [value, safeReason] of cases) {
+      assert.throws(
+        () => {
+          const envelope = parseModelReviewOutput(value);
+          if (envelope.findings.length > 0) {
+            parseModelFinding(envelope.findings[0], 0);
+          }
+        },
+        (error: unknown) => {
+          assert.ok(error instanceof FindingSchemaError);
+          assert.match(error.message, safeReason);
+          assert.doesNotMatch(error.message, new RegExp(sourceSecret, "u"));
+          return true;
+        },
+      );
+    }
+  });
+
   it("requires every finding field and rejects unknown fields", () => {
     for (const field of Object.keys(finding())) {
       const candidate = { ...finding() } as Record<string, unknown>;
@@ -60,7 +95,7 @@ describe("finding contract v1", () => {
     }
     assert.throws(
       () => parseModelFinding({ ...finding(), confidence: 1 }, 0),
-      /unknown field "confidence"/u,
+      /contains an unknown field/u,
     );
   });
 
