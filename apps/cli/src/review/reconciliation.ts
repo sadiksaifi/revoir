@@ -105,6 +105,22 @@ function currentFindingIdentity(finding: ReviewFindingV1): PriorFindingIdentity 
   };
 }
 
+function identitySnapshot(identities: readonly PriorFindingIdentity[]): string {
+  const aliasesByFingerprint = new Map<string, Set<string>>();
+  for (const identity of identities) {
+    const aliases = aliasesByFingerprint.get(identity.fingerprint) ?? new Set<string>();
+    for (const alias of identity.aliases ?? []) {
+      aliases.add(alias);
+    }
+    aliasesByFingerprint.set(identity.fingerprint, aliases);
+  }
+  return JSON.stringify(
+    [...aliasesByFingerprint]
+      .map(([fingerprint, aliases]) => [fingerprint, [...aliases].toSorted()] as const)
+      .toSorted(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
 interface MatchablePriorIdentity extends PriorFindingIdentity {
   readonly source: "body" | "thread" | "legacy";
   readonly threadId?: string;
@@ -224,18 +240,13 @@ export function planFindingReconciliation(
     return priorIndex !== undefined && previous[priorIndex]?.source === "body";
   });
   const priorBodyFindings = prior.bodyFindings ?? [];
-  const bodyMatches = matchFindingIdentities(
-    currentBodyFindings.map((finding) => currentFindingIdentity(finding)),
-    priorBodyFindings.map(({ fingerprint, aliases }) => ({
-      fingerprint,
-      ...(aliases === undefined ? {} : { aliases }),
-      source: "body",
-    })),
-  );
+  const currentBodyState = currentBodyFindings.map(({ fingerprint, fingerprintAliases }) => ({
+    fingerprint,
+    ...(fingerprintAliases === undefined ? {} : { aliases: fingerprintAliases }),
+  }));
   const bodyStateChanged =
     prior.bodyFindings !== undefined &&
-    (bodyMatches.currentMatches.size !== currentBodyFindings.length ||
-      bodyMatches.priorMatches.size !== priorBodyFindings.length);
+    identitySnapshot(currentBodyState) !== identitySnapshot(priorBodyFindings);
 
   return {
     netNewFindings: findings.filter((_finding, index) => !matches.currentMatches.has(index)),

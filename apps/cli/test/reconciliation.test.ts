@@ -130,4 +130,43 @@ describe("finding reconciliation", () => {
     });
     assert.deepEqual(returnPlan.netNewFindings, [retained]);
   });
+
+  it("persists changed body aliases before a same-anchor peer appears", () => {
+    const primary = "a".repeat(64);
+    const contextA = "b".repeat(64);
+    const contextB = "c".repeat(64);
+    const movedBodyFinding = {
+      ...finding(primary, 7),
+      fingerprintAliases: [contextB],
+      range: null,
+      attachment: { kind: "file", path: "source.ts" } as const,
+    };
+
+    const aliasRefresh = planFindingReconciliation([movedBodyFinding], {
+      activeFingerprints: [primary],
+      bodyFindings: [{ fingerprint: primary, aliases: [contextA] }],
+      ownedOpenThreads: [],
+      runHeadShas: ["1".repeat(40)],
+    });
+    assert.deepEqual(aliasRefresh.netNewFindings, []);
+    assert.equal(aliasRefresh.bodyStateChanged, true);
+
+    const survivor = {
+      ...movedBodyFinding,
+      fingerprint: "d".repeat(64),
+      fingerprintAliases: [primary, contextB],
+    };
+    const addedPeer = {
+      ...movedBodyFinding,
+      fingerprint: "e".repeat(64),
+      fingerprintAliases: [primary, contextA],
+    };
+    const peerPlan = planFindingReconciliation([survivor, addedPeer], {
+      activeFingerprints: [primary],
+      bodyFindings: [{ fingerprint: primary, aliases: [contextB] }],
+      ownedOpenThreads: [],
+      runHeadShas: ["2".repeat(40)],
+    });
+    assert.deepEqual(peerPlan.netNewFindings, [addedPeer]);
+  });
 });
