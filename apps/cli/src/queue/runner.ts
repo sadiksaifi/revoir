@@ -70,6 +70,26 @@ function waitForNextPoll(signal?: AbortSignal): Promise<void> {
   });
 }
 
+function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted === true) {
+    throw signal.reason instanceof Error ? signal.reason : new Error("Queue runner was cancelled.");
+  }
+}
+
+async function waitForFailureReport(report: Promise<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    function done(): void {
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+    signal.addEventListener("abort", done, { once: true });
+    void report.then(done, done);
+  });
+}
+
 export class QueueReviewRunner implements QueueRunService {
   readonly #configuration: RevoirConfiguration;
   readonly #failures: ReviewFailureReporter;
@@ -115,11 +135,7 @@ export class QueueReviewRunner implements QueueRunService {
         expectedHeadSha: job.pullRequest.headSha,
         ...(signal === undefined ? {} : { signal }),
       });
-      if (signal?.aborted === true) {
-        throw signal.reason instanceof Error
-          ? signal.reason
-          : new Error("Queue runner was cancelled.");
-      }
+      throwIfCancelled(signal);
       await this.#queue.acknowledge(delivery.leaseId, signal);
     } catch (error) {
       if (signal?.aborted === true) {
@@ -128,19 +144,22 @@ export class QueueReviewRunner implements QueueRunService {
       if (error instanceof PullRequestEligibilityError) {
         await this.#queue.acknowledge(delivery.leaseId, signal);
       } else {
-        const reportingSignal = signal ?? new AbortController().signal;
-        try {
-          await this.#failures.report(
+        const timeoutSignal = AbortSignal.timeout(this.#configuration.timeouts.shellCommandMs);
+        const reportingSignal =
+          signal === undefined ? timeoutSignal : AbortSignal.any([signal, timeoutSignal]);
+        const report = Promise.resolve().then(() =>
+          this.#failures.report(
             referenceFor(job),
             error,
             delivery.attempt,
             MAX_OPERATIONAL_ATTEMPTS,
             reportingSignal,
-          );
-        } catch {
-          // A provider outage may also prevent visible failure reporting. Settlement remains
-          // bounded so the same unavailable provider cannot create an infinite queue loop.
-        }
+          ),
+        );
+        // The report promise is joined when the provider cooperates and safely observed if it
+        // ignores cancellation. Queue settlement cannot be held indefinitely by that provider.
+        await waitForFailureReport(report, reportingSignal);
+        throwIfCancelled(signal);
         if (delivery.attempt >= MAX_OPERATIONAL_ATTEMPTS) {
           await this.#queue.acknowledge(delivery.leaseId, signal);
         } else {

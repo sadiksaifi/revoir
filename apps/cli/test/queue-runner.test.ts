@@ -9,7 +9,7 @@ import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
 
-function configuration() {
+function configuration(timeouts?: { reviewMs?: number; shellCommandMs?: number }) {
   return createConfiguration({
     github: {
       userId: 42,
@@ -28,6 +28,7 @@ function configuration() {
       stateDir: "/tmp/state",
       dataDir: "/tmp/data",
     },
+    ...(timeouts === undefined ? {} : { timeouts }),
   });
 }
 
@@ -284,6 +285,57 @@ describe("automatic queue review runner", () => {
     ]);
     assert.deepEqual(acknowledgements, ["lease-3"]);
     assert.deepEqual(reportedAttempts, [1, 2]);
+  });
+
+  it("bounds a stalled failure report before retrying the queue lease", async () => {
+    let reportingSignal: AbortSignal | undefined;
+    let markReportingStarted: (() => void) | undefined;
+    const reportingStarted = new Promise<void>((resolve) => {
+      markReportingStarted = resolve;
+    });
+    const retries: Array<{ leaseId: string; delaySeconds: number }> = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return delivery("lease-stalled-report", reviewJob());
+      },
+      async acknowledge() {
+        assert.fail("The first operational failure must be retried.");
+      },
+      async retry(leaseId, delaySeconds) {
+        retries.push({ leaseId, delaySeconds });
+      },
+    };
+    const reviews: ManualReviewService = {
+      async review() {
+        throw new Error("temporary provider failure");
+      },
+    };
+    const reporter: ReviewFailureReporter = {
+      async report(_reference, _error, _attempt, _totalAttempts, signal) {
+        reportingSignal = signal;
+        markReportingStarted?.();
+        return new Promise<void>(() => {});
+      },
+    };
+    const consumption = new QueueReviewRunner(
+      configuration({ shellCommandMs: 5 }),
+      queue,
+      reviews,
+      reporter,
+    ).consumeOne();
+    await reportingStarted;
+
+    assert.equal(
+      await Promise.race([
+        consumption,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("failure reporting blocked queue settlement")), 100);
+        }),
+      ]),
+      "settled",
+    );
+    assert.equal(reportingSignal?.aborted, true);
+    assert.deepEqual(retries, [{ leaseId: "lease-stalled-report", delaySeconds: 30 }]);
   });
 
   it("propagates daemon cancellation without settling or reporting the active queue lease", async () => {
