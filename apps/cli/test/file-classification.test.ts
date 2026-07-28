@@ -46,6 +46,24 @@ describe("review file classification", () => {
     }
   });
 
+  it("keeps generator-like files excluded inside generated and vendored directories", () => {
+    const fixtures = [
+      ["dist/generator.js", "generated"],
+      ["generated/generate-client.ts", "generated"],
+      ["vendor/generator.ts", "vendored"],
+      ["third_party/generators/client.ts", "vendored"],
+    ] as const;
+
+    for (const [path, category] of fixtures) {
+      assert.deepEqual(classifyReviewFile(path), {
+        path,
+        category,
+        detailedReview: false,
+        supportingEvidence: false,
+      });
+    }
+  });
+
   it("excludes common ecosystem lockfiles while retaining them as supporting evidence", () => {
     const paths = [
       "Podfile.lock",

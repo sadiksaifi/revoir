@@ -103,9 +103,6 @@ export function classifyReviewFile(path: string): ReviewFileClassification {
   if (isManifest(name)) {
     return classification(path, "manifest", true);
   }
-  if (isGeneratorSource(segments.slice(0, -1), name)) {
-    return classification(path, "generator-source", true);
-  }
   if (LOCK_NAMES.has(name)) {
     return classification(path, "lock", false, true);
   }
@@ -125,6 +122,9 @@ export function classifyReviewFile(path: string): ReviewFileClassification {
     /\.(?:map)$/u.test(name)
   ) {
     return classification(path, "generated", false);
+  }
+  if (isGeneratorSource(segments.slice(0, -1), name)) {
+    return classification(path, "generator-source", true);
   }
   return classification(path, "source", true);
 }
