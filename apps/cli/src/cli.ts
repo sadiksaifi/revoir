@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 
@@ -23,6 +24,11 @@ import {
   PullRequestEligibilityError,
   PullRequestUrlError,
 } from "./review/pull-request.js";
+import {
+  createDefaultServiceManager,
+  type ServiceManager,
+  type ServiceStatus,
+} from "./service/manager.js";
 import { collectSetupConfiguration, parseSetupOptions, type PromptFunction } from "./setup.js";
 
 export const CLI_VERSION = "0.0.0";
@@ -34,6 +40,12 @@ Usage:
   revoir diagnose [--config <path>] [--json] [--verbose]
   revoir review <GitHub PR URL> [--config <path>] [--verbose]
   revoir run [--config <path>] [--verbose]
+  revoir install [--config <path>] [--verbose]
+  revoir start [--config <path>] [--verbose]
+  revoir stop [--verbose]
+  revoir status [--config <path>] [--verbose]
+  revoir logs [--verbose]
+  revoir uninstall [--verbose]
   revoir --help
   revoir --version
 
@@ -42,6 +54,12 @@ Commands:
   diagnose    Non-interactively validate an existing installation.
   review      Review one eligible pull request and publish validated findings or a clean result.
   run         Pull and settle eligible webhook review jobs one at a time.
+  install     Generate, load, and start the per-user macOS LaunchAgent.
+  start       Start the installed LaunchAgent without creating a duplicate worker.
+  stop        Gracefully stop and unload the LaunchAgent.
+  status      Inspect installation, launchd, process, and configuration health.
+  logs        Print structured redacted service logs from XDG state.
+  uninstall   Stop the service and remove only its generated plist.
 
 Setup options:
   --non-interactive
@@ -78,6 +96,7 @@ export interface CliDependencies {
   gateway?: DiagnosticGateway;
   reviewService?: ManualReviewService;
   runService?: QueueRunService;
+  serviceManager?: ServiceManager;
   prompt?: PromptFunction;
 }
 
@@ -199,7 +218,13 @@ export async function runCli(
     (arguments_[0] === "setup" ||
       arguments_[0] === "diagnose" ||
       arguments_[0] === "review" ||
-      arguments_[0] === "run") &&
+      arguments_[0] === "run" ||
+      arguments_[0] === "install" ||
+      arguments_[0] === "start" ||
+      arguments_[0] === "stop" ||
+      arguments_[0] === "status" ||
+      arguments_[0] === "logs" ||
+      arguments_[0] === "uninstall") &&
     (arguments_[1] === "--help" || arguments_[1] === "-h")
   ) {
     write(io.stdout, HELP);
@@ -227,6 +252,95 @@ export async function runCli(
   }
   const configFile =
     common.configFile === undefined ? paths.configFile : resolve(io.cwd, common.configFile);
+
+  if (["install", "start", "stop", "status", "uninstall"].includes(command ?? "")) {
+    if (common.json) {
+      write(io.stderr, `Error: --json is not supported by the ${String(command)} command.\n`);
+      return 2;
+    }
+    if (common.arguments.length > 0) {
+      write(io.stderr, `Error: ${String(command)} does not accept positional arguments.\n`);
+      return 2;
+    }
+
+    let configuration;
+    let configurationError: unknown;
+    if (command === "install" || command === "start" || command === "status") {
+      try {
+        configuration = await loadConfiguration(configFile);
+      } catch (error) {
+        configurationError = error;
+      }
+      if (command !== "status" && configuration === undefined) {
+        write(
+          io.stderr,
+          `Error: ${new SecretRedactor().error(configurationError, common.verbose)}\n`,
+        );
+        return 2;
+      }
+    }
+    const redactor = new SecretRedactor(configuration);
+    const managerPaths =
+      configuration === undefined
+        ? paths
+        : {
+            configDir: dirname(configFile),
+            configFile,
+            cacheDir: configuration.paths.cacheDir,
+            stateDir: configuration.paths.stateDir,
+            dataDir: configuration.paths.dataDir,
+          };
+    let serviceManager: ServiceManager;
+    try {
+      serviceManager =
+        dependencies.serviceManager ??
+        createDefaultServiceManager({
+          configFile,
+          homeDir: io.userHome ?? homedir(),
+          paths: managerPaths,
+        });
+    } catch (error) {
+      write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
+      return 2;
+    }
+
+    try {
+      if (command === "install") {
+        await serviceManager.install();
+        write(io.stdout, "Service installed and started.\n");
+        return 0;
+      }
+      if (command === "start") {
+        await serviceManager.start();
+        write(io.stdout, "Service started.\n");
+        return 0;
+      }
+      if (command === "stop") {
+        await serviceManager.stop();
+        write(io.stdout, "Service stopped; configuration and XDG data were preserved.\n");
+        return 0;
+      }
+      if (command === "uninstall") {
+        await serviceManager.uninstall();
+        write(io.stdout, "Service uninstalled; configuration and XDG data were preserved.\n");
+        return 0;
+      }
+
+      const status: ServiceStatus = await serviceManager.status();
+      if (configuration === undefined && status.state !== "uninstalled") {
+        write(
+          io.stdout,
+          `Service failed: ${new SecretRedactor().error(configurationError, common.verbose)}\n`,
+        );
+        return 1;
+      }
+      write(io.stdout, `Service ${status.state}: ${status.detail}\n`);
+      return status.state === "healthy" || status.state === "starting" ? 0 : 1;
+    } catch (error) {
+      write(io.stderr, `Error: ${redactor.error(error, common.verbose)}\n`);
+      return 1;
+    }
+  }
 
   if (command === "setup") {
     let promptHandle: ReturnType<typeof createPrompt> | undefined;

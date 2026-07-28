@@ -13,6 +13,7 @@ import type { QueueRunService } from "../src/queue/runner.js";
 import { FindingContractError, validateModelReviewOutput } from "../src/review/findings.js";
 import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
+import type { ServiceManager, ServiceStatus } from "../src/service/manager.js";
 import { passingGateway, TEST_PRIVATE_KEY } from "./helpers.js";
 
 class CapturingWritable extends Writable {
@@ -451,6 +452,63 @@ describe("CLI", () => {
     assert.equal(await runCli(["run", "--json"], { io, runService }), 2);
     assert.match(stderr.output, /--json is not supported/u);
     assert.equal(runs, 1);
+  });
+
+  it("dispatches idempotent service lifecycle commands and renders actionable status", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    const { privateKeyFile, tokenFile } = await writeCredentials(root);
+    assert.equal(
+      await runCli(setupArguments(privateKeyFile, tokenFile), {
+        io,
+        gateway: passingGateway(),
+      }),
+      0,
+    );
+    stdout.output = "";
+
+    const calls: string[] = [];
+    let status: ServiceStatus = {
+      state: "healthy",
+      detail: "LaunchAgent is healthy with process 321.",
+      pid: 321,
+    };
+    const serviceManager: ServiceManager = {
+      async install() {
+        calls.push("install");
+      },
+      async start() {
+        calls.push("start");
+      },
+      async stop() {
+        calls.push("stop");
+      },
+      async status() {
+        calls.push("status");
+        return status;
+      },
+      async uninstall() {
+        calls.push("uninstall");
+      },
+    };
+
+    assert.equal(await runCli(["install"], { io, serviceManager }), 0);
+    assert.equal(await runCli(["start"], { io, serviceManager }), 0);
+    assert.equal(await runCli(["status"], { io, serviceManager }), 0);
+    assert.match(stdout.output, /Service healthy: LaunchAgent is healthy with process 321/u);
+    assert.equal(await runCli(["stop"], { io, serviceManager }), 0);
+    assert.equal(await runCli(["uninstall"], { io, serviceManager }), 0);
+    assert.deepEqual(calls, ["install", "start", "status", "stop", "uninstall"]);
+
+    stdout.output = "";
+    status = {
+      state: "failed",
+      detail: 'LaunchAgent failed with exit code 78. Inspect "revoir logs".',
+    };
+    assert.equal(await runCli(["status"], { io, serviceManager }), 1);
+    assert.match(stdout.output, /Service failed: LaunchAgent failed with exit code 78/u);
+
+    assert.equal(await runCli(["install", "unexpected"], { io, serviceManager }), 2);
+    assert.match(stderr.output, /install does not accept positional arguments/u);
   });
 
   it("redacts pull-consumer failures", async () => {
