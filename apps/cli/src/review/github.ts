@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 
 import type { RevoirConfiguration } from "../config/schema.js";
+import { SecretRedactor } from "../redaction.js";
 import type { CompletedCheckEvidence, GitHubReviewEvidence } from "./evidence.js";
 import type { GitHubReviewPayload, ReviewPublication } from "./publication.js";
 import { PullRequestEligibilityError } from "./pull-request.js";
@@ -301,6 +302,14 @@ const FAILED_ACTIONS_CONCLUSIONS = new Set([
   "startup_failure",
   "timed_out",
 ]);
+const MAX_ACTIONS_LOG_BYTES = 64 * 1024;
+const MAX_ACTIONS_LOG_TOTAL_BYTES = 256 * 1024;
+const MAX_ACTIONS_LOG_ENTRIES = MAX_ACTIONS_LOG_TOTAL_BYTES / MAX_ACTIONS_LOG_BYTES;
+const ACTIONS_LOG_TRUNCATION_MARKER = "\n...[Revoir truncated GitHub Actions log]...\n";
+const ACTIONS_LOG_ENTRY_LIMIT_DIAGNOSTIC =
+  "GitHub Actions job log omitted (evidence entry limit reached).";
+const ACTIONS_LOG_AGGREGATE_LIMIT_DIAGNOSTIC =
+  "GitHub Actions job log omitted (aggregate byte limit reached).";
 
 interface ParsedCompletedCheck {
   evidence: CompletedCheckEvidence;
@@ -321,6 +330,83 @@ function actionsJobLogUnavailableDiagnostic(error: unknown): string {
   return error instanceof ActionsJobLogHttpError
     ? `GitHub Actions job log unavailable (HTTP ${error.status}).`
     : "GitHub Actions job log unavailable (request failed).";
+}
+
+function truncateActionsLogText(value: string, maximumBytes: number): string {
+  const bytes = Buffer.from(value);
+  if (bytes.length <= maximumBytes) {
+    return value;
+  }
+  const markerBytes = Buffer.byteLength(ACTIONS_LOG_TRUNCATION_MARKER);
+  const payloadBytes = maximumBytes - markerBytes - 6;
+  if (payloadBytes <= 0) {
+    return ACTIONS_LOG_TRUNCATION_MARKER.trim().slice(0, maximumBytes);
+  }
+  const headBytes = Math.ceil(payloadBytes / 2);
+  const tailBytes = payloadBytes - headBytes;
+  return `${bytes.subarray(0, headBytes).toString("utf8")}${ACTIONS_LOG_TRUNCATION_MARKER}${bytes
+    .subarray(bytes.length - tailBytes)
+    .toString("utf8")}`;
+}
+
+async function readBoundedActionsLog(
+  response: Response,
+  signal: AbortSignal,
+  maximumBytes: number,
+): Promise<string> {
+  if (response.body === null) {
+    throwIfAborted(signal);
+    return "";
+  }
+  const markerBytes = Buffer.byteLength(ACTIONS_LOG_TRUNCATION_MARKER);
+  const payloadBytes = maximumBytes - markerBytes - 6;
+  const headMaximum = Math.ceil(payloadBytes / 2);
+  const tailMaximum = payloadBytes - headMaximum;
+  const completeChunks: Buffer[] = [];
+  let complete = true;
+  let totalBytes = 0;
+  let head = Buffer.alloc(0);
+  let tail = Buffer.alloc(0);
+  const reader = response.body.getReader();
+  try {
+    for (;;) {
+      throwIfAborted(signal);
+      // eslint-disable-next-line no-await-in-loop
+      const { done, value } = await settleEffect(reader.read(), signal);
+      if (done) {
+        break;
+      }
+      const chunk = Buffer.from(value);
+      totalBytes += chunk.length;
+      if (head.length < headMaximum) {
+        const missing = headMaximum - head.length;
+        head = Buffer.concat([head, chunk.subarray(0, missing)]);
+      }
+      if (tailMaximum > 0) {
+        const combined =
+          chunk.length >= tailMaximum
+            ? chunk.subarray(chunk.length - tailMaximum)
+            : Buffer.concat([tail, chunk]);
+        tail =
+          combined.length <= tailMaximum
+            ? Buffer.from(combined)
+            : Buffer.from(combined.subarray(combined.length - tailMaximum));
+      }
+      if (complete && totalBytes <= maximumBytes) {
+        completeChunks.push(chunk);
+      } else if (complete) {
+        completeChunks.length = 0;
+        complete = false;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  throwIfAborted(signal);
+  if (complete) {
+    return Buffer.concat(completeChunks, totalBytes).toString("utf8");
+  }
+  return `${head.toString("utf8")}${ACTIONS_LOG_TRUNCATION_MARKER}${tail.toString("utf8")}`;
 }
 
 function actionsJobId(detailsUrl: string, reference: PullRequestReference): number | undefined {
@@ -415,6 +501,7 @@ class InstallationSession implements GitHubReviewSession {
   readonly #botLogin: string;
   readonly #fetch: FetchLike;
   readonly #pendingFenceAttemptMs: number;
+  readonly #redactor: SecretRedactor;
 
   constructor(
     installationToken: string,
@@ -422,12 +509,14 @@ class InstallationSession implements GitHubReviewSession {
     fetchImplementation: FetchLike,
     apiBase: string,
     pendingFenceAttemptMs: number,
+    redactor: SecretRedactor,
   ) {
     this.installationToken = installationToken;
     this.#apiBase = apiBase;
     this.#botLogin = `${appSlug}[bot]`.toLowerCase();
     this.#fetch = fetchImplementation;
     this.#pendingFenceAttemptMs = pendingFenceAttemptMs;
+    this.#redactor = redactor;
   }
 
   async #request(path: string, signal: AbortSignal, init: RequestInit = {}): Promise<Response> {
@@ -498,27 +587,47 @@ class InstallationSession implements GitHubReviewSession {
       await yieldToEventLoop(signal);
     }
 
-    const logRequests = new Map<number, Promise<string>>();
-    const completedChecks = await Promise.all(
-      checks.map(async (check): Promise<CompletedCheckEvidence> => {
-        if (check.actionsJobId === undefined) {
-          return check.evidence;
-        }
-        let request = logRequests.get(check.actionsJobId);
-        if (request === undefined) {
-          request = this.#getActionsJobLog(reference, check.actionsJobId, signal);
-          logRequests.set(check.actionsJobId, request);
-        }
-        try {
-          return Object.assign({}, check.evidence, { failedActionsLog: await request });
-        } catch (error) {
-          throwIfAborted(signal);
-          return Object.assign({}, check.evidence, {
-            failedActionsLogUnavailable: actionsJobLogUnavailableDiagnostic(error),
-          });
-        }
-      }),
+    const selectedLogIndices = new Set<number>();
+    const selectedJobIds = new Set<number>();
+    for (const [index, check] of checks.entries()) {
+      if (check.actionsJobId !== undefined && selectedLogIndices.size < MAX_ACTIONS_LOG_ENTRIES) {
+        selectedLogIndices.add(index);
+        selectedJobIds.add(check.actionsJobId);
+      }
+    }
+    const jobIds = [...selectedJobIds];
+    const settledLogs = await Promise.allSettled(
+      jobIds.map((jobId) => this.#getActionsJobLog(reference, jobId, signal)),
     );
+    throwIfAborted(signal);
+    const logsByJobId = new Map(
+      jobIds.map((jobId, index) => [jobId, settledLogs[index]!] as const),
+    );
+    let aggregateLogBytes = 0;
+    const completedChecks = checks.map((check, index): CompletedCheckEvidence => {
+      if (check.actionsJobId === undefined) {
+        return check.evidence;
+      }
+      if (!selectedLogIndices.has(index)) {
+        return Object.assign({}, check.evidence, {
+          failedActionsLogUnavailable: ACTIONS_LOG_ENTRY_LIMIT_DIAGNOSTIC,
+        });
+      }
+      const result = logsByJobId.get(check.actionsJobId)!;
+      if (result.status === "rejected") {
+        return Object.assign({}, check.evidence, {
+          failedActionsLogUnavailable: actionsJobLogUnavailableDiagnostic(result.reason),
+        });
+      }
+      const logBytes = Buffer.byteLength(result.value);
+      if (aggregateLogBytes + logBytes > MAX_ACTIONS_LOG_TOTAL_BYTES) {
+        return Object.assign({}, check.evidence, {
+          failedActionsLogUnavailable: ACTIONS_LOG_AGGREGATE_LIMIT_DIAGNOSTIC,
+        });
+      }
+      aggregateLogBytes += logBytes;
+      return Object.assign({}, check.evidence, { failedActionsLog: result.value });
+    });
     return { completedChecks };
   }
 
@@ -534,7 +643,8 @@ class InstallationSession implements GitHubReviewSession {
     if (!response.ok) {
       throw new ActionsJobLogHttpError(response.status);
     }
-    return settleEffect(response.text(), signal);
+    const log = await readBoundedActionsLog(response, signal, MAX_ACTIONS_LOG_BYTES);
+    return truncateActionsLogText(this.#redactor.text(log), MAX_ACTIONS_LOG_BYTES);
   }
 
   async removeOwnCompletionReaction(
@@ -944,6 +1054,10 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
       this.#fetch,
       this.#apiBase,
       this.#pendingFenceAttemptMs,
+      new SecretRedactor({
+        configuration,
+        installationToken: installation.token,
+      }),
     );
   }
 }

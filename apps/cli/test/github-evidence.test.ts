@@ -19,6 +19,30 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
+function streamingTextResponse(value: string): Response {
+  const bytes = Buffer.from(value);
+  let offset = 0;
+  const response = new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset === bytes.length) {
+          controller.close();
+          return;
+        }
+        const nextOffset = Math.min(offset + 8 * 1024, bytes.length);
+        controller.enqueue(bytes.subarray(offset, nextOffset));
+        offset = nextOffset;
+      },
+    }),
+  );
+  Object.defineProperty(response, "text", {
+    value: async () => {
+      throw new Error("Actions logs must be consumed through their bounded stream.");
+    },
+  });
+  return response;
+}
+
 describe("GitHub review evidence", () => {
   it("loads PR metadata, completed checks, and only relevant failed Actions logs", async () => {
     const requests: Array<{ url: string; method?: string }> = [];
@@ -268,6 +292,92 @@ describe("GitHub review evidence", () => {
         assert.ok(check.failedActionsLogUnavailable.length <= 80);
       }
     }
+  });
+
+  it("bounds streamed Actions logs per entry and across the assembled evidence", async () => {
+    const largeLog = [
+      "HEAD installation-secret\n",
+      "x".repeat(1024 * 1024),
+      "\nPRIVATE_MIDDLE_SECRET\n",
+      "y".repeat(1024 * 1024),
+      "\nTAIL installation-secret",
+    ].join("");
+    assert.ok(Buffer.byteLength(largeLog) >= 2 * 1024 * 1024);
+    const jobIds = Array.from({ length: 10 }, (_, index) => 401 + index);
+    const checkRuns = [
+      {
+        name: "large",
+        status: "completed",
+        conclusion: "failure",
+        details_url: "https://github.com/owner/repository/actions/runs/300/job/400",
+        output: { title: null, summary: null },
+      },
+      ...jobIds.map((jobId) => ({
+        name: `job-${jobId}`,
+        status: "completed",
+        conclusion: "failure",
+        details_url: `https://github.com/owner/repository/actions/runs/${jobId}/job/${jobId}`,
+        output: { title: null, summary: null },
+      })),
+    ];
+    const fetchImplementation: FetchLike = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.includes("/check-runs?")) {
+        return json({ total_count: checkRuns.length, check_runs: checkRuns });
+      }
+      if (url.endsWith("/actions/jobs/400/logs")) {
+        return streamingTextResponse(largeLog);
+      }
+      const jobId = /\/actions\/jobs\/(\d+)\/logs$/u.exec(url)?.[1];
+      if (jobId !== undefined) {
+        return streamingTextResponse(
+          `HEAD-${jobId} installation-secret\n${"m".repeat(100 * 1024)}\nTAIL-${jobId}`,
+        );
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+    const evidence = await session.getReviewEvidence(
+      reference,
+      "2".repeat(40),
+      new AbortController().signal,
+    );
+
+    const largeEvidence = evidence.completedChecks[0]?.failedActionsLog;
+    assert.ok(largeEvidence);
+    assert.match(largeEvidence, /^HEAD \[REDACTED\]/u);
+    assert.match(largeEvidence, /TAIL \[REDACTED\]$/u);
+    assert.match(largeEvidence, /\[Revoir truncated GitHub Actions log\]/u);
+    assert.doesNotMatch(largeEvidence, /PRIVATE_MIDDLE_SECRET|installation-secret/u);
+    assert.ok(Buffer.byteLength(largeEvidence) <= 64 * 1024);
+
+    const retainedLogs = evidence.completedChecks.flatMap(({ failedActionsLog }) =>
+      failedActionsLog === undefined ? [] : [failedActionsLog],
+    );
+    assert.ok(retainedLogs.length <= 8);
+    assert.ok(retainedLogs.reduce((total, log) => total + Buffer.byteLength(log), 0) <= 256 * 1024);
+    assert.ok(
+      evidence.completedChecks.every(
+        ({ failedActionsLog, failedActionsLogUnavailable }) =>
+          failedActionsLog !== undefined || failedActionsLogUnavailable !== undefined,
+      ),
+    );
+    assert.ok(
+      evidence.completedChecks.some(({ failedActionsLogUnavailable }) =>
+        /limit reached/u.test(failedActionsLogUnavailable ?? ""),
+      ),
+    );
+    assert.doesNotMatch(JSON.stringify(evidence), /installation-secret|PRIVATE_MIDDLE_SECRET/u);
   });
 
   it("still fails when required completed-check context is unavailable", async () => {
