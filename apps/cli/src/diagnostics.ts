@@ -243,17 +243,14 @@ export function createDefaultDiagnosticGateway(
     },
 
     async checkCloudflare(configuration) {
-      const response = await requestJson(
-        fetchImplementation,
-        "Cloudflare Queue",
-        `${CLOUDFLARE_API}/accounts/${encodeURIComponent(configuration.accountId)}/queues/${encodeURIComponent(configuration.queueId)}`,
-        {
-          headers: {
-            Authorization: `Bearer ${configuration.apiToken}`,
-            "Content-Type": "application/json",
-          },
-        },
-      );
+      const headers = {
+        Authorization: `Bearer ${configuration.apiToken}`,
+        "Content-Type": "application/json",
+      };
+      const queueUrl = `${CLOUDFLARE_API}/accounts/${encodeURIComponent(configuration.accountId)}/queues/${encodeURIComponent(configuration.queueId)}`;
+      const response = await requestJson(fetchImplementation, "Cloudflare Queue", queueUrl, {
+        headers,
+      });
       if (response.success !== true) {
         throw new Error("Cloudflare Queue credentials were not accepted.");
       }
@@ -262,13 +259,50 @@ export function createDefaultDiagnosticGateway(
       if (typeof returnedQueueId !== "string" || returnedQueueId !== configuration.queueId) {
         throw new Error(`Cloudflare returned a different queue id (${String(returnedQueueId)}).`);
       }
+      if (
+        typeof result.settings === "object" &&
+        result.settings !== null &&
+        !Array.isArray(result.settings) &&
+        (result.settings as Record<string, unknown>).delivery_paused === true
+      ) {
+        throw new Error(
+          "Cloudflare Queue delivery is paused. Resume delivery before running Revoir.",
+        );
+      }
+
+      const consumerResponse = await requestJson(
+        fetchImplementation,
+        "Cloudflare Queue consumers",
+        `${queueUrl}/consumers`,
+        { headers },
+      );
+      if (consumerResponse.success !== true || !Array.isArray(consumerResponse.result)) {
+        throw new Error("Cloudflare Queue consumers returned an invalid response.");
+      }
+      const httpPullConsumer = consumerResponse.result.find(
+        (consumer) =>
+          typeof consumer === "object" &&
+          consumer !== null &&
+          !Array.isArray(consumer) &&
+          (consumer as Record<string, unknown>).type === "http_pull",
+      ) as Record<string, unknown> | undefined;
+      if (httpPullConsumer === undefined) {
+        throw new Error(
+          "Cloudflare Queue has no HTTP pull consumer. Enable HTTP pull for this queue before running Revoir.",
+        );
+      }
+
       const queueName =
         typeof result.queue_name === "string"
           ? result.queue_name
           : typeof result.name === "string"
             ? result.name
             : configuration.queueId;
-      return `queue ${queueName}`;
+      const consumerId =
+        typeof httpPullConsumer.consumer_id === "string" && httpPullConsumer.consumer_id !== ""
+          ? httpPullConsumer.consumer_id
+          : "configured";
+      return `queue ${queueName}, HTTP pull consumer ${consumerId}; token and resource access verified read-only. Queues Read and Queues Write grants remain required (live pull not attempted).`;
     },
   };
 }

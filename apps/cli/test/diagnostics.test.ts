@@ -91,10 +91,30 @@ describe("diagnostic contracts", () => {
         body = { id: 42, login: "test-user" };
       } else if (url.endsWith("/repositories/99")) {
         body = { id: 99, full_name: "owner/repository" };
+      } else if (url.endsWith("/queues/queue/consumers")) {
+        body = {
+          success: true,
+          result: [
+            {
+              consumer_id: "consumer",
+              queue_name: "review-jobs",
+              type: "http_pull",
+              settings: {
+                batch_size: 1,
+                max_retries: 3,
+                visibility_timeout_ms: 1_200_000,
+              },
+            },
+          ],
+        };
       } else if (url.includes("api.cloudflare.com")) {
         body = {
           success: true,
-          result: { queue_id: "queue", queue_name: "review-jobs" },
+          result: {
+            queue_id: "queue",
+            queue_name: "review-jobs",
+            settings: { delivery_paused: false },
+          },
         };
       } else {
         return {
@@ -118,12 +138,20 @@ describe("diagnostic contracts", () => {
       app: "revoir-test, author test-user (42)",
       repositories: "owner/repository",
     });
-    assert.equal(await gateway.checkCloudflare(configuration.cloudflare), "queue review-jobs");
-    assert.equal(requests.length, 5);
+    assert.equal(
+      await gateway.checkCloudflare(configuration.cloudflare),
+      "queue review-jobs, HTTP pull consumer consumer; token and resource access verified read-only. Queues Read and Queues Write grants remain required (live pull not attempted).",
+    );
+    assert.equal(requests.length, 6);
     assert.match(requests[0]?.authorization ?? "", /^Bearer [^.]+\.[^.]+\.[^.]+$/u);
     assert.equal(requests[1]?.method, "POST");
     assert.equal(requests[2]?.authorization, "Bearer installation-secret");
     assert.equal(requests[4]?.authorization, "Bearer cloudflare-secret-token");
+    assert.equal(requests[5]?.authorization, "Bearer cloudflare-secret-token");
+    assert.equal(
+      requests.some((request) => request.url.includes("/messages/")),
+      false,
+    );
   });
 
   it("reports every missing GitHub installation permission with an actionable fix", async () => {
@@ -214,5 +242,68 @@ describe("diagnostic contracts", () => {
     }));
 
     await assert.rejects(gateway.checkCloudflare(configuration.cloudflare), /different queue id/u);
+  });
+
+  it("requires an enabled HTTP pull consumer without leasing any messages", async () => {
+    const requestedUrls: string[] = [];
+    const gateway = createDefaultDiagnosticGateway(async (url) => {
+      requestedUrls.push(url);
+      const body = url.endsWith("/consumers")
+        ? {
+            success: true,
+            result: [{ consumer_id: "worker-consumer", type: "worker" }],
+          }
+        : {
+            success: true,
+            result: {
+              queue_id: "queue",
+              queue_name: "review-jobs",
+              settings: { delivery_paused: false },
+            },
+          };
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return body;
+        },
+      };
+    });
+
+    await assert.rejects(
+      gateway.checkCloudflare(configuration.cloudflare),
+      /no HTTP pull consumer.*Enable HTTP pull/u,
+    );
+    assert.equal(
+      requestedUrls.some((url) => url.includes("/messages/")),
+      false,
+    );
+  });
+
+  it("rejects a paused Cloudflare Queue before inspecting consumers", async () => {
+    const requestedUrls: string[] = [];
+    const gateway = createDefaultDiagnosticGateway(async (url) => {
+      requestedUrls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            success: true,
+            result: {
+              queue_id: "queue",
+              queue_name: "review-jobs",
+              settings: { delivery_paused: true },
+            },
+          };
+        },
+      };
+    });
+
+    await assert.rejects(
+      gateway.checkCloudflare(configuration.cloudflare),
+      /delivery is paused.*Resume delivery/u,
+    );
+    assert.equal(requestedUrls.length, 1);
   });
 });
