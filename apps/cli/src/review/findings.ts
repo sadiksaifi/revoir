@@ -51,6 +51,7 @@ const PRAISE_OR_SUMMARY =
   /(?:\b(?:excellent|good|great|nice|solid)\s+(?:approach|change|implementation|job|work)\b|\blooks?\s+good\b|\bwell[ -]done\b|\bthe rest of (?:the )?(?:change|code|implementation)\b|^(?:(?:general|overall)\s+)?(?:overview|summary)\b|\boverall(?:,|\s+(?:the|this|change|code|implementation)))/iu;
 const MARKDOWN =
   /(?:`|\[[^\]\r\n]+\]\([^)\r\n]+\)|\*\*|__|^(?:\s{0,3}#{1,6}|\s{0,3}>|\s*(?:[-+*]|\d+\.))\s)/u;
+const PLACEHOLDER = /^(?:n\/?a|none|not (?:applicable|available|provided)|unknown)[.!?]?$/iu;
 const ACTION_VERB =
   /^(?:add|await|bound|call|cancel|check|clone|close|compare|compute|convert|create|decode|defer|delete|derive|discard|encode|ensure|escape|expose|filter|forward|guard|handle|include|initialize|limit|map|move|parse|pass|preserve|propagate|publish|read|reconcile|record|refactor|reject|release|remove|rename|replace|resolve|restore|retry|return|sanitize|serialize|set|skip|sort|stop|submit|throw|update|use|validate|verify|wrap|write)\b/iu;
 
@@ -77,8 +78,16 @@ function validateFindingProse(finding: ModelFindingV1, index: number): ModelFind
   ) {
     throw new Error(`${path} uses speculative language instead of observed evidence.`);
   }
-  if (/^(?:n\/?a|none|not provided|unknown)$/iu.test(finding.evidence)) {
-    throw new Error(`${path}.evidence must describe supporting evidence.`);
+  const substantiveFields = [
+    ["title", finding.title, "must state a substantive title"],
+    ["issue", finding.issue, "must describe an observed issue"],
+    ["impact", finding.impact, "must describe a concrete impact"],
+    ["evidence", finding.evidence, "must describe supporting evidence"],
+  ] as const;
+  for (const [field, value, reason] of substantiveFields) {
+    if (PLACEHOLDER.test(value)) {
+      throw new Error(`${path}.${field} ${reason}.`);
+    }
   }
   if (
     !ACTION_VERB.test(finding.fixDirection) ||

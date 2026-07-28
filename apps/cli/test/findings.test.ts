@@ -257,6 +257,69 @@ describe("finding validation", () => {
     }
   });
 
+  it("keeps placeholder title, issue, and impact prose out of publication", async () => {
+    const placeholders = [
+      { field: "title", value: "None" },
+      { field: "issue", value: "Unknown" },
+      { field: "impact", value: "Not provided" },
+    ] as const;
+    const technicalFinding = finding({
+      title: "Terminal status bypasses cancellation",
+      issue: "The branch maps an unknown terminal status to success.",
+      impact: "No cancellation reaches the child process after that mapping.",
+    });
+    const result = await validateModelReviewOutput(
+      output([
+        technicalFinding,
+        ...placeholders.map(({ field, value }) =>
+          finding({
+            [field]: value,
+            issue:
+              field === "issue"
+                ? value
+                : `The placeholder ${field} candidate omits required review context.`,
+          }),
+        ),
+      ]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.equal(result.findings.length, 1);
+    assert.equal(result.findings[0]?.title, technicalFinding.title);
+    assert.deepEqual(
+      result.diagnostics.map(({ index, code, message }) => ({ index, code, message })),
+      [
+        {
+          index: 1,
+          code: "invalid",
+          message: "findings[1].title must state a substantive title.",
+        },
+        {
+          index: 2,
+          code: "invalid",
+          message: "findings[2].issue must describe an observed issue.",
+        },
+        {
+          index: 3,
+          code: "invalid",
+          message: "findings[3].impact must describe a concrete impact.",
+        },
+      ],
+    );
+
+    const publication = JSON.stringify(createReviewPublication("1".repeat(40), result.findings));
+    for (const { value } of placeholders) {
+      assert.equal(publication.includes(value), false);
+      assert.equal(
+        result.diagnostics
+          .map((diagnostic) => diagnostic.message)
+          .join("\n")
+          .includes(value),
+        false,
+      );
+    }
+  });
+
   it("rejects common speculative and merge-instruction prose before publication", async () => {
     const cases: readonly [Record<string, unknown>, RegExp][] = [
       [{ title: "Cancellation could be dropped" }, /speculative language/u],
