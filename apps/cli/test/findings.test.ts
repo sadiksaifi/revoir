@@ -319,6 +319,47 @@ describe("finding validation", () => {
     );
   });
 
+  it("normalizes a unique range-null changed-line anchor to an inline finding", async () => {
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          range: null,
+          anchor: "const second = true;",
+        }),
+      ]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.deepEqual(result.findings[0]?.range, {
+      start: 3,
+      end: 3,
+      side: "RIGHT",
+    });
+    assert.deepEqual(result.findings[0]?.attachment, {
+      kind: "inline",
+      path: "source.ts",
+      startLine: 3,
+      endLine: 3,
+      side: "RIGHT",
+    });
+    const publication = createReviewPublication("f".repeat(40), result.findings);
+    assert.deepEqual(
+      publication.payload.comments?.map(({ path, line, side }) => ({
+        path,
+        line,
+        side,
+      })),
+      [
+        {
+          path: "source.ts",
+          line: 3,
+          side: "RIGHT",
+        },
+      ],
+    );
+    assert.equal(publication.payload.body?.includes("const second = true;"), false);
+  });
+
   it("rejects traversal, nonexistent, directory, and out-of-diff paths", async () => {
     const cases = [
       "",

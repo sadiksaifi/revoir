@@ -5,6 +5,7 @@ import {
   FINDING_CONTRACT_VERSION,
   parseModelFinding,
   parseModelReviewOutput,
+  type FindingRangeV1,
   type FindingV1,
   type ModelFindingV1,
 } from "@revoir/contracts";
@@ -111,27 +112,55 @@ function changedLineKey(side: DiffSide, line: number): string {
   return `${side}:${line}`;
 }
 
-function validateTechnicalAnchor(finding: ModelFindingV1, file: DiffFile): void {
-  const observed =
-    finding.range === null
-      ? [
-          file.apiPath,
-          ...(file.oldPath === undefined ? [] : [file.oldPath]),
-          ...(file.newPath === undefined ? [] : [file.newPath]),
-          ...file.changedLineText.values(),
-        ]
-      : Array.from(
-          { length: finding.range.end - finding.range.start + 1 },
-          (_, offset) =>
-            file.changedLineText.get(
-              changedLineKey(finding.range!.side, finding.range!.start + offset),
-            ) ?? "",
-        );
-  if (!observed.some((value) => value.trim() === finding.anchor)) {
+function exactAnchorRanges(file: DiffFile, anchor: string): FindingRangeV1[] {
+  return [...file.changedLineText.entries()].flatMap(([key, text]) => {
+    if (text.trim() !== anchor) {
+      return [];
+    }
+    const separator = key.indexOf(":");
+    const side = key.slice(0, separator);
+    const line = Number(key.slice(separator + 1));
+    if ((side !== "LEFT" && side !== "RIGHT") || !Number.isSafeInteger(line) || line <= 0) {
+      return [];
+    }
+    return [{ start: line, end: line, side }];
+  });
+}
+
+function validateTechnicalAnchor(finding: ModelFindingV1, file: DiffFile): ModelFindingV1 {
+  if (finding.range !== null) {
+    const hasExactSelectedLine = Array.from(
+      { length: finding.range.end - finding.range.start + 1 },
+      (_, offset) =>
+        file.changedLineText.get(
+          changedLineKey(finding.range!.side, finding.range!.start + offset),
+        ) ?? "",
+    ).some((value) => value.trim() === finding.anchor);
+    if (hasExactSelectedLine) {
+      return finding;
+    }
     throw new Error(
       "technical anchor must equal a complete authoritative changed line or file path.",
     );
   }
+
+  const exactPath =
+    finding.anchor === file.apiPath ||
+    finding.anchor === file.oldPath ||
+    finding.anchor === file.newPath;
+  if (exactPath) {
+    return finding;
+  }
+  const ranges = exactAnchorRanges(file, finding.anchor);
+  if (ranges.length === 1) {
+    return { ...finding, range: ranges[0]! };
+  }
+  if (ranges.length > 1) {
+    return finding;
+  }
+  throw new Error(
+    "technical anchor must equal a complete authoritative changed line or file path.",
+  );
 }
 
 interface GitTreeEntry {
@@ -249,17 +278,17 @@ function anchorOccurrenceContext(file: DiffFile, finding: ModelFindingV1): strin
     .toSorted((left, right) => left.line - right.line);
   const occurrence = changedLines.findIndex(
     ({ line, text }) =>
-      line >= finding.range!.start && line <= finding.range!.end && text.includes(finding.anchor),
+      line >= finding.range!.start && line <= finding.range!.end && text.trim() === finding.anchor,
   );
   if (occurrence < 0) {
     return undefined;
   }
   const before = changedLines
     .slice(0, occurrence)
-    .findLast(({ text }) => !text.includes(finding.anchor))?.text;
+    .findLast(({ text }) => text.trim() !== finding.anchor)?.text;
   const after = changedLines
     .slice(occurrence + 1)
-    .find(({ text }) => !text.includes(finding.anchor))?.text;
+    .find(({ text }) => text.trim() !== finding.anchor)?.text;
   if (before === undefined && after === undefined) {
     return undefined;
   }
@@ -343,17 +372,17 @@ export async function validateModelReviewOutput(
       if (modelFinding.range !== null && !isAttachableRange(file, modelFinding.range)) {
         throw new Error("range is not a contiguous changed-line range in the reviewed diff.");
       }
-      validateTechnicalAnchor(modelFinding, file);
-      const context = anchorOccurrenceContext(file, modelFinding);
+      const anchoredFinding = validateTechnicalAnchor(modelFinding, file);
+      const context = anchorOccurrenceContext(file, anchoredFinding);
       candidates.push({
         index,
-        finding: modelFinding,
-        attachment: attachment(file, modelFinding),
-        baseFingerprint: findingFingerprint(modelFinding),
+        finding: anchoredFinding,
+        attachment: attachment(file, anchoredFinding),
+        baseFingerprint: findingFingerprint(anchoredFinding),
         ...(context === undefined
           ? {}
-          : { contextFingerprint: findingFingerprint(modelFinding, context) }),
-        occurrenceKey: occurrenceKey(modelFinding),
+          : { contextFingerprint: findingFingerprint(anchoredFinding, context) }),
+        occurrenceKey: occurrenceKey(anchoredFinding),
       });
     } catch (error) {
       if (options.signal?.aborted === true) {
