@@ -65,6 +65,7 @@ const PRIORITIES = new Set<FindingPriority>(["P0", "P1", "P2", "P3"]);
 const DEFECT_KINDS = new Set<FindingDefectKind>(FINDING_DEFECT_KINDS);
 const IMPACT_KINDS = new Set<FindingImpactKind>(FINDING_IMPACT_KINDS);
 const FIX_ACTIONS = new Set<FindingFixAction>(FINDING_FIX_ACTIONS);
+const MAX_ANCHOR_LENGTH = 4096;
 
 export class FindingSchemaError extends Error {
   constructor(message: string) {
@@ -243,6 +244,8 @@ export function parseModelFinding(value: unknown, index: number): ModelFindingV1
     defectKind: enumString(finding.defectKind, `${path}.defectKind`, DEFECT_KINDS, "defect kind"),
     impactKind: enumString(finding.impactKind, `${path}.impactKind`, IMPACT_KINDS, "impact kind"),
     fixAction: enumString(finding.fixAction, `${path}.fixAction`, FIX_ACTIONS, "fix action"),
-    anchor: boundedString(finding.anchor, `${path}.anchor`, 160, { singleLine: true }),
+    anchor: boundedString(finding.anchor, `${path}.anchor`, MAX_ANCHOR_LENGTH, {
+      singleLine: true,
+    }),
   };
 }

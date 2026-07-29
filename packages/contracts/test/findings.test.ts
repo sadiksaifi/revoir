@@ -53,6 +53,12 @@ describe("finding contract v1", () => {
     assert.deepEqual(Buffer.from(parsed.anchor), Buffer.from("cafe\u0301Signal"));
   });
 
+  it("accepts a complete changed-line anchor longer than 160 characters", () => {
+    const anchor = `const value = "${"x".repeat(180)}";`;
+
+    assert.equal(parseModelFinding({ ...finding(), anchor }, 0).anchor, anchor);
+  });
+
   it("rejects malformed JSON, unknown versions, fields, and envelope shapes", () => {
     const cases = [
       "not json",
@@ -138,6 +144,7 @@ describe("finding contract v1", () => {
       { ...finding(), anchor: "" },
       { ...finding(), anchor: " padded " },
       { ...finding(), anchor: "two\nlines" },
+      { ...finding(), anchor: "x".repeat(4097) },
       { ...finding(), anchor: null },
       { ...finding(), path: "source\u0000.ts" },
       { ...finding(), path: "source\ud800.ts" },
