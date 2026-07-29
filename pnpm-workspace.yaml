@@ -2,14 +2,16 @@ packages:
   - "apps/*"
   - "packages/*"
 
-onlyBuiltDependencies:
-  - esbuild
-  - workerd
-
-patchedDependencies:
-  "@yao-pkg/pkg@6.21.0": "patches/@yao-pkg__pkg@6.21.0.patch"
-
 catalog:
   "@types/node": ^26.1.1
   tsx: ^4.23.1
   typescript: ^7.0.2
+
+onlyBuiltDependencies:
+  - '@google/genai'
+  - esbuild
+  - protobufjs
+  - workerd
+
+patchedDependencies:
+  "@yao-pkg/pkg@6.21.0": "patches/@yao-pkg__pkg@6.21.0.patch"
