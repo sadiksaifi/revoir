@@ -143,7 +143,7 @@ describe("diagnostic contracts", () => {
 
     assert.deepEqual(await gateway.checkGitHub(configuration.github), {
       app: "revoir-test, author test-user (42)",
-      repositories: "owner/repository",
+      repositories: "owner/repository (installation 8)",
     });
     assert.equal(
       await gateway.checkCloudflare(configuration.cloudflare),
@@ -159,6 +159,63 @@ describe("diagnostic contracts", () => {
     assert.equal(requests[6]?.method, "POST");
     assert.match(requests[6]?.url ?? "", /\/messages\/ack$/u);
     assert.deepEqual(JSON.parse(requests[6]?.body ?? ""), { acks: [], retries: [] });
+  });
+
+  it("validates every installation with its own token and repository allowlist", async () => {
+    const repositoryAuthorizations = new Map<string, string>();
+    const requestedInstallations: string[] = [];
+    const github = {
+      ...configuration.github,
+      installations: [
+        ...configuration.github.installations,
+        {
+          id: 9,
+          repositories: [{ id: 100, owner: "other", name: "second" }],
+        },
+      ],
+    };
+    const gateway = createDefaultDiagnosticGateway(async (url, init) => {
+      let body: unknown;
+      if (url.endsWith("/app")) {
+        body = { id: 7, slug: "revoir-test" };
+      } else if (url.includes("/app/installations/")) {
+        const installationId = /installations\/(?<id>\d+)/u.exec(url)?.groups?.id ?? "";
+        requestedInstallations.push(installationId);
+        body = {
+          token: `installation-${installationId}-secret`,
+          permissions: {
+            metadata: "read",
+            contents: "read",
+            checks: "read",
+            actions: "read",
+            pull_requests: "write",
+          },
+        };
+      } else if (url.endsWith("/user/42")) {
+        body = { id: 42, login: "test-user" };
+      } else if (url.endsWith("/repositories/99")) {
+        repositoryAuthorizations.set("99", init?.headers?.Authorization ?? "");
+        body = { id: 99, full_name: "owner/repository" };
+      } else {
+        repositoryAuthorizations.set("100", init?.headers?.Authorization ?? "");
+        body = { id: 100, full_name: "other/second" };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return body;
+        },
+      };
+    });
+
+    assert.deepEqual(await gateway.checkGitHub(github), {
+      app: "revoir-test, author test-user (42)",
+      repositories: "owner/repository (installation 8), other/second (installation 9)",
+    });
+    assert.deepEqual(requestedInstallations.toSorted(), ["8", "9"]);
+    assert.equal(repositoryAuthorizations.get("99"), "Bearer installation-8-secret");
+    assert.equal(repositoryAuthorizations.get("100"), "Bearer installation-9-secret");
   });
 
   it("reports every missing GitHub installation permission with an actionable fix", async () => {

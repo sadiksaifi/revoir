@@ -8,7 +8,7 @@ catalog:
   typescript: ^7.0.2
 
 onlyBuiltDependencies:
-  - '@google/genai'
+  - "@google/genai"
   - esbuild
   - protobufjs
   - workerd

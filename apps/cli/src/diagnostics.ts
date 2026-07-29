@@ -206,62 +206,74 @@ export function createDefaultDiagnosticGateway(
         );
       }
 
-      const tokenResponse = await requestJson(
-        fetchImplementation,
-        "GitHub installation",
-        `${GITHUB_API}/app/installations/${configuration.installationId}/access_tokens`,
-        { method: "POST", headers: githubHeaders(appJwt) },
-      );
-      if (typeof tokenResponse.token !== "string" || tokenResponse.token === "") {
-        throw new Error("GitHub installation did not return an access token.");
-      }
-      validateGitHubPermissions(tokenResponse.permissions);
-      const installationToken = tokenResponse.token;
-
-      const user = await requestJson(
-        fetchImplementation,
-        "GitHub user identity",
-        `${GITHUB_API}/user/${configuration.userId}`,
-        { headers: githubHeaders(installationToken) },
-      );
-      if (user.id !== configuration.userId) {
-        throw new Error(
-          `GitHub user id ${String(user.id)} does not match configured user id ${configuration.userId}.`,
-        );
-      }
-
-      await Promise.all(
-        configuration.repositories.map(async (repository) => {
-          const response = await requestJson(
+      const installationResults = await Promise.all(
+        configuration.installations.map(async (installation) => {
+          const tokenResponse = await requestJson(
             fetchImplementation,
-            "GitHub repository",
-            `${GITHUB_API}/repositories/${repository.id}`,
-            { headers: githubHeaders(installationToken) },
+            `GitHub installation ${installation.id}`,
+            `${GITHUB_API}/app/installations/${installation.id}/access_tokens`,
+            { method: "POST", headers: githubHeaders(appJwt) },
           );
-          const expectedName = `${repository.owner}/${repository.name}`;
-          if (
-            response.id !== repository.id ||
-            typeof response.full_name !== "string" ||
-            response.full_name.toLowerCase() !== expectedName.toLowerCase()
-          ) {
+          if (typeof tokenResponse.token !== "string" || tokenResponse.token === "") {
             throw new Error(
-              `GitHub repository id ${repository.id} does not match configured repository "${expectedName}".`,
+              `GitHub installation ${installation.id} did not return an access token.`,
             );
           }
+          validateGitHubPermissions(tokenResponse.permissions);
+          const installationToken = tokenResponse.token;
+
+          const user = await requestJson(
+            fetchImplementation,
+            "GitHub user identity",
+            `${GITHUB_API}/user/${configuration.userId}`,
+            { headers: githubHeaders(installationToken) },
+          );
+          if (user.id !== configuration.userId) {
+            throw new Error(
+              `GitHub user id ${String(user.id)} does not match configured user id ${configuration.userId}.`,
+            );
+          }
+
+          await Promise.all(
+            installation.repositories.map(async (repository) => {
+              const response = await requestJson(
+                fetchImplementation,
+                "GitHub repository",
+                `${GITHUB_API}/repositories/${repository.id}`,
+                { headers: githubHeaders(installationToken) },
+              );
+              const expectedName = `${repository.owner}/${repository.name}`;
+              if (
+                response.id !== repository.id ||
+                typeof response.full_name !== "string" ||
+                response.full_name.toLowerCase() !== expectedName.toLowerCase()
+              ) {
+                throw new Error(
+                  `GitHub repository id ${repository.id} does not match configured repository "${expectedName}".`,
+                );
+              }
+            }),
+          );
+
+          return {
+            login:
+              typeof user.login === "string" && user.login !== ""
+                ? user.login
+                : `user ${configuration.userId}`,
+            repositories: installation.repositories.map(
+              (repository) =>
+                `${repository.owner}/${repository.name} (installation ${installation.id})`,
+            ),
+          };
         }),
       );
 
       const appName =
         typeof app.slug === "string" && app.slug !== "" ? app.slug : `app ${configuration.appId}`;
-      const login =
-        typeof user.login === "string" && user.login !== ""
-          ? user.login
-          : `user ${configuration.userId}`;
+      const login = installationResults[0]?.login ?? `user ${configuration.userId}`;
       return {
         app: `${appName}, author ${login} (${configuration.userId})`,
-        repositories: configuration.repositories
-          .map((repository) => `${repository.owner}/${repository.name}`)
-          .join(", "),
+        repositories: installationResults.flatMap((result) => result.repositories).join(", "),
       };
     },
 

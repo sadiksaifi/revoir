@@ -1,6 +1,6 @@
 import { createSign } from "node:crypto";
 
-import type { RevoirConfiguration } from "../config/schema.js";
+import { installationForRepository, type RevoirConfiguration } from "../config/schema.js";
 import { SecretRedactor } from "../redaction.js";
 import type { CompletedCheckEvidence, GitHubReviewEvidence } from "./evidence.js";
 import { REVIEW_FAILURE_MARKER } from "./failure-marker.js";
@@ -1419,12 +1419,17 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<GitHubReviewSession> {
-    const configuredRepository = configuration.repositories.find(
+    const configuredInstallation = installationForRepository(
+      configuration,
+      reference.owner,
+      reference.repository,
+    );
+    const configuredRepository = configuredInstallation?.repositories.find(
       (candidate) =>
         candidate.owner.toLowerCase() === reference.owner.toLowerCase() &&
         candidate.name.toLowerCase() === reference.repository.toLowerCase(),
     );
-    if (configuredRepository === undefined) {
+    if (configuredInstallation === undefined || configuredRepository === undefined) {
       throw new PullRequestEligibilityError(
         `${reference.owner}/${reference.repository} is not in the configured repository allowlist.`,
       );
@@ -1443,7 +1448,7 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
         settleEffect(this.#fetch(`${this.#apiBase}/app`, { headers, signal }), signal),
         settleEffect(
           this.#fetch(
-            `${this.#apiBase}/app/installations/${configuration.installationId}/access_tokens`,
+            `${this.#apiBase}/app/installations/${configuredInstallation.id}/access_tokens`,
             {
               method: "POST",
               body: JSON.stringify({ repository_ids: [configuredRepository.id] }),

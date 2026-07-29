@@ -20,9 +20,17 @@ function configuration(timeouts?: { reviewMs?: number; shellCommandMs?: number }
     github: {
       userId: 42,
       appId: 7,
-      installationId: 8,
       privateKey: TEST_PRIVATE_KEY,
-      repositories: [{ id: 99, owner: "owner", name: "repository" }],
+      installations: [
+        {
+          id: 8,
+          repositories: [{ id: 99, owner: "owner", name: "repository" }],
+        },
+        {
+          id: 9,
+          repositories: [{ id: 100, owner: "other", name: "second" }],
+        },
+      ],
     },
     cloudflare: {
       accountId: "account-id",
@@ -106,7 +114,8 @@ describe("automatic queue review runner", () => {
   it("acknowledges terminal jobs and retries only operational review failures", async () => {
     const deliveries = [
       delivery("malformed", { version: 2 }),
-      delivery("wrong-installation", reviewJob({ installationId: 9 })),
+      delivery("unknown-installation", reviewJob({ installationId: 10 })),
+      delivery("cross-matched-repository", reviewJob({ installationId: 9 })),
       delivery("clean", reviewJob()),
       delivery("findings", reviewJob()),
       delivery("ineligible", reviewJob()),
@@ -179,7 +188,8 @@ describe("automatic queue review runner", () => {
 
     assert.deepEqual(acknowledgements, [
       "malformed",
-      "wrong-installation",
+      "unknown-installation",
+      "cross-matched-repository",
       "clean",
       "findings",
       "ineligible",
@@ -206,6 +216,8 @@ describe("automatic queue review runner", () => {
     assert.deepEqual(
       events.map(({ event }) => event),
       [
+        "queue_review_skipped",
+        "queue_review_skipped",
         "queue_review_started",
         "queue_review_settled",
         "queue_review_started",
@@ -216,7 +228,68 @@ describe("automatic queue review runner", () => {
         "queue_review_retried",
       ],
     );
+    assert.deepEqual(events[0]?.data, {
+      deliveryId: reviewJob().deliveryId,
+      reason: "unknown_installation",
+    });
+    assert.deepEqual(events[1]?.data, {
+      deliveryId: reviewJob().deliveryId,
+      reason: "repository_not_allowed_for_installation",
+    });
     assert.equal(events.at(-1)?.data["deliveryId"], reviewJob().deliveryId);
+  });
+
+  it("reviews matching jobs from two configured installations", async () => {
+    const deliveries = [
+      delivery("first", reviewJob()),
+      delivery(
+        "second",
+        reviewJob({
+          deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
+          installationId: 9,
+          repository: { id: 100, owner: "other", name: "second" },
+          pullRequest: {
+            ...reviewJob().pullRequest,
+            baseRepositoryId: 100,
+            headRepositoryId: 100,
+          },
+        }),
+      ),
+    ];
+    const references: string[] = [];
+    const acknowledgements: string[] = [];
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return deliveries.shift();
+        },
+        async acknowledge(leaseId) {
+          acknowledgements.push(leaseId);
+        },
+        async retry() {},
+      },
+      {
+        async review(reference) {
+          references.push(reference.url);
+          return {
+            status: "clean",
+            reviewedSha: "2".repeat(40),
+            currentSha: "2".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      new MemoryOperationalFailureStore(),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.deepEqual(acknowledgements, ["first", "second"]);
+    assert.deepEqual(references, [
+      "https://github.com/owner/repository/pull/17",
+      "https://github.com/other/second/pull/17",
+    ]);
   });
 
   it("pulls and settles at most one review at a time", async () => {

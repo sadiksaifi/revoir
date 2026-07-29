@@ -135,12 +135,13 @@ Grant these repository permissions:
 - Pull requests: read and write
 
 Subscribe only to the **Pull request** event. Install the App only on the
-repositories listed in `GITHUB_REPOSITORIES`.
+repositories listed in `GITHUB_REPOSITORIES`. The same App may be installed in
+multiple organizations or accounts.
 
 Generate and download a private key for the App. Record:
 
 - GitHub App ID
-- GitHub App installation ID
+- every GitHub App installation ID and the repositories owned by that installation
 - path to the downloaded private-key PEM
 
 Protect the PEM with mode `0600`.
@@ -189,6 +190,52 @@ Run the guided setup:
 Provide the GitHub user, repository, App, and installation IDs; the GitHub
 private-key file; and the Cloudflare account, Queue, and API-token details.
 Accept the default model and timeouts unless you need to change them.
+
+For non-interactive setup, repeat `--github-installation-id` for each
+installation and prefix each repository with the installation that owns it:
+
+```bash
+~/.local/bin/revoir setup --non-interactive \
+  --github-user-id 12345678 \
+  --github-app-id 12345 \
+  --github-installation-id 111 \
+  --github-installation-id 222 \
+  --github-private-key-file /path/to/app.private-key.pem \
+  --repository 111:123456789:OWNER/REPOSITORY \
+  --repository 222:987654321:OTHER/SECOND \
+  --cloudflare-account-id ACCOUNT_ID \
+  --cloudflare-queue-id QUEUE_ID \
+  --cloudflare-api-token-file /path/to/cloudflare-token
+```
+
+The protected configuration stores the shared App credentials once and groups
+each repository under exactly one installation:
+
+```json
+{
+  "version": 2,
+  "github": {
+    "userId": 12345678,
+    "appId": 12345,
+    "privateKey": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+    "installations": [
+      {
+        "id": 111,
+        "repositories": [{ "id": 123456789, "owner": "OWNER", "name": "REPOSITORY" }]
+      },
+      {
+        "id": 222,
+        "repositories": [{ "id": 987654321, "owner": "OTHER", "name": "SECOND" }]
+      }
+    ]
+  }
+}
+```
+
+Interactive setup asks for the comma-separated installation IDs, then for
+repositories in the
+`<installation-id>:<repository-id>:<owner>/<name>` format. This installation
+prefix is required even when only one installation is configured.
 
 Verify the installation:
 
