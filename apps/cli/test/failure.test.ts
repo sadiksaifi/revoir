@@ -84,9 +84,13 @@ describe("review failure classification", () => {
       {
         userId: 42,
         appId: 7,
-        installationId: 8,
         privateKey: "private",
-        repositories: [{ id: 99, owner: "owner", name: "repository" }],
+        installations: [
+          {
+            id: 8,
+            repositories: [{ id: 99, owner: "owner", name: "repository" }],
+          },
+        ],
       },
       gateway,
     );

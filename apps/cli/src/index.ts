@@ -1,7 +1,11 @@
 export {
   createConfiguration,
+  configuredRepositories,
   DEFAULT_MODEL,
   DEFAULT_REASONING,
+  installationForRepository,
+  type GitHubConfiguration,
+  type GitHubInstallation,
   type ReasoningLevel,
   type RepositoryIdentity,
   type RevoirConfiguration,

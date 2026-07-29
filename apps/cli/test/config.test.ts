@@ -82,9 +82,8 @@ describe("configuration schema", () => {
       github: {
         userId: 42,
         appId: 7,
-        installationId: 8,
         privateKey: TEST_PRIVATE_KEY,
-        repositories: [{ id: 99, owner: "owner", name: "repo" }],
+        installations: [{ id: 8, repositories: [{ id: 99, owner: "owner", name: "repo" }] }],
       },
       cloudflare: {
         accountId: "account",
@@ -109,9 +108,8 @@ describe("configuration schema", () => {
       github: {
         userId: 42,
         appId: 7,
-        installationId: 8,
         privateKey: TEST_PRIVATE_KEY,
-        repositories: [{ id: 99, owner: "owner", name: "repo" }],
+        installations: [{ id: 8, repositories: [{ id: 99, owner: "owner", name: "repo" }] }],
       },
       cloudflare: {
         accountId: "account",
@@ -152,19 +150,87 @@ describe("configuration schema", () => {
       () =>
         validateConfiguration({
           ...base,
-          version: 2,
+          version: 1,
           model: { id: "anthropic/opus", reasoning: "extreme" },
-          github: { ...base.github, userId: "42", repositories: [] },
+          github: { ...base.github, userId: "42", installations: [] },
         }),
       (error) => {
         assert.ok(error instanceof ConfigurationValidationError);
-        assert.match(error.message, /version must be 1/u);
+        assert.match(error.message, /version must be 2/u);
         assert.match(error.message, /openai-codex/u);
         assert.match(error.message, /model\.reasoning/u);
         assert.match(error.message, /github\.userId/u);
-        assert.match(error.message, /at least one repository/u);
+        assert.match(error.message, /at least one installation group/u);
         return true;
       },
+    );
+  });
+
+  it("accepts multiple installation groups and rejects ambiguous mappings", () => {
+    const base = createTestConfiguration({
+      cacheDir: "/cache",
+      stateDir: "/state",
+      dataDir: "/data",
+    });
+    const secondRepository = { id: 100, owner: "other", name: "second" };
+    const multiple = validateConfiguration({
+      ...base,
+      github: {
+        ...base.github,
+        installations: [...base.github.installations, { id: 9, repositories: [secondRepository] }],
+      },
+    });
+    assert.equal(multiple.github.installations.length, 2);
+
+    assert.throws(
+      () =>
+        validateConfiguration({
+          ...base,
+          github: {
+            ...base.github,
+            installations: [
+              ...base.github.installations,
+              { id: 8, repositories: [secondRepository] },
+            ],
+          },
+        }),
+      /duplicate installation id 8/u,
+    );
+    assert.throws(
+      () =>
+        validateConfiguration({
+          ...base,
+          github: {
+            ...base.github,
+            installations: [
+              ...base.github.installations,
+              { id: 9, repositories: [base.github.installations[0]?.repositories[0]] },
+            ],
+          },
+        }),
+      /assigns repository id 99 more than once[\s\S]+assigns repository owner\/repository more than once/u,
+    );
+    assert.throws(
+      () =>
+        validateConfiguration({
+          ...base,
+          github: {
+            ...base.github,
+            installations: [...base.github.installations, { id: 9, repositories: [] }],
+          },
+        }),
+      /installations\[1\]\.repositories must contain at least one repository/u,
+    );
+    assert.throws(
+      () =>
+        validateConfiguration({
+          ...base,
+          github: {
+            ...base.github,
+            installations: [{ id: 0, repositories: [secondRepository] }],
+          },
+        }),
+      /installations\[0\]\.id must be a positive integer/u,
     );
   });
 

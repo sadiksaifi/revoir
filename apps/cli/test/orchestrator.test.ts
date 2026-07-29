@@ -90,9 +90,13 @@ function configuration(reviewMs = 60_000) {
     github: {
       userId: 42,
       appId: 7,
-      installationId: 8,
       privateKey: TEST_PRIVATE_KEY,
-      repositories: [{ id: 99, owner: "owner", name: "repository" }],
+      installations: [
+        {
+          id: 8,
+          repositories: [{ id: 99, owner: "owner", name: "repository" }],
+        },
+      ],
     },
     cloudflare: {
       accountId: "account",

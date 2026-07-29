@@ -56,8 +56,8 @@ Usage:
   revoir --version
 
 Commands:
-  setup       Create the protected local configuration and validate the installation.
-  diagnose    Non-interactively validate an existing installation.
+  setup       Create the protected local configuration and validate all installations.
+  diagnose    Non-interactively validate the configured installations.
   review      Review one eligible pull request and publish validated findings or a clean result.
   run         Pull and settle eligible webhook review jobs one at a time.
   install     Generate, load, and start the per-user macOS LaunchAgent.
@@ -73,9 +73,10 @@ Setup options:
   --reasoning <minimal|low|medium|high|xhigh>
   --github-user-id <id>
   --github-app-id <id>
-  --github-installation-id <id>
+  --github-installation-id <id>      Repeat for each GitHub App installation.
   --github-private-key-file <path>
-  --repository <id:owner/name>       Repeat for each allowed repository.
+  --repository <installation-id:id:owner/name>
+                                      Repeat for each allowed repository.
   --cloudflare-account-id <id>
   --cloudflare-queue-id <id>
   --cloudflare-api-token-file <path>

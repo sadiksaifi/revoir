@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 
-export const CONFIG_VERSION = 1 as const;
+export const CONFIG_VERSION = 2 as const;
 export const DEFAULT_MODEL = "openai-codex/gpt-5.6-sol";
 export const DEFAULT_REASONING = "high" as const;
 export const DEFAULT_REVIEW_TIMEOUT_MS = 20 * 60 * 1000;
@@ -15,19 +15,25 @@ export interface RepositoryIdentity {
   name: string;
 }
 
+export interface GitHubInstallation {
+  id: number;
+  repositories: RepositoryIdentity[];
+}
+
+export interface GitHubConfiguration {
+  userId: number;
+  appId: number;
+  privateKey: string;
+  installations: GitHubInstallation[];
+}
+
 export interface RevoirConfiguration {
   version: typeof CONFIG_VERSION;
   model: {
     id: string;
     reasoning: ReasoningLevel;
   };
-  github: {
-    userId: number;
-    appId: number;
-    installationId: number;
-    privateKey: string;
-    repositories: RepositoryIdentity[];
-  };
+  github: GitHubConfiguration;
   cloudflare: {
     accountId: string;
     queueId: string;
@@ -121,10 +127,9 @@ function readAbsolutePath(value: unknown, path: string, issues: string[]): strin
 
 function parseRepository(
   value: unknown,
-  index: number,
+  path: string,
   issues: string[],
 ): RepositoryIdentity | undefined {
-  const path = `github.repositories[${index}]`;
   const repository = readObject(value, path, issues);
   if (repository === undefined) {
     return undefined;
@@ -143,6 +148,57 @@ function parseRepository(
     issues.push(`${path}.name is not a valid GitHub repository name.`);
   }
   return { id, owner, name };
+}
+
+function parseInstallation(
+  value: unknown,
+  index: number,
+  issues: string[],
+): GitHubInstallation | undefined {
+  const path = `github.installations[${index}]`;
+  const installation = readObject(value, path, issues);
+  if (installation === undefined) {
+    return undefined;
+  }
+  checkKeys(installation, path, ["id", "repositories"], issues);
+  const id = readPositiveInteger(installation.id, `${path}.id`, issues);
+  const repositoriesValue = installation.repositories;
+  const repositories: RepositoryIdentity[] = [];
+  if (!Array.isArray(repositoriesValue) || repositoriesValue.length === 0) {
+    issues.push(`${path}.repositories must contain at least one repository.`);
+  } else {
+    for (const [repositoryIndex, repository] of repositoriesValue.entries()) {
+      const parsed = parseRepository(
+        repository,
+        `${path}.repositories[${repositoryIndex}]`,
+        issues,
+      );
+      if (parsed !== undefined) {
+        repositories.push(parsed);
+      }
+    }
+  }
+  return id === undefined ? undefined : { id, repositories };
+}
+
+export function configuredRepositories(
+  configuration: GitHubConfiguration,
+): readonly RepositoryIdentity[] {
+  return configuration.installations.flatMap((installation) => installation.repositories);
+}
+
+export function installationForRepository(
+  configuration: GitHubConfiguration,
+  owner: string,
+  name: string,
+): GitHubInstallation | undefined {
+  return configuration.installations.find((installation) =>
+    installation.repositories.some(
+      (repository) =>
+        repository.owner.toLowerCase() === owner.toLowerCase() &&
+        repository.name.toLowerCase() === name.toLowerCase(),
+    ),
+  );
 }
 
 export function validateConfiguration(value: unknown): RevoirConfiguration {
@@ -180,21 +236,12 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
 
   const github = readObject(root.github, "github", issues);
   if (github !== undefined) {
-    checkKeys(
-      github,
-      "github",
-      ["userId", "appId", "installationId", "privateKey", "repositories"],
-      issues,
-    );
+    checkKeys(github, "github", ["userId", "appId", "privateKey", "installations"], issues);
   }
   const userId =
     github === undefined ? undefined : readPositiveInteger(github.userId, "github.userId", issues);
   const appId =
     github === undefined ? undefined : readPositiveInteger(github.appId, "github.appId", issues);
-  const installationId =
-    github === undefined
-      ? undefined
-      : readPositiveInteger(github.installationId, "github.installationId", issues);
   const privateKey =
     github === undefined ? undefined : readString(github.privateKey, "github.privateKey", issues);
   if (
@@ -206,29 +253,38 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
     issues.push("github.privateKey must be a PEM-encoded private key.");
   }
 
-  const repositoriesValue = github?.repositories;
-  const repositories: RepositoryIdentity[] = [];
-  if (!Array.isArray(repositoriesValue) || repositoriesValue.length === 0) {
-    issues.push("github.repositories must contain at least one repository.");
+  const installationsValue = github?.installations;
+  const installations: GitHubInstallation[] = [];
+  if (!Array.isArray(installationsValue) || installationsValue.length === 0) {
+    issues.push("github.installations must contain at least one installation group.");
   } else {
-    for (const [index, repository] of repositoriesValue.entries()) {
-      const parsed = parseRepository(repository, index, issues);
+    for (const [index, installation] of installationsValue.entries()) {
+      const parsed = parseInstallation(installation, index, issues);
       if (parsed !== undefined) {
-        repositories.push(parsed);
+        installations.push(parsed);
       }
     }
+    const installationIds = new Set<number>();
     const ids = new Set<number>();
     const names = new Set<string>();
-    for (const repository of repositories) {
-      const fullName = `${repository.owner}/${repository.name}`.toLowerCase();
-      if (ids.has(repository.id)) {
-        issues.push(`github.repositories contains duplicate repository id ${repository.id}.`);
+    for (const installation of installations) {
+      if (installationIds.has(installation.id)) {
+        issues.push(`github.installations contains duplicate installation id ${installation.id}.`);
       }
-      if (names.has(fullName)) {
-        issues.push(`github.repositories contains duplicate repository ${fullName}.`);
+      installationIds.add(installation.id);
+      for (const repository of installation.repositories) {
+        const fullName = `${repository.owner}/${repository.name}`.toLowerCase();
+        if (ids.has(repository.id)) {
+          issues.push(
+            `github.installations assigns repository id ${repository.id} more than once.`,
+          );
+        }
+        if (names.has(fullName)) {
+          issues.push(`github.installations assigns repository ${fullName} more than once.`);
+        }
+        ids.add(repository.id);
+        names.add(fullName);
       }
-      ids.add(repository.id);
-      names.add(fullName);
     }
   }
 
@@ -279,7 +335,6 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
     typeof reasoning !== "string" ||
     userId === undefined ||
     appId === undefined ||
-    installationId === undefined ||
     privateKey === undefined ||
     accountId === undefined ||
     queueId === undefined ||
@@ -299,9 +354,8 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
     github: {
       userId,
       appId,
-      installationId,
       privateKey,
-      repositories,
+      installations,
     },
     cloudflare: { accountId, queueId, apiToken },
     timeouts: { reviewMs, shellCommandMs },

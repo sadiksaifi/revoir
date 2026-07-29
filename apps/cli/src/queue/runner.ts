@@ -53,20 +53,42 @@ const NOOP_LOGGER: QueueRunLogger = {
   async write() {},
 };
 
-function locallyEligible(job: ReviewJobV1, configuration: RevoirConfiguration["github"]): boolean {
-  if (
-    job.installationId !== configuration.installationId ||
-    job.pullRequest.authorId !== configuration.userId ||
-    job.pullRequest.senderId !== configuration.userId
-  ) {
-    return false;
+type LocalEligibility =
+  | { eligible: true }
+  | {
+      eligible: false;
+      reason:
+        | "unknown_installation"
+        | "repository_not_allowed_for_installation"
+        | "author_or_sender_not_allowed";
+    };
+
+function localEligibility(
+  job: ReviewJobV1,
+  configuration: RevoirConfiguration["github"],
+): LocalEligibility {
+  const installation = configuration.installations.find(
+    (candidate) => candidate.id === job.installationId,
+  );
+  if (installation === undefined) {
+    return { eligible: false, reason: "unknown_installation" };
   }
-  return configuration.repositories.some(
+  const repositoryAllowed = installation.repositories.some(
     (repository) =>
       repository.id === job.repository.id &&
       repository.owner.toLowerCase() === job.repository.owner.toLowerCase() &&
       repository.name.toLowerCase() === job.repository.name.toLowerCase(),
   );
+  if (!repositoryAllowed) {
+    return { eligible: false, reason: "repository_not_allowed_for_installation" };
+  }
+  if (
+    job.pullRequest.authorId !== configuration.userId ||
+    job.pullRequest.senderId !== configuration.userId
+  ) {
+    return { eligible: false, reason: "author_or_sender_not_allowed" };
+  }
+  return { eligible: true };
 }
 
 function referenceFor(job: ReviewJobV1): PullRequestReference {
@@ -281,9 +303,14 @@ export class QueueReviewRunner implements QueueRunService {
       return "settled";
     }
 
-    if (!locallyEligible(job, this.#configuration.github)) {
+    const eligibility = localEligibility(job, this.#configuration.github);
+    if (!eligibility.eligible) {
       await this.#queue.acknowledge(delivery.leaseId, signal);
       await this.#clearFailureState(job.deliveryId);
+      await this.#logger.write("queue_review_skipped", {
+        deliveryId: job.deliveryId,
+        reason: eligibility.reason,
+      });
       return "settled";
     }
 

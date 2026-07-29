@@ -128,6 +128,42 @@ describe("GitHub App review gateway", () => {
     );
   });
 
+  it("mints the token for the installation that owns the requested repository", async () => {
+    const requestedUrls: string[] = [];
+    const secondReference = parsePullRequestUrl("https://github.com/other/second/pull/18");
+    const github = {
+      ...configuration.github,
+      installations: [
+        ...configuration.github.installations,
+        {
+          id: 9,
+          repositories: [{ id: 100, owner: "other", name: "second" }],
+        },
+      ],
+    };
+    const session = await new GitHubAppReviewGateway(
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        return url.endsWith("/app")
+          ? json({ slug: "revoir-test" })
+          : json({ token: "installation-9-secret" });
+      },
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(github, secondReference, new AbortController().signal);
+
+    assert.equal(session.installationToken, "installation-9-secret");
+    assert.equal(
+      requestedUrls.some((url) => url.endsWith("/app/installations/9/access_tokens")),
+      true,
+    );
+    assert.equal(
+      requestedUrls.some((url) => url.endsWith("/app/installations/8/access_tokens")),
+      false,
+    );
+  });
+
   it("uses an installation token for PR lookup and exact reaction reconciliation", async () => {
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const abortController = new AbortController();

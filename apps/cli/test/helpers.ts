@@ -1,7 +1,11 @@
 import { generateKeyPairSync } from "node:crypto";
 
 import type { ApplicationPaths } from "../src/config/paths.js";
-import { createConfiguration, type RevoirConfiguration } from "../src/config/schema.js";
+import {
+  configuredRepositories,
+  createConfiguration,
+  type RevoirConfiguration,
+} from "../src/config/schema.js";
 import type { DiagnosticGateway } from "../src/diagnostics.js";
 
 export const TEST_PRIVATE_KEY = generateKeyPairSync("rsa", {
@@ -21,9 +25,13 @@ export function createTestConfiguration(
     github: {
       userId: 42,
       appId: 7,
-      installationId: 8,
       privateKey: overrides.privateKey ?? TEST_PRIVATE_KEY,
-      repositories: [{ id: 99, owner: "owner", name: "repository" }],
+      installations: [
+        {
+          id: 8,
+          repositories: [{ id: 99, owner: "owner", name: "repository" }],
+        },
+      ],
     },
     cloudflare: {
       accountId: "account",
@@ -52,7 +60,7 @@ export function passingGateway(): DiagnosticGateway {
     async checkGitHub(configuration) {
       return {
         app: `test-app, author test-user (${configuration.userId})`,
-        repositories: configuration.repositories
+        repositories: configuredRepositories(configuration)
           .map((repository) => `${repository.owner}/${repository.name}`)
           .join(", "),
       };

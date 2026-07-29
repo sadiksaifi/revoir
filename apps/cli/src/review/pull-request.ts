@@ -1,4 +1,8 @@
-import type { RepositoryIdentity, RevoirConfiguration } from "../config/schema.js";
+import {
+  configuredRepositories,
+  type RepositoryIdentity,
+  type RevoirConfiguration,
+} from "../config/schema.js";
 
 const GITHUB_OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
 const GITHUB_REPOSITORY = /^[A-Za-z0-9._-]+$/u;
@@ -112,7 +116,7 @@ export function assertPullRequestEligible(
   snapshot: PullRequestSnapshot,
   configuration: RevoirConfiguration["github"],
 ): RepositoryIdentity {
-  const repository = configuredRepository(reference, configuration.repositories);
+  const repository = configuredRepository(reference, configuredRepositories(configuration));
   if (repository === undefined) {
     throw new PullRequestEligibilityError(
       `${reference.owner}/${reference.repository} is not in the configured repository allowlist.`,

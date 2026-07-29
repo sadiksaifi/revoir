@@ -44,14 +44,18 @@ function memoryFailureStore(
 }
 
 const configuration: RevoirConfiguration = {
-  version: 1,
+  version: 2,
   model: { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
   github: {
     userId: 42,
     appId: 7,
-    installationId: 8,
     privateKey: "unused by fake review service",
-    repositories: [{ id: 99, owner: "owner", name: "repository" }],
+    installations: [
+      {
+        id: 8,
+        repositories: [{ id: 99, owner: "owner", name: "repository" }],
+      },
+    ],
   },
   cloudflare: {
     accountId: "account-id",

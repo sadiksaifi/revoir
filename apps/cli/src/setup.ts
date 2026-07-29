@@ -21,7 +21,7 @@ export interface SetupOptions {
   reasoning?: string;
   githubUserId?: string;
   githubAppId?: string;
-  githubInstallationId?: string;
+  githubInstallationIds: string[];
   githubPrivateKeyFile?: string;
   repositories: string[];
   cloudflareAccountId?: string;
@@ -42,7 +42,11 @@ function takeValue(arguments_: readonly string[], index: number, option: string)
 }
 
 export function parseSetupOptions(arguments_: readonly string[]): SetupOptions {
-  const options: SetupOptions = { nonInteractive: false, repositories: [] };
+  const options: SetupOptions = {
+    nonInteractive: false,
+    githubInstallationIds: [],
+    repositories: [],
+  };
   for (let index = 0; index < arguments_.length; index += 1) {
     const option = arguments_[index];
     if (option === "--non-interactive") {
@@ -65,7 +69,7 @@ export function parseSetupOptions(arguments_: readonly string[]): SetupOptions {
         options.githubAppId = value;
         break;
       case "--github-installation-id":
-        options.githubInstallationId = value;
+        options.githubInstallationIds.push(value);
         break;
       case "--github-private-key-file":
         options.githubPrivateKeyFile = value;
@@ -137,6 +141,38 @@ export function parseRepository(value: string): RepositoryIdentity {
   };
 }
 
+interface RepositoryAssignment {
+  installationId: number;
+  repository: RepositoryIdentity;
+}
+
+function parseRepositoryAssignment(
+  value: string,
+  onlyInstallationId?: number,
+): RepositoryAssignment {
+  const match =
+    /^(?<installationId>[1-9]\d*):(?<repositoryId>[1-9]\d*):(?<owner>[^/]+)\/(?<name>[^/]+)$/u.exec(
+      value.trim(),
+    );
+  if (match?.groups !== undefined) {
+    return {
+      installationId: parsePositiveInteger(
+        match.groups.installationId ?? "",
+        "GitHub App installation id",
+      ),
+      repository: parseRepository(
+        `${match.groups.repositoryId ?? ""}:${match.groups.owner ?? ""}/${match.groups.name ?? ""}`,
+      ),
+    };
+  }
+  if (onlyInstallationId !== undefined) {
+    return { installationId: onlyInstallationId, repository: parseRepository(value) };
+  }
+  throw new Error(
+    `Repository "${value}" must use the "<installation-id>:<repository-id>:<owner>/<name>" format.`,
+  );
+}
+
 async function readCredentialFile(
   file: string,
   label: string,
@@ -179,13 +215,20 @@ export async function collectSetupConfiguration(
     await valueOrPrompt(options.githubAppId, "GitHub App id", effectivePrompt),
     "GitHub App id",
   );
-  const installationId = parsePositiveInteger(
-    await valueOrPrompt(
-      options.githubInstallationId,
-      "GitHub App installation id",
+  let installationIdValues = options.githubInstallationIds;
+  if (installationIdValues.length === 0) {
+    const answer = await valueOrPrompt(
+      undefined,
+      "GitHub App installation ids (comma separated)",
       effectivePrompt,
-    ),
-    "GitHub App installation id",
+    );
+    installationIdValues = answer
+      .split(",")
+      .map((installationId) => installationId.trim())
+      .filter((installationId) => installationId !== "");
+  }
+  const installationIds = installationIdValues.map((installationId) =>
+    parsePositiveInteger(installationId, "GitHub App installation id"),
   );
   const privateKeyFile = await valueOrPrompt(
     options.githubPrivateKeyFile,
@@ -197,7 +240,7 @@ export async function collectSetupConfiguration(
   if (repositoryValues.length === 0) {
     const answer = await valueOrPrompt(
       undefined,
-      "Allowed repositories (<id>:<owner>/<name>, comma separated)",
+      "Allowed repositories (<installation-id>:<repository-id>:<owner>/<name>, comma separated)",
       effectivePrompt,
     );
     repositoryValues = answer
@@ -245,14 +288,30 @@ export async function collectSetupConfiguration(
     readCredentialFile(apiTokenFile, "Cloudflare API token", readTextFile),
   ]);
 
+  const onlyInstallationId = installationIds.length === 1 ? installationIds[0] : undefined;
+  const assignments = repositoryValues.map((repository) =>
+    parseRepositoryAssignment(repository, onlyInstallationId),
+  );
+  for (const assignment of assignments) {
+    if (!installationIds.includes(assignment.installationId)) {
+      throw new Error(
+        `Repository ${assignment.repository.owner}/${assignment.repository.name} references unconfigured GitHub App installation ${assignment.installationId}.`,
+      );
+    }
+  }
+
   return createConfiguration({
     model: { id: model, reasoning: reasoning as ReasoningLevel },
     github: {
       userId,
       appId,
-      installationId,
       privateKey,
-      repositories: repositoryValues.map(parseRepository),
+      installations: installationIds.map((installationId) => ({
+        id: installationId,
+        repositories: assignments
+          .filter((assignment) => assignment.installationId === installationId)
+          .map((assignment) => assignment.repository),
+      })),
     },
     cloudflare: {
       accountId,
