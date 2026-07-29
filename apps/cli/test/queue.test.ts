@@ -109,6 +109,39 @@ describe("Cloudflare Queue pull client", () => {
     });
   });
 
+  it("accepts Cloudflare's zero attempt count for a first delivery", async () => {
+    const client = new CloudflareQueueClient(
+      {
+        accountId: "account-id",
+        queueId: "queue-id",
+        apiToken: "queue-token",
+      },
+      1_200_000,
+      async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            result: {
+              messages: [
+                {
+                  body: Buffer.from(JSON.stringify(reviewJob())).toString("base64"),
+                  attempts: 0,
+                  metadata: { "CF-Content-Type": "json" },
+                  lease_id: "lease-first",
+                },
+              ],
+            },
+          }),
+        ),
+    );
+
+    assert.deepEqual(await client.pullOne(), {
+      leaseId: "lease-first",
+      attempt: 1,
+      body: reviewJob(),
+    });
+  });
+
   it("preserves a malformed job lease so the consumer can settle it", async () => {
     const requests: Request[] = [];
     const client = new CloudflareQueueClient(
