@@ -12,6 +12,7 @@ import {
 import type { ReviewFailureReporter } from "../src/review/failure-reporter.js";
 import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
+import { WorkspacePreparationError } from "../src/review/workspace.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
 
 function configuration(timeouts?: { reviewMs?: number; shellCommandMs?: number }) {
@@ -2432,6 +2433,75 @@ describe("automatic queue review runner", () => {
         .filter((state) => state.reservation !== undefined)
         .map((state) => state.reservation?.slot),
       [1, 1],
+    );
+  });
+
+  it("preserves nested aggregate cancellation without treating cleanup failures as cancellation", async () => {
+    const cancellationController = new AbortController();
+    const cancellation = new Error("stop during Git preparation");
+    const unrelatedController = new AbortController();
+    const unrelatedCancellation = new Error("stop after unrelated Git failure");
+    const deliveries = [
+      delivery("aggregate-cancelled", reviewJob(), 7),
+      delivery("aggregate-unrelated", reviewJob(), 8),
+      delivery("aggregate-reused", reviewJob(), 9),
+    ];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge() {},
+      async retry() {
+        assert.fail("Cancellation paths must not retry.");
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        if (reviews === 1) {
+          cancellationController.abort(cancellation);
+          throw new WorkspacePreparationError(
+            new Error("Git command wrapper", {
+              cause: new AggregateError([new Error("process wrapper", { cause: cancellation })]),
+            }),
+            new Error("partial workspace cleanup failed"),
+            async () => {},
+          );
+        }
+        if (reviews === 2) {
+          unrelatedController.abort(unrelatedCancellation);
+          throw new WorkspacePreparationError(
+            new Error("Git clone failed"),
+            new Error("partial workspace cleanup failed"),
+            async () => {},
+          );
+        }
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviewService,
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(cancellationController.signal), cancellation);
+    await assert.rejects(runner.consumeOne(unrelatedController.signal), unrelatedCancellation);
+    await runner.consumeOne();
+
+    assert.deepEqual(
+      failures.saves
+        .filter((state) => state.reservation !== undefined)
+        .map((state) => state.reservation?.slot),
+      [1, 1, 2],
     );
   });
 
