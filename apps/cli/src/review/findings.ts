@@ -5,9 +5,6 @@ import {
   FINDING_CONTRACT_VERSION,
   parseModelFinding,
   parseModelReviewOutput,
-  type FindingDefectKind,
-  type FindingFixAction,
-  type FindingImpactKind,
   type FindingV1,
   type ModelFindingV1,
 } from "@revoir/contracts";
@@ -56,28 +53,6 @@ export interface ValidatedReviewOutput {
 
 const commandRunner = new SystemCommandRunner();
 
-const ALLOWED_IMPACTS: Readonly<Record<FindingDefectKind, readonly FindingImpactKind[]>> = {
-  correctness: ["incorrect-result", "operation-failure", "data-loss"],
-  validation: ["incorrect-result", "operation-failure", "security-exposure"],
-  "resource-lifecycle": ["resource-leak", "operation-failure", "execution-stall"],
-  concurrency: ["incorrect-result", "data-loss", "execution-stall"],
-  security: ["security-exposure", "data-loss"],
-  compatibility: ["compatibility-break", "operation-failure"],
-  "error-handling": ["operation-failure", "resource-leak"],
-  "test-coverage": ["regression-risk"],
-};
-
-const ALLOWED_ACTIONS: Readonly<Record<FindingDefectKind, readonly FindingFixAction[]>> = {
-  correctness: ["guard", "preserve", "propagate", "restore"],
-  validation: ["guard", "validate"],
-  "resource-lifecycle": ["guard", "release", "restore"],
-  concurrency: ["guard", "propagate", "synchronize", "release"],
-  security: ["guard", "validate", "preserve", "restore"],
-  compatibility: ["preserve", "propagate", "restore"],
-  "error-handling": ["guard", "propagate", "release", "restore"],
-  "test-coverage": ["add-test"],
-};
-
 export class FindingContractError extends Error {
   readonly diagnostics: readonly FindingDiagnostic[];
 
@@ -90,17 +65,6 @@ export class FindingContractError extends Error {
     this.name = "FindingContractError";
     this.diagnostics = diagnostics;
   }
-}
-
-function validateFindingSemantics(finding: ModelFindingV1, index: number): ModelFindingV1 {
-  const path = `findings[${index}]`;
-  if (!ALLOWED_IMPACTS[finding.defectKind].includes(finding.impactKind)) {
-    throw new Error(`${path}.impactKind is incompatible with defectKind.`);
-  }
-  if (!ALLOWED_ACTIONS[finding.defectKind].includes(finding.fixAction)) {
-    throw new Error(`${path}.fixAction is incompatible with defectKind.`);
-  }
-  return finding;
 }
 
 function safeRepositoryPath(value: string): string {
@@ -358,7 +322,7 @@ export async function validateModelReviewOutput(
   const candidates: ValidatedCandidate[] = [];
   for (const [index, candidate] of envelope.findings.entries()) {
     try {
-      const modelFinding = validateFindingSemantics(parseModelFinding(candidate, index), index);
+      const modelFinding = parseModelFinding(candidate, index);
       const repositoryPath = safeRepositoryPath(modelFinding.path);
       if (!classifyReviewFile(repositoryPath).detailedReview) {
         throw new Error("path is excluded from detailed review by the fixed file policy.");

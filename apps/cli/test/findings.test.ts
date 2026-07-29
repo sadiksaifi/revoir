@@ -519,7 +519,7 @@ describe("finding validation", () => {
     }
   });
 
-  it("rejects unknown and incompatible semantic values with static diagnostics", async () => {
+  it("rejects unknown semantic values with static diagnostics", async () => {
     const privateValue = "PRIVATE_MODEL_VALUE";
     const result = await validateModelReviewOutput(
       output([
@@ -527,17 +527,15 @@ describe("finding validation", () => {
         finding({ defectKind: privateValue }),
         finding({ impactKind: privateValue }),
         finding({ fixAction: privateValue }),
-        finding({ defectKind: "security", impactKind: "resource-leak" }),
-        finding({ defectKind: "security", impactKind: "security-exposure", fixAction: "release" }),
       ]),
       { checkout, diff: DIFF },
     );
 
     assert.equal(result.findings.length, 1);
-    assert.equal(result.diagnostics.length, 5);
+    assert.equal(result.diagnostics.length, 3);
     for (const diagnostic of result.diagnostics) {
       assert.equal(diagnostic.message.includes(privateValue), false);
-      assert.match(diagnostic.message, /supported|incompatible/u);
+      assert.match(diagnostic.message, /supported/u);
     }
     assert.equal(
       JSON.stringify(createReviewPublication("1".repeat(40), result.findings)).includes(
@@ -545,6 +543,45 @@ describe("finding validation", () => {
       ),
       false,
     );
+  });
+
+  it("accepts contract enums as independent semantic dimensions", async () => {
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          defectKind: "concurrency",
+          impactKind: "operation-failure",
+          fixAction: "synchronize",
+        }),
+        finding({
+          defectKind: "correctness",
+          impactKind: "incorrect-result",
+          fixAction: "validate",
+        }),
+      ]),
+      { checkout, diff: DIFF },
+    );
+
+    assert.deepEqual(
+      result.findings.map(({ defectKind, impactKind, fixAction }) => ({
+        defectKind,
+        impactKind,
+        fixAction,
+      })),
+      [
+        {
+          defectKind: "concurrency",
+          impactKind: "operation-failure",
+          fixAction: "synchronize",
+        },
+        {
+          defectKind: "correctness",
+          impactKind: "incorrect-result",
+          fixAction: "validate",
+        },
+      ],
+    );
+    assert.deepEqual(result.diagnostics, []);
   });
 
   it("requires an exact technical anchor in the selected authoritative change", async () => {
