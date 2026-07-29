@@ -649,6 +649,30 @@ describe("finding validation", () => {
     }
   });
 
+  it("accepts an exact changed-line anchor longer than 160 characters", async () => {
+    const anchor = `const value = "${"x".repeat(180)}";`;
+    const diff = `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1 @@
+-const previous = true;
++${anchor}
+`;
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          range: { start: 1, end: 1, side: "RIGHT" },
+          anchor,
+        }),
+      ]),
+      { checkout, diff },
+    );
+
+    assert.equal(result.findings[0]?.anchor, anchor);
+    assert.deepEqual(result.diagnostics, []);
+  });
+
   it("rejects a punctuation substring that does not identify a complete changed line", async () => {
     await assert.rejects(
       () =>

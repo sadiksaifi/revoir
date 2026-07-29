@@ -851,7 +851,7 @@ describe("CLI", () => {
       }),
       1,
     );
-    assert.match(stderr.output, /anchor must contain 1-160 trimmed characters/u);
+    assert.match(stderr.output, /anchor must contain 1-4096 trimmed characters/u);
     assert.doesNotMatch(stderr.output, new RegExp(modelAnchor.trim(), "u"));
     assert.doesNotMatch(stderr.output, /PRIVATE_IMPACT_SOURCE/u);
     assert.equal(stdout.output, "");
