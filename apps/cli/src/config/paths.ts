@@ -1,0 +1,58 @@
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
+
+export interface ApplicationPaths {
+  configDir: string;
+  configFile: string;
+  cacheDir: string;
+  stateDir: string;
+  dataDir: string;
+}
+
+export type PathEnvironment = Readonly<Record<string, string | undefined>>;
+
+function resolveXdgBase(
+  environment: PathEnvironment,
+  name: "XDG_CONFIG_HOME" | "XDG_CACHE_HOME" | "XDG_STATE_HOME" | "XDG_DATA_HOME",
+  fallback: string,
+): string {
+  const configured = environment[name];
+  if (configured === undefined || configured === "") {
+    return fallback;
+  }
+  if (!isAbsolute(configured)) {
+    throw new Error(`${name} must be an absolute path, received "${configured}".`);
+  }
+  return configured;
+}
+
+export function resolveApplicationPaths(
+  environment: PathEnvironment = process.env,
+  userHome = homedir(),
+): ApplicationPaths {
+  if (!isAbsolute(userHome)) {
+    throw new Error(`The user home directory must be an absolute path, received "${userHome}".`);
+  }
+
+  const configDir = join(
+    resolveXdgBase(environment, "XDG_CONFIG_HOME", join(userHome, ".config")),
+    "revoir",
+  );
+
+  return {
+    configDir,
+    configFile: join(configDir, "config.json"),
+    cacheDir: join(
+      resolveXdgBase(environment, "XDG_CACHE_HOME", join(userHome, ".cache")),
+      "revoir",
+    ),
+    stateDir: join(
+      resolveXdgBase(environment, "XDG_STATE_HOME", join(userHome, ".local", "state")),
+      "revoir",
+    ),
+    dataDir: join(
+      resolveXdgBase(environment, "XDG_DATA_HOME", join(userHome, ".local", "share")),
+      "revoir",
+    ),
+  };
+}

@@ -1,0 +1,13 @@
+diff --git a/lib-es5/sea.js b/lib-es5/sea.js
+index a60fa0dc7c69cf815db84864fb8dc8c1d28525ad..7694b30c5fef66c1f39eb57a19a07b423666d44a 100644
+--- a/lib-es5/sea.js
++++ b/lib-es5/sea.js
+@@ -639,7 +639,7 @@ async function seaEnhanced(entryPoint, opts) {
+         // already throws earlier — this is just a defensive default.
+         const blobPath = (0, path_1.join)(tmpDir, 'sea-prep.blob');
+         const seaConfig = {
+-            main: bootstrapPath,
++            main: 'sea-main.js',
+             output: blobPath,
+             disableExperimentalSEAWarning: true,
+             useCodeCache: opts.seaConfig?.useCodeCache ?? false,
