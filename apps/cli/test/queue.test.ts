@@ -142,6 +142,39 @@ describe("Cloudflare Queue pull client", () => {
     });
   });
 
+  it("accepts raw JSON bodies returned by Cloudflare", async () => {
+    const client = new CloudflareQueueClient(
+      {
+        accountId: "account-id",
+        queueId: "queue-id",
+        apiToken: "queue-token",
+      },
+      1_200_000,
+      async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            result: {
+              messages: [
+                {
+                  body: JSON.stringify(reviewJob()),
+                  attempts: 1,
+                  metadata: { "CF-Content-Type": "json" },
+                  lease_id: "lease-raw-json",
+                },
+              ],
+            },
+          }),
+        ),
+    );
+
+    assert.deepEqual(await client.pullOne(), {
+      leaseId: "lease-raw-json",
+      attempt: 1,
+      body: reviewJob(),
+    });
+  });
+
   it("preserves a malformed job lease so the consumer can settle it", async () => {
     const requests: Request[] = [];
     const client = new CloudflareQueueClient(

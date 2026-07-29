@@ -58,17 +58,18 @@ function decodeBody(message: Record<string, unknown>): unknown {
   if (!isRecord(message.metadata) || message.metadata["CF-Content-Type"] !== "json") {
     return undefined;
   }
-  if (
-    typeof message.body !== "string" ||
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(message.body)
-  ) {
+  if (typeof message.body !== "string") {
     return undefined;
   }
   try {
-    return JSON.parse(Buffer.from(message.body, "base64").toString("utf8")) as unknown;
-  } catch {
-    return undefined;
+    return JSON.parse(message.body) as unknown;
+  } catch {}
+  if (/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(message.body)) {
+    try {
+      return JSON.parse(Buffer.from(message.body, "base64").toString("utf8")) as unknown;
+    } catch {}
   }
+  return undefined;
 }
 
 export class CloudflareQueueClient {
