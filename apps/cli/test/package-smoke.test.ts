@@ -29,6 +29,7 @@ describe("packaged runtime smoke", () => {
       };
       let oauthProbes = 0;
       let imageProbes = 0;
+      let hostBoundaryProbes = 0;
       const output: string[] = [];
 
       await runPackageSmoke(
@@ -55,6 +56,9 @@ describe("packaged runtime smoke", () => {
           async probeImageRuntime() {
             imageProbes += 1;
           },
+          async probeHostBoundaries() {
+            hostBoundaryProbes += 1;
+          },
         },
       );
 
@@ -65,6 +69,7 @@ describe("packaged runtime smoke", () => {
       assert.equal(disposed, 1);
       assert.equal(oauthProbes, 1);
       assert.equal(imageProbes, 1);
+      assert.equal(hostBoundaryProbes, 1);
       assert.equal(output.length, 1);
       const summary = JSON.parse(output[0] ?? "") as Record<string, unknown>;
       assert.deepEqual(summary, {
