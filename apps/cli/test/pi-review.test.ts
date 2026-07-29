@@ -307,7 +307,7 @@ index 1111111..2222222 100644
     );
   });
 
-  it("joins late session creation and asynchronous disposal after cancellation", async () => {
+  it("force-disposes a late-created session without waiting for abort", async () => {
     let finishCreation: ((session: PiSession) => void) | undefined;
     let finishAbort: (() => void) | undefined;
     let finishDisposal: (() => void) | undefined;
@@ -370,13 +370,12 @@ index 1111111..2222222 100644
       setImmediate(resolve);
     });
     assert.equal(abortStarted, true);
-    assert.equal(disposalStarted, false);
+    assert.equal(disposalStarted, true);
     assert.equal(settled, false);
     finishAbort?.();
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
     });
-    assert.equal(disposalStarted, true);
     assert.equal(settled, false);
     assert.equal(runCalls, 0);
 
@@ -384,7 +383,7 @@ index 1111111..2222222 100644
     await assert.rejects(review, cancellation);
   });
 
-  it("memoizes and joins abort before asynchronously disposing an active session", async () => {
+  it("memoizes abort and force-disposes an active session without waiting for abort", async () => {
     let finishRun: ((value: string) => void) | undefined;
     let finishAbort: (() => void) | undefined;
     let finishDisposal: (() => void) | undefined;
@@ -445,21 +444,76 @@ index 1111111..2222222 100644
       setImmediate(resolve);
     });
     assert.equal(abortCalls, 1);
+    assert.equal(disposalStarted, true);
     assert.equal(settled, false);
     finishRun?.('{"version":1,"findings":[]}');
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
     });
-    assert.equal(disposalStarted, false);
     assert.equal(settled, false);
 
     finishAbort?.();
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
     });
-    assert.equal(disposalStarted, true);
     assert.equal(abortCalls, 1);
     finishDisposal?.();
     await assert.rejects(review, cancellation);
+  });
+
+  it("settles cancellation when an active Pi run and abort never settle", async () => {
+    let markRunStarted: (() => void) | undefined;
+    const runStarted = new Promise<void>((resolve) => {
+      markRunStarted = resolve;
+    });
+    let abortCalls = 0;
+    let disposed = 0;
+    const sessions: PiSessionFactory = {
+      async create() {
+        return {
+          async abort() {
+            abortCalls += 1;
+            return new Promise<void>(() => {});
+          },
+          async run() {
+            markRunStarted?.();
+            return new Promise<string>(() => {});
+          },
+          async dispose() {
+            disposed += 1;
+          },
+        };
+      },
+    };
+    const engine = new PiReviewEngine(
+      { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      sessions,
+    );
+    const abortController = new AbortController();
+    const cancellation = new Error("cancel stalled Pi session");
+    const review = engine.review(
+      {
+        reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+        pullRequest,
+        workspace,
+      },
+      abortController.signal,
+    );
+    void review.catch(() => {});
+    await runStarted;
+
+    abortController.abort(cancellation);
+
+    await assert.rejects(
+      Promise.race([
+        review,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("stalled Pi cancellation did not settle")), 100);
+        }),
+      ]),
+      cancellation,
+    );
+    assert.equal(abortCalls, 1);
+    assert.equal(disposed, 1);
   });
 });

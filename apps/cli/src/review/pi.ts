@@ -94,6 +94,32 @@ function throwIfAborted(signal: AbortSignal): void {
   }
 }
 
+function settleWithSignal<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  void operation.catch(() => {});
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      action();
+    };
+    const onAbort = (): void => {
+      finish(() => reject(abortReason(signal)));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void operation.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+    if (signal.aborted) {
+      onAbort();
+    }
+  });
+}
+
 export function createReviewResourceLoader(systemPrompt: string): ResourceLoader {
   return {
     getExtensions: () => ({
@@ -274,7 +300,7 @@ export class PiReviewEngine implements ReviewEngine {
     signal.addEventListener("abort", abort, { once: true });
     try {
       if (signal.aborted) {
-        await abortSession();
+        void abortSession().catch(() => {});
         throw abortReason(signal);
       }
       const context = await assembleReviewContext({
@@ -284,7 +310,10 @@ export class PiReviewEngine implements ReviewEngine {
         evidence: input.evidence ?? { completedChecks: [] },
       });
       throwIfAborted(signal);
-      const result = await session.run(renderReviewContext(context), signal);
+      const result = await settleWithSignal(
+        session.run(renderReviewContext(context), signal),
+        signal,
+      );
       throwIfAborted(signal);
       const validated = await validateModelReviewOutput(result, {
         checkout: input.workspace.checkout,
@@ -298,13 +327,12 @@ export class PiReviewEngine implements ReviewEngine {
       };
     } finally {
       signal.removeEventListener("abort", abort);
-      try {
-        if (abortPromise !== undefined) {
-          await abortPromise;
-        }
-      } finally {
-        await session.dispose();
+      if (signal.aborted) {
+        void abortSession().catch(() => {});
+      } else if (abortPromise !== undefined) {
+        await abortPromise;
       }
+      await session.dispose();
     }
   }
 }
