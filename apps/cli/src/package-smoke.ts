@@ -1,6 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -51,6 +52,7 @@ export interface PackageSmokeDependencies {
   sessions: PiSessionFactory;
   probeOAuth(): Promise<void>;
   probeImageRuntime(): Promise<void>;
+  probeNativeRuntime(): Promise<readonly string[]>;
   probeHostBoundaries(input: PackageSmokeInput): Promise<void>;
 }
 
@@ -60,6 +62,14 @@ interface ImageResizeModule {
     mimeType: string,
     options: { maxWidth: number; maxHeight: number; maxBytes: number },
   ): Promise<unknown>;
+}
+
+interface NativeModifierModule {
+  isModifierPressed(key: string): boolean;
+}
+
+interface ClipboardNativeModule {
+  clipboard: unknown;
 }
 
 function codingAgentPackageDirectory(): string {
@@ -132,6 +142,57 @@ async function probeImageRuntime(): Promise<void> {
   if (resized === null) {
     throw new Error("Packaged Pi could not load its image worker and Photon WASM runtime.");
   }
+}
+
+async function probeNativeRuntime(): Promise<readonly string[]> {
+  const sea = await import("node:sea");
+  if (!sea.isSea()) {
+    throw new Error("Native package smoke requires a Node single executable application.");
+  }
+  const manifest = JSON.parse(sea.getAsset("__pkg_manifest__", "utf8")) as {
+    offsets?: Record<string, unknown>;
+  };
+  if (manifest.offsets === undefined) {
+    throw new Error("Packaged SEA manifest is missing its file offsets.");
+  }
+  const nativeAssets = Object.keys(manifest.offsets)
+    .filter((path) => path.endsWith(".node"))
+    .toSorted();
+  const tuiEntryPoint = fileURLToPath(import.meta.resolve("@earendil-works/pi-tui"));
+  const tuiDirectory = dirname(dirname(tuiEntryPoint));
+  const nativeModifierPath = join(
+    tuiDirectory,
+    "native",
+    "darwin",
+    "prebuilds",
+    `darwin-${process.arch}`,
+    "darwin-modifiers.node",
+  );
+  const nativeModifier = createRequire(import.meta.url)(nativeModifierPath) as NativeModifierModule;
+  if (typeof nativeModifier.isModifierPressed !== "function") {
+    throw new Error("Packaged Pi TUI native modifier addon did not load.");
+  }
+  nativeModifier.isModifierPressed("shift");
+  const clipboardRequire = createRequire(
+    pathToFileURL(join(codingAgentPackageDirectory(), "package.json")).href,
+  );
+  let clipboardBinding: unknown;
+  try {
+    clipboardBinding = clipboardRequire(`@mariozechner/clipboard-darwin-${process.arch}`);
+  } catch (cause) {
+    throw new Error("Packaged host-native clipboard binding could not be required.", { cause });
+  }
+  if (typeof clipboardBinding !== "object" || clipboardBinding === null) {
+    throw new Error("Packaged host-native clipboard binding returned an invalid module.");
+  }
+  const clipboardNativeUrl = pathToFileURL(
+    join(codingAgentPackageDirectory(), "dist", "utils", "clipboard-native.js"),
+  ).href;
+  const clipboardNative = (await import(clipboardNativeUrl)) as ClipboardNativeModule;
+  if (clipboardNative.clipboard === null || clipboardNative.clipboard === undefined) {
+    throw new Error("Packaged host-native clipboard addon did not load.");
+  }
+  return nativeAssets;
 }
 
 async function runGit(arguments_: readonly string[], cwd?: string): Promise<string> {
@@ -455,6 +516,7 @@ function defaultDependencies(): PackageSmokeDependencies {
     sessions: new SdkPiSessionFactory(),
     probeOAuth,
     probeImageRuntime,
+    probeNativeRuntime,
     probeHostBoundaries,
   };
 }
@@ -484,6 +546,7 @@ export async function runPackageSmoke(
 
   await dependencies.probeOAuth();
   await dependencies.probeImageRuntime();
+  const nativeAssets = await dependencies.probeNativeRuntime();
   await dependencies.probeHostBoundaries(input);
   const session = await dependencies.sessions.create(
     {
@@ -511,6 +574,7 @@ export async function runPackageSmoke(
     JSON.stringify({
       configDir: paths.configDir,
       model,
+      nativeAssets,
       piAgentDir,
       result: "ok",
     }),

@@ -1,12 +1,17 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, glob, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { assertNoEnhancedSeaTemporaryEntrypoint } from "./release-validation.mjs";
+import {
+  assertNoEnhancedSeaTemporaryEntrypoint,
+  assertStandaloneNativeManifest,
+  standaloneNativeAssetPaths,
+  standaloneNativeRuntimeAssetPaths,
+} from "./release-validation.mjs";
 
 const cliDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(cliDirectory, "..", "..");
@@ -99,12 +104,57 @@ async function assertArtifactScan(file) {
     "providers/data/.manifest.json",
     "image-resize-worker.js",
     "photon_rs_bg.wasm",
-    "darwin-modifiers.node",
-    process.arch === "arm64" ? "clipboard.darwin-arm64.node" : "clipboard.darwin-universal.node",
+    ...standaloneNativeAssetPaths(process.arch),
   ];
   if (requiredResources.some((value) => !contents.includes(Buffer.from(value)))) {
     throw new Error("Standalone artifact is missing an explicit Pi runtime resource.");
   }
+  const foreignArchitecture = process.arch === "arm64" ? "x64" : "arm64";
+  const forbiddenNativeResources = [
+    ...standaloneNativeAssetPaths(foreignArchitecture),
+    "node_modules/@mariozechner/clipboard-darwin-universal/clipboard.darwin-universal.node",
+  ];
+  if (forbiddenNativeResources.some((value) => contents.includes(Buffer.from(value)))) {
+    throw new Error("Standalone artifact contains a foreign-architecture native addon.");
+  }
+}
+
+async function stageHostNativeAssets(stage) {
+  const nativeAssets = standaloneNativeAssetPaths(process.arch);
+  const nativeAssetSet = new Set(nativeAssets);
+  const stagedNativeAssets = [];
+  for await (const path of glob("node_modules/**/*.node", { cwd: stage })) {
+    stagedNativeAssets.push(path);
+  }
+  await Promise.all(
+    stagedNativeAssets
+      .filter((path) => !nativeAssetSet.has(path))
+      .map((path) => rm(join(stage, path), { force: true })),
+  );
+  const expectedArchitecture = process.arch === "arm64" ? "arm64" : "x86_64";
+  await Promise.all(
+    nativeAssets.map(async (path) => {
+      const architectures = (
+        await execute("/usr/bin/lipo", ["-archs", join(stage, path)], { capture: true })
+      ).stdout.trim();
+      if (architectures !== expectedArchitecture) {
+        throw new Error(
+          `Staged native addon "${path}" is not host-native (${architectures || "unknown"}).`,
+        );
+      }
+    }),
+  );
+  const packageFile = join(stage, "package.json");
+  const packageManifest = JSON.parse(await readFile(packageFile, "utf8"));
+  if (!Array.isArray(packageManifest.pkg?.assets)) {
+    throw new Error("Deployed CLI package is missing its standalone asset manifest.");
+  }
+  if (packageManifest.pkg.assets.some((path) => String(path).endsWith(".node"))) {
+    throw new Error("Source standalone asset manifest must not contain static native addons.");
+  }
+  packageManifest.pkg.assets.push(...standaloneNativeRuntimeAssetPaths(process.arch));
+  await writeFile(packageFile, `${JSON.stringify(packageManifest, null, 2)}\n`);
+  return nativeAssets;
 }
 
 function fakeProviderResponse(response) {
@@ -135,7 +185,7 @@ function fakeProviderResponse(response) {
   response.end("data: [DONE]\n\n");
 }
 
-async function smokeStandalone(file, smokeRoot) {
+async function smokeStandalone(file, smokeRoot, manifestRoot) {
   const provider = createServer((_request, response) => fakeProviderResponse(response));
   await new Promise((resolvePromise, reject) => {
     provider.once("error", reject);
@@ -220,6 +270,7 @@ async function smokeStandalone(file, smokeRoot) {
     ) {
       throw new Error("Standalone Pi/XDG smoke returned unexpected output.");
     }
+    assertStandaloneNativeManifest(summary.nativeAssets, process.arch, manifestRoot);
   } finally {
     await new Promise((resolvePromise) => provider.close(resolvePromise));
   }
@@ -242,6 +293,7 @@ async function build() {
       ["--filter", "cli", "--prod", "--config.node-linker=hoisted", "deploy", "--legacy", stage],
       { cwd: repository },
     );
+    await stageHostNativeAssets(stage);
     await mkdir(releaseDirectory, { recursive: true });
     await rm(artifact, { force: true });
     await execute(
@@ -271,7 +323,7 @@ async function build() {
       throw new Error(`Standalone artifact is not host-native (${architectures}).`);
     }
     await mkdir(smokeRoot, { recursive: true });
-    await smokeStandalone(artifact, smokeRoot);
+    await smokeStandalone(artifact, smokeRoot, `/${basename(stage)}`);
     const { createReleaseMetadata, installStandaloneExecutable } =
       await import("../dist/release.js");
     const installHome = join(smokeRoot, "install-home");

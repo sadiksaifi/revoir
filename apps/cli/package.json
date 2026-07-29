@@ -54,9 +54,6 @@
       "node_modules/@earendil-works/pi-ai/dist/providers/data/.manifest.json",
       "node_modules/@earendil-works/pi-ai/dist/providers/data/*.json",
       "node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/assets/*.png",
-      "node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/**/*.node",
-      "node_modules/@mariozechner/clipboard-darwin-arm64/*.node",
-      "node_modules/@mariozechner/clipboard-darwin-universal/*.node",
       "node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm"
     ],
     "seaConfig": {

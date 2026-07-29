@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { assertNoEnhancedSeaTemporaryEntrypoint } from "../scripts/release-validation.mjs";
+import {
+  assertNoEnhancedSeaTemporaryEntrypoint,
+  assertStandaloneNativeManifest,
+  standaloneNativeAssetPaths,
+  standaloneNativeRuntimeAssetPaths,
+} from "../scripts/release-validation.mjs";
 import {
   createReleaseMetadata,
   installStandaloneExecutable,
@@ -24,6 +29,53 @@ describe("standalone macOS release", () => {
     );
     assert.doesNotThrow(() =>
       assertNoEnhancedSeaTemporaryEntrypoint(Buffer.from("\0sea-main.js\0")),
+    );
+  });
+
+  it("selects only the host architecture's Pi and clipboard native addons", () => {
+    assert.deepEqual(standaloneNativeAssetPaths("arm64"), [
+      "node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-arm64/darwin-modifiers.node",
+      "node_modules/@mariozechner/clipboard-darwin-arm64/clipboard.darwin-arm64.node",
+    ]);
+    assert.deepEqual(standaloneNativeAssetPaths("x64"), [
+      "node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-x64/darwin-modifiers.node",
+      "node_modules/@mariozechner/clipboard-darwin-x64/clipboard.darwin-x64.node",
+    ]);
+    assert.deepEqual(standaloneNativeRuntimeAssetPaths("arm64"), [
+      ...standaloneNativeAssetPaths("arm64"),
+      "node_modules/@mariozechner/clipboard/index.js",
+      "node_modules/@mariozechner/clipboard/package.json",
+      "node_modules/@mariozechner/clipboard-darwin-arm64/package.json",
+    ]);
+  });
+
+  it("rejects a packaged manifest containing a foreign or universal native addon", () => {
+    const root = "/revoir-macos-arm64";
+    const expected = standaloneNativeAssetPaths("arm64").map((path) => `${root}/${path}`);
+    assert.doesNotThrow(() => assertStandaloneNativeManifest(expected, "arm64", root));
+    assert.throws(
+      () =>
+        assertStandaloneNativeManifest(
+          [
+            ...expected,
+            `${root}/node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-x64/darwin-modifiers.node`,
+          ],
+          "arm64",
+          root,
+        ),
+      /does not contain exactly the host-native addons/u,
+    );
+    assert.throws(
+      () =>
+        assertStandaloneNativeManifest(
+          [
+            expected[0] ?? "",
+            `${root}/node_modules/@mariozechner/clipboard-darwin-universal/clipboard.darwin-universal.node`,
+          ],
+          "arm64",
+          root,
+        ),
+      /does not contain exactly the host-native addons/u,
     );
   });
 
