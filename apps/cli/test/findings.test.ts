@@ -673,6 +673,31 @@ index 1111111..2222222 100644
     assert.deepEqual(result.diagnostics, []);
   });
 
+  it("accepts an exact changed-line anchor with source indentation", async () => {
+    const result = await validateModelReviewOutput(
+      output([
+        finding({
+          range: { start: 1, end: 1, side: "RIGHT" },
+          anchor: "\treturn result;",
+        }),
+      ]),
+      {
+        checkout,
+        diff: `diff --git a/source.ts b/source.ts
+index 1111111..2222222 100644
+--- a/source.ts
++++ b/source.ts
+@@ -1 +1 @@
+-return previous;
++\treturn result;
+`,
+      },
+    );
+
+    assert.equal(result.findings[0]?.anchor, "return result;");
+    assert.deepEqual(result.diagnostics, []);
+  });
+
   it("rejects a punctuation substring that does not identify a complete changed line", async () => {
     await assert.rejects(
       () =>
