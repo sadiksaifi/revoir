@@ -47,7 +47,7 @@ function pullRequest(): PullRequestSnapshot {
 }
 
 describe("review context", () => {
-  it("loads root and changed-path guidance without loading unrelated guidance", async () => {
+  it("loads every nested project instruction with per-directory AGENTS precedence", async () => {
     const checkout = await mkdtemp(join(tmpdir(), "revoir-guidance-"));
     try {
       await Promise.all([
@@ -57,17 +57,21 @@ describe("review context", () => {
       ]);
       await Promise.all([
         writeFile(join(checkout, "AGENTS.md"), "root agents"),
-        writeFile(join(checkout, "CONTRIBUTING.md"), "root contributing"),
+        writeFile(join(checkout, "CLAUDE.md"), "root claude must lose"),
+        writeFile(join(checkout, "CONTRIBUTING.md"), "must not load"),
         writeFile(join(checkout, "apps", "AGENTS.md"), "apps agents"),
-        writeFile(join(checkout, "apps", "api", "CONTRIBUTING.md"), "api contributing"),
-        writeFile(join(checkout, "unrelated", "AGENTS.md"), "must not load"),
+        writeFile(join(checkout, "apps", "CLAUDE.md"), "apps claude must lose"),
+        writeFile(join(checkout, "apps", "api", "CLAUDE.md"), "api claude"),
+        writeFile(join(checkout, "apps", "api", "CONTRIBUTING.md"), "must not load"),
+        writeFile(join(checkout, "unrelated", "AGENTS.md"), "unrelated agents"),
+        writeFile(join(checkout, "unrelated", "CLAUDE.md"), "unrelated claude must lose"),
       ]);
 
       assert.deepEqual(await loadApplicableRepositoryGuidance(checkout, DIFF), [
         { path: "AGENTS.md", content: "root agents" },
-        { path: "CONTRIBUTING.md", content: "root contributing" },
         { path: "apps/AGENTS.md", content: "apps agents" },
-        { path: "apps/api/CONTRIBUTING.md", content: "api contributing" },
+        { path: "unrelated/AGENTS.md", content: "unrelated agents" },
+        { path: "apps/api/CLAUDE.md", content: "api claude" },
       ]);
     } finally {
       await rm(checkout, { recursive: true, force: true });

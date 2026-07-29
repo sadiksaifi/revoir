@@ -109,8 +109,13 @@ describe("Pi clean review adapter", () => {
     assert.equal(sessions.options[0]?.model, "openai-codex/gpt-5.6-sol");
     assert.equal(sessions.options[0]?.reasoning, "high");
     assert.equal(sessions.options[0]?.shellCommandMs, 120_000);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /read-only/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not modify files/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /read, grep, find, ls, and bash/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /login and interactive shell/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /full local/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /AGENTS\.md takes/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /install dependencies/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /project-native verification/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not push commits/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /"version":1/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /P0\|P1\|P2\|P3/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /"defectKind"/u);
@@ -122,8 +127,13 @@ describe("Pi clean review adapter", () => {
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.headSha, "u"));
     assert.match(sessions.prompts[0] ?? "", /Preserve the public API/u);
     assert.match(sessions.prompts[0] ?? "", /FAIL api contract changed/u);
+    assert.match(sessions.prompts[0] ?? "", /Applicable repository instructions/u);
     assert.match(sessions.prompts[0] ?? "", /Files eligible for detailed line review/u);
     assert.match(sessions.prompts[0] ?? "", /\+const current = true/u);
+    assert.ok(
+      (sessions.prompts[0] ?? "").indexOf("Applicable repository instructions") <
+        (sessions.prompts[0] ?? "").indexOf("Pull request description"),
+    );
     assert.equal(sessions.disposed, 1);
   });
 

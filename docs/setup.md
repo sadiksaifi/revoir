@@ -7,6 +7,18 @@ Revoir has two parts:
 
 Use a test repository first. Run all Mac commands as the same non-root user.
 
+Revoir runs model-generated verification commands through that user's login and
+interactive shell. Those commands inherit the user's environment, credentials,
+network access, tool caches, and local service access. Install the GitHub App
+only on repositories whose pull-request code you trust to run on the Mac.
+
+For repositories that use mise, trust Revoir's default temporary-checkout tree
+so each newly generated checkout can load its project configuration:
+
+```bash
+mise settings trusted_config_paths='["~/.cache/revoir/checkouts"]'
+```
+
 ## Prerequisites
 
 - macOS on the review machine
