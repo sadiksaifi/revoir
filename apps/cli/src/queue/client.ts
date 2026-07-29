@@ -29,10 +29,10 @@ function requireLeaseId(value: unknown): string {
 }
 
 function requireAttempt(value: unknown): number {
-  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
     throw new Error("Cloudflare Queue returned a message without a valid attempt count.");
   }
-  return value as number;
+  return Math.max(value as number, 1);
 }
 
 function requireRetryDelay(value: number): number {
