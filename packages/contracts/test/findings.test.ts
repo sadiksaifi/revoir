@@ -59,6 +59,13 @@ describe("finding contract v1", () => {
     assert.equal(parseModelFinding({ ...finding(), anchor }, 0).anchor, anchor);
   });
 
+  it("normalizes surrounding indentation from an exact changed-line anchor", () => {
+    assert.equal(
+      parseModelFinding({ ...finding(), anchor: "\treturn result;" }, 0).anchor,
+      "return result;",
+    );
+  });
+
   it("rejects malformed JSON, unknown versions, fields, and envelope shapes", () => {
     const cases = [
       "not json",
@@ -139,10 +146,10 @@ describe("finding contract v1", () => {
     }
   });
 
-  it("rejects empty, untrimmed, multiline, and wrong-type string fields", () => {
+  it("rejects empty, whitespace-only, multiline, and wrong-type string fields", () => {
     const cases = [
       { ...finding(), anchor: "" },
-      { ...finding(), anchor: " padded " },
+      { ...finding(), anchor: " \t " },
       { ...finding(), anchor: "two\nlines" },
       { ...finding(), anchor: "x".repeat(4097) },
       { ...finding(), anchor: null },

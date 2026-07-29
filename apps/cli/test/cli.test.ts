@@ -820,7 +820,7 @@ describe("CLI", () => {
     stdout.output = "";
     stderr.output = "";
 
-    const modelAnchor = " PRIVATE_IMPACT_SOURCE ";
+    const modelAnchor = "PRIVATE_IMPACT\nSOURCE";
     const allInvalid: ManualReviewService = {
       async review() {
         await validateModelReviewOutput(
@@ -851,9 +851,8 @@ describe("CLI", () => {
       }),
       1,
     );
-    assert.match(stderr.output, /anchor must contain 1-4096 trimmed characters/u);
-    assert.doesNotMatch(stderr.output, new RegExp(modelAnchor.trim(), "u"));
-    assert.doesNotMatch(stderr.output, /PRIVATE_IMPACT_SOURCE/u);
+    assert.match(stderr.output, /anchor must be a single line/u);
+    assert.doesNotMatch(stderr.output, /PRIVATE_IMPACT/u);
     assert.equal(stdout.output, "");
   });
 });

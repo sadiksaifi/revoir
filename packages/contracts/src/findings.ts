@@ -105,27 +105,19 @@ function contractString(value: unknown, path: string): string {
   return value;
 }
 
-function boundedString(
-  value: unknown,
-  path: string,
-  maximum: number,
-  options: { singleLine?: boolean } = {},
-): string {
+function anchorString(value: unknown, path: string, maximum: number): string {
   const stringValue = contractString(value, path);
-  if (
-    stringValue.length === 0 ||
-    stringValue.length > maximum ||
-    stringValue.trim() !== stringValue
-  ) {
-    throw new FindingSchemaError(`${path} must contain 1-${maximum} trimmed characters.`);
+  const normalized = stringValue.trim();
+  if (normalized.length === 0 || stringValue.length > maximum) {
+    throw new FindingSchemaError(`${path} must contain 1-${maximum} non-whitespace characters.`);
   }
-  if (options.singleLine && /[\r\n]/u.test(stringValue)) {
+  if (/[\r\n]/u.test(stringValue)) {
     throw new FindingSchemaError(`${path} must be a single line.`);
   }
   if (stringValue.includes("\u0000")) {
     throw new FindingSchemaError(`${path} contains an unsupported null byte.`);
   }
-  return stringValue;
+  return normalized;
 }
 
 function hasOnlyUnicodeScalarValues(value: string): boolean {
@@ -244,8 +236,6 @@ export function parseModelFinding(value: unknown, index: number): ModelFindingV1
     defectKind: enumString(finding.defectKind, `${path}.defectKind`, DEFECT_KINDS, "defect kind"),
     impactKind: enumString(finding.impactKind, `${path}.impactKind`, IMPACT_KINDS, "impact kind"),
     fixAction: enumString(finding.fixAction, `${path}.fixAction`, FIX_ACTIONS, "fix action"),
-    anchor: boundedString(finding.anchor, `${path}.anchor`, MAX_ANCHOR_LENGTH, {
-      singleLine: true,
-    }),
+    anchor: anchorString(finding.anchor, `${path}.anchor`, MAX_ANCHOR_LENGTH),
   };
 }
