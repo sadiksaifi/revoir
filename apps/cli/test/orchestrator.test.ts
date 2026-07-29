@@ -139,6 +139,7 @@ function harness(
     currentSha?: string;
     checkCompletionError?: Error;
     checkCompletionErrorAttempts?: number;
+    checkCompletionAttempted?: (attempt: number) => void;
     checkCreationError?: Error;
     evidence?: GitHubReviewEvidence;
     pullRequest?: PullRequestSnapshot;
@@ -218,6 +219,7 @@ function harness(
         id: 30,
         async complete(completion) {
           checkCompletions.push(completion);
+          options.checkCompletionAttempted?.(checkCompletions.length);
           if (options.checkCompletionError !== undefined && checkCompletionFailures > 0) {
             checkCompletionFailures -= 1;
             throw options.checkCompletionError;
@@ -563,6 +565,33 @@ describe("clean review orchestrator", () => {
     assert.equal(reviewed.checkCompletions.length, 3);
     assert.equal(
       reviewed.checkCompletions.every((completion) => completion.conclusion === "success"),
+      true,
+    );
+  });
+
+  it("keeps a failed check conclusion stable when cancellation arrives between retries", async () => {
+    const controller = new AbortController();
+    const reviewFailure = new Error("Pi failed");
+    const reviewed = harness({
+      review: async () => {
+        throw reviewFailure;
+      },
+      checkCompletionError: new Error("GitHub check update failed"),
+      checkCompletionErrorAttempts: 1,
+      checkCompletionAttempted(attempt) {
+        if (attempt === 1) {
+          controller.abort(new Error("daemon stopped"));
+        }
+      },
+    });
+
+    await assert.rejects(
+      reviewed.orchestrator.review(reference, { signal: controller.signal }),
+      reviewFailure,
+    );
+    assert.equal(reviewed.checkCompletions.length, 2);
+    assert.equal(
+      reviewed.checkCompletions.every((completion) => completion.conclusion === "failure"),
       true,
     );
   });

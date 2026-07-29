@@ -647,10 +647,9 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     if (reviewCheck !== undefined) {
       const check = reviewCheck;
       reviewCheck = undefined;
+      const completion = reviewCheckCompletion(result, terminalFailure, signal);
       const checkFailures = await completeReviewCheck(
-        createTerminalHandle(() =>
-          check.complete(reviewCheckCompletion(result, terminalFailure, signal), terminalSignal),
-        ),
+        createTerminalHandle(() => check.complete(completion, terminalSignal)),
       );
       if (checkFailures.length > 0) {
         terminalFailure =
