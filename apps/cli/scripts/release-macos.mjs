@@ -91,6 +91,17 @@ async function assertArtifactScan(file) {
   if (candidateSecrets.some((value) => contents.includes(Buffer.from(value)))) {
     throw new Error("Standalone artifact contains a build-environment secret value.");
   }
+  const requiredResources = [
+    "auth/oauth/openai-codex.js",
+    "providers/data/.manifest.json",
+    "image-resize-worker.js",
+    "photon_rs_bg.wasm",
+    "darwin-modifiers.node",
+    process.arch === "arm64" ? "clipboard.darwin-arm64.node" : "clipboard.darwin-universal.node",
+  ];
+  if (requiredResources.some((value) => !contents.includes(Buffer.from(value)))) {
+    throw new Error("Standalone artifact is missing an explicit Pi runtime resource.");
+  }
 }
 
 function fakeProviderResponse(response) {
@@ -213,6 +224,10 @@ async function smokeStandalone(file, smokeRoot) {
 
 async function build() {
   await assertFrozenTools();
+  const dirty = (await execute("git", ["status", "--porcelain"], { capture: true })).stdout.trim();
+  if (dirty !== "") {
+    throw new Error("Standalone releases require a clean Git worktree.");
+  }
   await execute("pnpm", ["install", "--frozen-lockfile"]);
   await execute("pnpm", ["--filter", "cli", "build"]);
   const temporaryRoot = await mkdtemp(join(tmpdir(), "revoir-release-"));
@@ -246,17 +261,49 @@ async function build() {
     if (!fileDescription.includes(process.arch === "arm64" ? "arm64" : "x86_64")) {
       throw new Error("Standalone artifact architecture does not match the build host.");
     }
+    const architectures = (
+      await execute("/usr/bin/lipo", ["-archs", artifact], { capture: true })
+    ).stdout.trim();
+    if (architectures !== process.arch) {
+      throw new Error(`Standalone artifact is not host-native (${architectures}).`);
+    }
     await mkdir(smokeRoot, { recursive: true });
     await smokeStandalone(artifact, smokeRoot);
-    const { createReleaseMetadata } = await import("../dist/release.js");
+    const { createReleaseMetadata, installStandaloneExecutable } =
+      await import("../dist/release.js");
+    const installHome = join(smokeRoot, "install-home");
+    const installed = await installStandaloneExecutable(artifact, installHome);
+    if (installed !== join(installHome, ".local", "bin", "revoir")) {
+      throw new Error("Standalone installer did not use the fixed user-local path.");
+    }
+    const installedVersion = await execute(installed, ["--version"], {
+      cwd: smokeRoot,
+      env: {
+        HOME: installHome,
+        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+      },
+      capture: true,
+    });
+    if (installedVersion.stdout.trim() !== "revoir 0.0.0") {
+      throw new Error("Installed standalone copy did not launch.");
+    }
     const commit = (await execute("git", ["rev-parse", "HEAD"], { capture: true })).stdout.trim();
+    const lockfileSha256 = await sha256(join(repository, "pnpm-lock.yaml"));
     const metadata = createReleaseMetadata({
       architecture: process.arch,
       commit,
-      lockfileSha256: await sha256(join(repository, "pnpm-lock.yaml")),
+      lockfileSha256,
       unsignedSha256,
     });
     await writeFile(metadataFile, `${JSON.stringify(metadata, null, 2)}\n`, { mode: 0o644 });
+    const writtenMetadata = JSON.parse(await readFile(metadataFile, "utf8"));
+    if (
+      writtenMetadata.build?.commit !== commit ||
+      writtenMetadata.build?.lockfileSha256 !== lockfileSha256 ||
+      writtenMetadata.artifact?.unsignedSha256 !== unsignedSha256
+    ) {
+      throw new Error("Standalone metadata does not match its Git, lockfile, or unsigned input.");
+    }
     process.stdout.write(`${artifact}\n${metadataFile}\n`);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });

@@ -251,6 +251,10 @@ async function probeServiceLifecycle(input: PackageSmokeInput): Promise<void> {
     launchctl,
   );
   await manager.install();
+  const plist = await readFile(manager.plistFile, "utf8");
+  if (!plist.includes(`<string>${process.execPath}</string>`) || plist.includes("/snapshot/")) {
+    throw new Error("Packaged LaunchAgent arguments do not invoke only the installed executable.");
+  }
   await new Promise<void>((resolvePromise, reject) => {
     execFileCallback("/usr/bin/plutil", ["-lint", manager.plistFile], (error) => {
       if (error !== null) {
