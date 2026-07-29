@@ -56,6 +56,22 @@ async function waitFor(
   }
 }
 
+async function settleWithin<T>(operation: Promise<T>, message: string): Promise<T> {
+  let hardDeadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        hardDeadline = setTimeout(() => {
+          reject(new Error(message));
+        }, 250);
+      }),
+    ]);
+  } finally {
+    clearTimeout(hardDeadline);
+  }
+}
+
 async function fileIsMissing(path: string): Promise<boolean> {
   try {
     await access(path);
@@ -806,6 +822,46 @@ describe("clean review orchestrator", () => {
     assert.deepEqual(events.slice(-3), ["create-review", "get-head", "delete-review-20"]);
     assert.equal(events.includes("submit-review-20"), false);
     assert.equal(events.includes("add-+1"), false);
+  });
+
+  it("bounds persistent pending-review cleanup and reconciles the stale draft next run", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-pending-cleanup-lock-"));
+    const lockPath = join(stateDirectory, "manual-review.lock");
+    const pendingReviewState = new Set<number>();
+    const first = harness({
+      lock: new FileReviewLock(stateDirectory),
+      mutateHeadDuring: "review-creation",
+      pendingDeletionError: new Error("persistent pending-review cleanup failure"),
+      pendingReviewState,
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+    const second = harness({
+      lock: new FileReviewLock(stateDirectory),
+      pendingReviewState,
+    });
+
+    try {
+      await assert.rejects(
+        settleWithin(
+          first.orchestrator.review(reference),
+          "persistent pending-review cleanup did not settle",
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AggregateError);
+          assert.match(error.message, /Pending review cleanup required retries/u);
+          return true;
+        },
+      );
+
+      assert.equal(first.events.filter((event) => event === "delete-review-20").length, 3);
+      assert.deepEqual([...pendingReviewState], [20]);
+      assert.equal(await fileIsMissing(lockPath), true);
+      assert.equal((await second.orchestrator.review(reference)).status, "clean");
+      assert.equal(second.events.includes("remove-pending-review"), true);
+      assert.equal(pendingReviewState.size, 0);
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
   });
 
   it("cleans pending review state after creation and submission failures", async () => {
@@ -1674,6 +1730,50 @@ describe("clean review orchestrator", () => {
 
     assert.equal(cleanupCalls, 2);
     assert.deepEqual(unhandledRejections, []);
+  });
+
+  it("bounds persistent terminal cleanup before releasing the process lock", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-terminal-cleanup-lock-"));
+    const lockPath = join(stateDirectory, "manual-review.lock");
+    let cleanupAttempts = 0;
+    const first = harness({
+      lock: new FileReviewLock(stateDirectory),
+      workspaces: {
+        async prepare() {
+          return {
+            root: "/tmp/persistent-cleanup-review",
+            checkout: "/tmp/persistent-cleanup-review/repository",
+            diff: "diff",
+            remoteUrl: "https://github.com/owner/repository.git",
+            async cleanup() {
+              cleanupAttempts += 1;
+              throw new Error("persistent workspace cleanup failure");
+            },
+          };
+        },
+      },
+    });
+    const second = harness({ lock: new FileReviewLock(stateDirectory) });
+
+    try {
+      await assert.rejects(
+        settleWithin(
+          first.orchestrator.review(reference),
+          "persistent terminal cleanup did not settle",
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AggregateError);
+          assert.match(error.message, /Workspace cleanup required retries/u);
+          return true;
+        },
+      );
+
+      assert.equal(cleanupAttempts, 3);
+      assert.equal(await fileIsMissing(lockPath), true);
+      assert.equal((await second.orchestrator.review(reference)).status, "clean");
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
   });
 
   it("retains late partial-workspace cleanup after the review times out", async () => {

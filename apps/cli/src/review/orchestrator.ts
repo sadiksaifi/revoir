@@ -131,10 +131,11 @@ function terminalBackoff(attempt: number): Promise<void> {
   });
 }
 
+const MAX_TERMINAL_ATTEMPTS = 3;
+
 async function completeTerminal(operation: TerminalHandle): Promise<Error[]> {
   const failures: Error[] = [];
-  let attempts = 0;
-  for (;;) {
+  for (let attempt = 1; attempt <= MAX_TERMINAL_ATTEMPTS; attempt += 1) {
     try {
       // Terminal attempts must remain serialized.
       // eslint-disable-next-line no-await-in-loop
@@ -144,18 +145,20 @@ async function completeTerminal(operation: TerminalHandle): Promise<Error[]> {
       if (failures.length === 0) {
         failures.push(asError(error));
       }
-      attempts += 1;
-      // Terminal work remains serialized and retryable until its side effect is confirmed.
+      if (attempt === MAX_TERMINAL_ATTEMPTS) {
+        return failures;
+      }
+      // Transient cleanup remains recoverable without holding the process lock forever.
       // eslint-disable-next-line no-await-in-loop
-      await terminalBackoff(attempts);
+      await terminalBackoff(attempt);
     }
   }
+  return failures;
 }
 
 async function completePendingReview(operation: TerminalHandle): Promise<Error[]> {
   const failures: Error[] = [];
-  let attempts = 0;
-  for (;;) {
+  for (let attempt = 1; attempt <= MAX_TERMINAL_ATTEMPTS; attempt += 1) {
     try {
       // Pending-review attempts remain serialized, but typed uncertainty is terminal.
       // eslint-disable-next-line no-await-in-loop
@@ -169,11 +172,14 @@ async function completePendingReview(operation: TerminalHandle): Promise<Error[]
       if (failures.length === 0) {
         failures.push(failure);
       }
-      attempts += 1;
+      if (attempt === MAX_TERMINAL_ATTEMPTS) {
+        return failures;
+      }
       // eslint-disable-next-line no-await-in-loop
-      await terminalBackoff(attempts);
+      await terminalBackoff(attempt);
     }
   }
+  return failures;
 }
 
 function throwCleanupFailures(failures: readonly Error[], message: string): void {
