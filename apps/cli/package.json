@@ -19,6 +19,8 @@
     "format:check": "pnpm --workspace-root run format:check apps/cli",
     "lint": "pnpm --workspace-root run lint apps/cli",
     "lint:fix": "pnpm --workspace-root run lint:fix apps/cli",
+    "release:macos": "node scripts/release-macos.mjs build",
+    "release:macos:install": "node scripts/release-macos.mjs install",
     "start": "node dist/main.js",
     "pretest": "pnpm --filter @revoir/contracts run build",
     "test": "node --test --import tsx 'test/**/*.test.ts'",
@@ -31,7 +33,32 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "@yao-pkg/pkg": "6.21.0",
     "tsx": "catalog:",
     "typescript": "catalog:"
+  },
+  "pkg": {
+    "sea": true,
+    "bytecode": false,
+    "fallbackToSource": true,
+    "signature": false,
+    "publicPackages": [
+      "*"
+    ],
+    "scripts": [
+      "dist/**/*.js",
+      "node_modules/@earendil-works/pi-ai/dist/auth/oauth/*.js",
+      "node_modules/@earendil-works/pi-coding-agent/dist/utils/image-resize-worker.js"
+    ],
+    "assets": [
+      "node_modules/@earendil-works/pi-ai/dist/providers/data/.manifest.json",
+      "node_modules/@earendil-works/pi-ai/dist/providers/data/*.json",
+      "node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/assets/*.png",
+      "node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm"
+    ],
+    "seaConfig": {
+      "useCodeCache": false,
+      "useSnapshot": false
+    }
   }
 }

@@ -1,10 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { sign } from "node:crypto";
-import { promisify } from "node:util";
 
 import type { RevoirConfiguration } from "./config/schema.js";
 
-const execFile = promisify(execFileCallback);
 const GITHUB_API = "https://api.github.com";
 const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
 const CLOUDFLARE_PULL_ACKNOWLEDGEMENT_ERROR =
@@ -16,6 +14,27 @@ const REQUIRED_GITHUB_PERMISSIONS = {
   actions: "read",
   pull_requests: "write",
 } as const;
+
+function execFile(
+  executable: string,
+  arguments_: readonly string[],
+  options: { timeout: number; maxBuffer: number },
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFileCallback(
+      executable,
+      [...arguments_],
+      { ...options, encoding: "utf8" },
+      (error, stdout, stderr) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        resolve({ stdout, stderr });
+      },
+    );
+  });
+}
 
 export type DiagnosticStatus = "passed" | "failed";
 

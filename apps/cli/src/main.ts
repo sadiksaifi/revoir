@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { runCli } from "./cli.js";
+import { runPackageSmoke } from "./package-smoke.js";
 
 const rawCliArguments = process.argv.slice(2);
 const cliArguments = rawCliArguments[0] === "--" ? rawCliArguments.slice(1) : rawCliArguments;
@@ -16,9 +17,20 @@ if (isDaemonMode) {
   process.once("SIGTERM", onSigterm);
 }
 try {
-  process.exitCode = await runCli(cliArguments, {
-    shutdownSignal: shutdownController.signal,
-  });
+  if (cliArguments[0] === "__package-smoke" && process.env.REVOIR_INTERNAL_PACKAGE_SMOKE === "1") {
+    await runPackageSmoke({
+      cwd: process.cwd(),
+      environment: process.env,
+      write(value) {
+        process.stdout.write(`${value}\n`);
+      },
+    });
+    process.exitCode = 0;
+  } else {
+    process.exitCode = await runCli(cliArguments, {
+      shutdownSignal: shutdownController.signal,
+    });
+  }
 } finally {
   if (isDaemonMode) {
     process.off("SIGINT", onSigint);
