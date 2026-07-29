@@ -234,8 +234,8 @@ each repository under exactly one installation:
 
 Interactive setup asks for the comma-separated installation IDs, then for
 repositories in the
-`<installation-id>:<repository-id>:<owner>/<name>` format. A single installation
-uses one group and may use the shorter `<repository-id>:<owner>/<name>` form.
+`<installation-id>:<repository-id>:<owner>/<name>` format. This installation
+prefix is required even when only one installation is configured.
 
 Verify the installation:
 

@@ -146,10 +146,7 @@ interface RepositoryAssignment {
   repository: RepositoryIdentity;
 }
 
-function parseRepositoryAssignment(
-  value: string,
-  onlyInstallationId?: number,
-): RepositoryAssignment {
+function parseRepositoryAssignment(value: string): RepositoryAssignment {
   const match =
     /^(?<installationId>[1-9]\d*):(?<repositoryId>[1-9]\d*):(?<owner>[^/]+)\/(?<name>[^/]+)$/u.exec(
       value.trim(),
@@ -164,9 +161,6 @@ function parseRepositoryAssignment(
         `${match.groups.repositoryId ?? ""}:${match.groups.owner ?? ""}/${match.groups.name ?? ""}`,
       ),
     };
-  }
-  if (onlyInstallationId !== undefined) {
-    return { installationId: onlyInstallationId, repository: parseRepository(value) };
   }
   throw new Error(
     `Repository "${value}" must use the "<installation-id>:<repository-id>:<owner>/<name>" format.`,
@@ -288,10 +282,7 @@ export async function collectSetupConfiguration(
     readCredentialFile(apiTokenFile, "Cloudflare API token", readTextFile),
   ]);
 
-  const onlyInstallationId = installationIds.length === 1 ? installationIds[0] : undefined;
-  const assignments = repositoryValues.map((repository) =>
-    parseRepositoryAssignment(repository, onlyInstallationId),
-  );
+  const assignments = repositoryValues.map(parseRepositoryAssignment);
   for (const assignment of assignments) {
     if (!installationIds.includes(assignment.installationId)) {
       throw new Error(

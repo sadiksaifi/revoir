@@ -129,6 +129,17 @@ describe("setup input", () => {
     );
     assert.throws(() => parseSetupOptions(["--unknown", "value"]), /Unknown setup option/u);
     assert.throws(() => parseRepository("owner/repository"), /numeric-id/u);
+    const legacyArguments = nonInteractiveArguments();
+    legacyArguments[legacyArguments.indexOf("--repository") + 1] = "99:owner/repository";
+    await assert.rejects(
+      collectSetupConfiguration(
+        parseSetupOptions(legacyArguments),
+        paths,
+        undefined,
+        async (file) => (file.endsWith(".pem") ? TEST_PRIVATE_KEY : "token"),
+      ),
+      /must use the "<installation-id>:<repository-id>:<owner>\/<name>" format/u,
+    );
     await assert.rejects(
       collectSetupConfiguration(
         parseSetupOptions([...nonInteractiveArguments(), "--repository", "9:100:other/repository"]),

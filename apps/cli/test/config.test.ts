@@ -234,6 +234,36 @@ describe("configuration schema", () => {
     );
   });
 
+  it("rejects the version 1 single-installation configuration contract", () => {
+    const base = createTestConfiguration({
+      cacheDir: "/cache",
+      stateDir: "/state",
+      dataDir: "/data",
+    });
+    assert.throws(
+      () =>
+        validateConfiguration({
+          ...base,
+          version: 1,
+          github: {
+            userId: base.github.userId,
+            appId: base.github.appId,
+            installationId: 8,
+            privateKey: base.github.privateKey,
+            repositories: [{ id: 99, owner: "owner", name: "repository" }],
+          },
+        }),
+      (error) => {
+        assert.ok(error instanceof ConfigurationValidationError);
+        assert.match(error.message, /version must be 2/u);
+        assert.match(error.message, /github\.installationId is not supported/u);
+        assert.match(error.message, /github\.repositories is not supported/u);
+        assert.match(error.message, /github\.installations must contain at least one/u);
+        return true;
+      },
+    );
+  });
+
   it("rejects unknown fields and non-absolute runtime paths", () => {
     const base = createTestConfiguration({
       cacheDir: "/cache",

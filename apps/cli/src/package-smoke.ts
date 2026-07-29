@@ -401,7 +401,7 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
       "--github-private-key-file",
       privateKeyFile,
       "--repository",
-      "1:package-smoke/repository",
+      "3:1:package-smoke/repository",
       "--cloudflare-account-id",
       "package-smoke",
       "--cloudflare-queue-id",
