@@ -1,10 +1,18 @@
 const enhancedSeaTemporaryEntrypoint =
   /(?:\/[A-Za-z0-9._-]+)+\/pkg-sea-[A-Za-z0-9_-]+\/sea-main\.js/u;
 
-export function standaloneNativeAssetPaths(architecture) {
-  if (architecture !== "arm64" && architecture !== "x64") {
-    throw new Error(`Unsupported standalone native architecture "${architecture}".`);
+export function machOArchitecture(architecture) {
+  if (architecture === "arm64") {
+    return "arm64";
   }
+  if (architecture === "x64") {
+    return "x86_64";
+  }
+  throw new Error(`Unsupported standalone native architecture "${architecture}".`);
+}
+
+export function standaloneNativeAssetPaths(architecture) {
+  machOArchitecture(architecture);
   return [
     `node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-${architecture}/darwin-modifiers.node`,
     `node_modules/@mariozechner/clipboard-darwin-${architecture}/clipboard.darwin-${architecture}.node`,

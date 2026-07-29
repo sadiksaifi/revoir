@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import {
   assertNoEnhancedSeaTemporaryEntrypoint,
   assertStandaloneNativeManifest,
+  machOArchitecture,
   standaloneNativeAssetPaths,
   standaloneNativeRuntimeAssetPaths,
 } from "../scripts/release-validation.mjs";
@@ -17,6 +18,11 @@ import {
 } from "../src/release.js";
 
 describe("standalone macOS release", () => {
+  it("maps Node host architectures to Mach-O architecture labels", () => {
+    assert.equal(machOArchitecture("arm64"), "arm64");
+    assert.equal(machOArchitecture("x64"), "x86_64");
+  });
+
   it("rejects an Enhanced SEA entrypoint from a random packager temporary directory", () => {
     assert.throws(
       () =>

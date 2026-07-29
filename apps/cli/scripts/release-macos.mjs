@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import {
   assertNoEnhancedSeaTemporaryEntrypoint,
   assertStandaloneNativeManifest,
+  machOArchitecture,
   standaloneNativeAssetPaths,
   standaloneNativeRuntimeAssetPaths,
 } from "./release-validation.mjs";
@@ -18,6 +19,7 @@ const repository = resolve(cliDirectory, "..", "..");
 const releaseDirectory = join(repository, "artifacts", `revoir-macos-${process.arch}`);
 const artifact = join(releaseDirectory, "revoir");
 const metadataFile = join(releaseDirectory, "revoir.metadata.json");
+const hostMachOArchitecture = machOArchitecture(process.arch);
 const expectedNode = "v24.16.0";
 const expectedPnpm = "10.33.2";
 const expectedPackager = "6.21.0";
@@ -131,13 +133,12 @@ async function stageHostNativeAssets(stage) {
       .filter((path) => !nativeAssetSet.has(path))
       .map((path) => rm(join(stage, path), { force: true })),
   );
-  const expectedArchitecture = process.arch === "arm64" ? "arm64" : "x86_64";
   await Promise.all(
     nativeAssets.map(async (path) => {
       const architectures = (
         await execute("/usr/bin/lipo", ["-archs", join(stage, path)], { capture: true })
       ).stdout.trim();
-      if (architectures !== expectedArchitecture) {
+      if (architectures !== hostMachOArchitecture) {
         throw new Error(
           `Staged native addon "${path}" is not host-native (${architectures || "unknown"}).`,
         );
@@ -313,13 +314,13 @@ async function build() {
     await execute("/usr/bin/codesign", ["--force", "--sign", "-", artifact]);
     await execute("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", artifact]);
     const fileDescription = (await execute("/usr/bin/file", [artifact], { capture: true })).stdout;
-    if (!fileDescription.includes(process.arch === "arm64" ? "arm64" : "x86_64")) {
+    if (!fileDescription.includes(hostMachOArchitecture)) {
       throw new Error("Standalone artifact architecture does not match the build host.");
     }
     const architectures = (
       await execute("/usr/bin/lipo", ["-archs", artifact], { capture: true })
     ).stdout.trim();
-    if (architectures !== process.arch) {
+    if (architectures !== hostMachOArchitecture) {
       throw new Error(`Standalone artifact is not host-native (${architectures}).`);
     }
     await mkdir(smokeRoot, { recursive: true });
