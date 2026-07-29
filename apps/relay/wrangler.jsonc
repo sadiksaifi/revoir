@@ -11,8 +11,5 @@
       },
     ],
   },
-  "vars": {
-    "GITHUB_USER_ID": "replace-with-github-user-id",
-    "GITHUB_REPOSITORIES": "[]",
-  },
+  "keep_vars": true
 }

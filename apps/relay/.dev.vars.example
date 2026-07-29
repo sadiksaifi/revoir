@@ -1,0 +1,3 @@
+GITHUB_USER_ID="your-github-user-id"
+GITHUB_REPOSITORIES='[{"id":123456789,"owner":"OWNER","name":"REPOSITORY"}]'
+GITHUB_WEBHOOK_SECRET="your-random-webhook-secret"
