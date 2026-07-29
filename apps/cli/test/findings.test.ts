@@ -107,7 +107,7 @@ function finding(overrides: Record<string, unknown> = {}) {
     defectKind: "concurrency",
     impactKind: "execution-stall",
     fixAction: "synchronize",
-    anchor: "const",
+    anchor: "const added = true;",
     ...overrides,
   };
   if (!Object.prototype.hasOwnProperty.call(overrides, "anchor")) {
@@ -126,8 +126,8 @@ function finding(overrides: Record<string, unknown> = {}) {
               ? "old"
               : "new"
             : path === BACKSLASH_PATH
-              ? "backslash"
-              : "const";
+              ? "const backslash = true;"
+              : "const added = true;";
   }
   return candidate;
 }
@@ -551,24 +551,51 @@ describe("finding validation", () => {
     const privateAnchor = "PRIVATE_UNOBSERVED_ANCHOR";
     const result = await validateModelReviewOutput(
       output([
-        finding({ anchor: "added" }),
+        finding({ anchor: "const added = true;" }),
         finding({ anchor: privateAnchor }),
-        finding({ anchor: "Added" }),
-        finding({ anchor: "adde\u0301d" }),
+        finding({ anchor: "Const added = true;" }),
+        finding({ anchor: "const adde\u0301d = true;" }),
       ]),
       { checkout, diff: DIFF },
     );
 
     assert.equal(result.findings.length, 1);
-    assert.equal(result.findings[0]?.anchor, "added");
+    assert.equal(result.findings[0]?.anchor, "const added = true;");
     assert.equal(result.diagnostics.length, 3);
     for (const diagnostic of result.diagnostics) {
       assert.equal(
         diagnostic.message,
-        "technical anchor is not present in the authoritative changed content.",
+        "technical anchor must equal a complete authoritative changed line or file path.",
       );
       assert.equal(diagnostic.message.includes(privateAnchor), false);
     }
+  });
+
+  it("rejects a punctuation substring that does not identify a complete changed line", async () => {
+    await assert.rejects(
+      () =>
+        validateModelReviewOutput(
+          output([
+            finding({
+              range: { start: 2, end: 2, side: "RIGHT" },
+              anchor: "=",
+            }),
+          ]),
+          { checkout, diff: DIFF },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof FindingContractError);
+        assert.deepEqual(error.diagnostics, [
+          {
+            index: 0,
+            code: "invalid",
+            message:
+              "technical anchor must equal a complete authoritative changed line or file path.",
+          },
+        ]);
+        return true;
+      },
+    );
   });
 
   it("covers every defect class without accepting model-controlled prose fields", async () => {
@@ -1031,14 +1058,21 @@ index 1111111..3333333 100644
 index 1111111..2222222 100644
 --- a/source.ts
 +++ b/source.ts
-@@ -1 +1 @@
+@@ -1 +1,2 @@
 -const previous = true;
-+const Straße = STRASSE;
++const Straße = true;
++const STRASSE = true;
 `;
     const result = await validateModelReviewOutput(
       output([
-        finding({ range: { start: 1, end: 1, side: "RIGHT" }, anchor: "Straße" }),
-        finding({ range: { start: 1, end: 1, side: "RIGHT" }, anchor: "STRASSE" }),
+        finding({
+          range: { start: 1, end: 1, side: "RIGHT" },
+          anchor: "const Straße = true;",
+        }),
+        finding({
+          range: { start: 2, end: 2, side: "RIGHT" },
+          anchor: "const STRASSE = true;",
+        }),
       ]),
       { checkout, diff },
     );

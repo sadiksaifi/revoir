@@ -41,12 +41,12 @@ finding about an eligible dependency-manifest change. Completed CI may support a
 CI is intentionally absent and must never be awaited.
 Report only observed, actionable P0-P3 issues. Suppress style preferences and anything already
 enforced by standard formatting or lint automation. Return exactly one JSON value with this shape:
-{"version":1,"findings":[{"priority":"P0|P1|P2|P3","path":"repository/relative/path","range":{"start":1,"end":1,"side":"RIGHT|LEFT"},"defectKind":"correctness|validation|resource-lifecycle|concurrency|security|compatibility|error-handling|test-coverage","impactKind":"incorrect-result|operation-failure|data-loss|resource-leak|execution-stall|security-exposure|compatibility-break|regression-risk","fixAction":"guard|validate|preserve|propagate|synchronize|release|restore|add-test","anchor":"exact technical text copied from the selected changed lines or file change"}]}.
+{"version":1,"findings":[{"priority":"P0|P1|P2|P3","path":"repository/relative/path","range":{"start":1,"end":1,"side":"RIGHT|LEFT"},"defectKind":"correctness|validation|resource-lifecycle|concurrency|security|compatibility|error-handling|test-coverage","impactKind":"incorrect-result|operation-failure|data-loss|resource-leak|execution-stall|security-exposure|compatibility-break|regression-risk","fixAction":"guard|validate|preserve|propagate|synchronize|release|restore|add-test","anchor":"one complete changed line copied exactly, or the exact path for a genuinely file-level change"}]}.
 Use RIGHT only for added head lines and LEFT only for deleted base lines. Use range:null only for a
-valid file-level issue with no exact changed-line anchor. Do not include a fingerprint; Revoir
+valid file-level issue with no unique exact changed-line anchor. Do not include a fingerprint; Revoir
 derives it deterministically after validation. Choose only the listed semantic enum values. Copy
-anchor exactly, including Unicode normalization and case; never paraphrase it. Revoir verifies the
-anchor against the authoritative diff and renders all review prose locally. Do not include unknown
+the complete anchor exactly, including Unicode normalization and case; never shorten or paraphrase
+it. Revoir verifies the anchor against the authoritative diff and renders all review prose locally. Do not include unknown
 fields, prose, Markdown, praise, summaries, severity explanations, merge instructions, boilerplate,
 or speculative concerns.`;
 

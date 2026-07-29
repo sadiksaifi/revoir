@@ -163,8 +163,10 @@ function validateTechnicalAnchor(finding: ModelFindingV1, file: DiffFile): void 
               changedLineKey(finding.range!.side, finding.range!.start + offset),
             ) ?? "",
         );
-  if (!observed.some((value) => value.includes(finding.anchor))) {
-    throw new Error("technical anchor is not present in the authoritative changed content.");
+  if (!observed.some((value) => value.trim() === finding.anchor)) {
+    throw new Error(
+      "technical anchor must equal a complete authoritative changed line or file path.",
+    );
   }
 }
 

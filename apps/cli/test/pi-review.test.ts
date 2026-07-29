@@ -143,7 +143,7 @@ describe("Pi clean review adapter", () => {
             defectKind: "concurrency",
             impactKind: "execution-stall",
             fixAction: "synchronize",
-            anchor: "current",
+            anchor: "const current = true;",
           },
           {
             priority: "P9",
