@@ -16,6 +16,11 @@ catalogs:
       specifier: ^7.0.2
       version: 7.0.2
 
+patchedDependencies:
+  '@yao-pkg/pkg@6.21.0':
+    hash: 787348ae008754ef50c6d08d652c52e5067f9fb3a89d3d26dd5c6cb6049b0a4e
+    path: patches/@yao-pkg__pkg@6.21.0.patch
+
 importers:
 
   .:
@@ -41,7 +46,7 @@ importers:
         version: 26.1.1
       '@yao-pkg/pkg':
         specifier: 6.21.0
-        version: 6.21.0
+        version: 6.21.0(patch_hash=787348ae008754ef50c6d08d652c52e5067f9fb3a89d3d26dd5c6cb6049b0a4e)
       tsx:
         specifier: 'catalog:'
         version: 4.23.1
@@ -2919,7 +2924,7 @@ snapshots:
       - bare-buffer
       - react-native-b4a
 
-  '@yao-pkg/pkg@6.21.0':
+  '@yao-pkg/pkg@6.21.0(patch_hash=787348ae008754ef50c6d08d652c52e5067f9fb3a89d3d26dd5c6cb6049b0a4e)':
     dependencies:
       '@babel/generator': 7.29.7
       '@babel/parser': 7.29.7

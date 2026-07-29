@@ -6,6 +6,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { assertNoEnhancedSeaTemporaryEntrypoint } from "./release-validation.mjs";
+
 const cliDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repository = resolve(cliDirectory, "..", "..");
 const releaseDirectory = join(repository, "artifacts", `revoir-macos-${process.arch}`);
@@ -76,6 +78,7 @@ async function assertFrozenTools() {
 
 async function assertArtifactScan(file) {
   const contents = await readFile(file);
+  assertNoEnhancedSeaTemporaryEntrypoint(contents);
   const forbiddenBuildPaths = [repository, homedir()].filter((value) => value.length > 1);
   if (forbiddenBuildPaths.some((value) => contents.includes(Buffer.from(value)))) {
     throw new Error("Standalone artifact contains an absolute build-machine path.");

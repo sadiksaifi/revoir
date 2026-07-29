@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { assertNoEnhancedSeaTemporaryEntrypoint } from "../scripts/release-validation.mjs";
 import {
   createReleaseMetadata,
   installStandaloneExecutable,
@@ -11,6 +12,21 @@ import {
 } from "../src/release.js";
 
 describe("standalone macOS release", () => {
+  it("rejects an Enhanced SEA entrypoint from a random packager temporary directory", () => {
+    assert.throws(
+      () =>
+        assertNoEnhancedSeaTemporaryEntrypoint(
+          Buffer.from(
+            "\0/var/folders/t9/build/T/pkg-sea-SWm37x/sea-main.js\0relative:sea-main.js\0",
+          ),
+        ),
+      /random Enhanced SEA temporary entrypoint/u,
+    );
+    assert.doesNotThrow(() =>
+      assertNoEnhancedSeaTemporaryEntrypoint(Buffer.from("\0sea-main.js\0")),
+    );
+  });
+
   it("records the frozen runtime, packager, architecture, lockfile, and unsigned checksum", () => {
     assert.deepEqual(
       createReleaseMetadata({

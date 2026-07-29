@@ -21,6 +21,7 @@ describe("clean-checkout development entry point", () => {
     checkout = await mkdtemp(join(tmpdir(), "revoir-dev-smoke-"));
     await Promise.all([
       cp(join(workspace, "package.json"), join(checkout, "package.json")),
+      cp(join(workspace, "patches"), join(checkout, "patches"), { recursive: true }),
       cp(join(workspace, "pnpm-lock.yaml"), join(checkout, "pnpm-lock.yaml")),
       cp(join(workspace, "pnpm-workspace.yaml"), join(checkout, "pnpm-workspace.yaml")),
       mkdir(join(checkout, "apps"), { recursive: true }),
