@@ -84,8 +84,15 @@ describe("GitHub review evidence", () => {
       if (url.endsWith(`/commits/${"2".repeat(40)}/check-runs?per_page=100&page=1`)) {
         pendingObserved = true;
         return json({
-          total_count: 3,
+          total_count: 4,
           check_runs: [
+            {
+              name: "AI Review",
+              status: "completed",
+              conclusion: "success",
+              app: { slug: "revoir-test" },
+              output: { title: "Review completed", summary: "No actionable issues." },
+            },
             {
               name: "lint",
               status: "completed",

@@ -8,6 +8,7 @@ import { createConfiguration } from "../src/config/schema.js";
 import type { GitHubReviewEvidence } from "../src/review/evidence.js";
 import type { ReviewFindingV1 } from "../src/review/findings.js";
 import type {
+  GitHubReviewCheckCompletion,
   GitHubReviewGateway,
   GitHubReviewSession,
   ReviewReaction,
@@ -136,6 +137,9 @@ function pullRequest(): PullRequestSnapshot {
 function harness(
   options: {
     currentSha?: string;
+    checkCompletionError?: Error;
+    checkCompletionErrorAttempts?: number;
+    checkCreationError?: Error;
     evidence?: GitHubReviewEvidence;
     pullRequest?: PullRequestSnapshot;
     review?: ReviewEngine["review"];
@@ -178,6 +182,8 @@ function harness(
   } = {},
 ) {
   const events: string[] = [];
+  const checkCompletions: GitHubReviewCheckCompletion[] = [];
+  const checkStartedShas: string[] = [];
   const createdPublications: ReviewPublication[] = [];
   const snapshot = options.pullRequest ?? pullRequest();
   let currentSha = options.currentSha ?? snapshot.headSha;
@@ -195,10 +201,30 @@ function harness(
     options.pendingDeletionError === undefined
       ? 0
       : (options.pendingDeletionErrorAttempts ?? Number.POSITIVE_INFINITY);
+  let checkCompletionFailures =
+    options.checkCompletionError === undefined
+      ? 0
+      : (options.checkCompletionErrorAttempts ?? Number.POSITIVE_INFINITY);
   const ownedReactions = new Set<ReviewReaction>();
   let pendingReviewRemoved = false;
   const session: GitHubReviewSession = {
     installationToken: "installation-secret",
+    async startReviewCheck(_reference, headSha) {
+      checkStartedShas.push(headSha);
+      if (options.checkCreationError !== undefined) {
+        throw options.checkCreationError;
+      }
+      return {
+        id: 30,
+        async complete(completion) {
+          checkCompletions.push(completion);
+          if (options.checkCompletionError !== undefined && checkCompletionFailures > 0) {
+            checkCompletionFailures -= 1;
+            throw options.checkCompletionError;
+          }
+        },
+      };
+    },
     async getPullRequest() {
       events.push("get-pr");
       return snapshot;
@@ -402,6 +428,8 @@ function harness(
       }),
   };
   return {
+    checkCompletions,
+    checkStartedShas,
     createdPublications,
     events,
     ownedReactions,
@@ -441,12 +469,20 @@ function validatedFinding(): ReviewFindingV1 {
 
 describe("clean review orchestrator", () => {
   it("runs the exact clean lifecycle after eligibility and cleans before completion", async () => {
-    const { events, orchestrator } = harness();
+    const { checkCompletions, checkStartedShas, events, orchestrator } = harness();
     assert.deepEqual(await orchestrator.review(reference), {
       status: "clean",
       reviewedSha: "2".repeat(40),
       currentSha: "2".repeat(40),
     });
+    assert.deepEqual(checkStartedShas, ["2".repeat(40)]);
+    assert.deepEqual(checkCompletions, [
+      {
+        conclusion: "success",
+        title: "Review completed",
+        summary: "Revoir completed the review and found no actionable issues.",
+      },
+    ]);
     assert.deepEqual(events, [
       "authenticate",
       "get-pr",
@@ -467,6 +503,68 @@ describe("clean review orchestrator", () => {
       "get-head",
       "remove-failure-comment",
     ]);
+  });
+
+  it("completes the execution check successfully when review findings are published", async () => {
+    const reviewed = harness({
+      review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+    });
+
+    assert.equal((await reviewed.orchestrator.review(reference)).status, "findings");
+    assert.deepEqual(reviewed.checkCompletions, [
+      {
+        conclusion: "success",
+        title: "Review completed with findings",
+        summary:
+          "Revoir completed the review and published 1 new finding. Review threads contain the details.",
+      },
+    ]);
+  });
+
+  it("cancels the execution check when a newer pull request head supersedes the review", async () => {
+    const reviewed = harness({ mutateHeadDuring: "workspace-prepare" });
+
+    assert.equal((await reviewed.orchestrator.review(reference)).status, "stale");
+    assert.deepEqual(reviewed.checkCompletions, [
+      {
+        conclusion: "cancelled",
+        title: "Review superseded",
+        summary:
+          "The pull request head changed from 2222222 to 3333333 before the review completed.",
+      },
+    ]);
+  });
+
+  it("fails the execution check when the review engine fails", async () => {
+    const reviewed = harness({
+      review: async () => {
+        throw new Error("Pi failed");
+      },
+    });
+
+    await assert.rejects(() => reviewed.orchestrator.review(reference), /Pi failed/u);
+    assert.deepEqual(reviewed.checkCompletions, [
+      {
+        conclusion: "failure",
+        title: "Review failed",
+        summary:
+          "Revoir could not complete this review. See the failure comment or service logs for details.",
+      },
+    ]);
+  });
+
+  it("retries transient execution-check completion failures", async () => {
+    const reviewed = harness({
+      checkCompletionError: new Error("GitHub check update failed"),
+      checkCompletionErrorAttempts: 2,
+    });
+
+    assert.equal((await reviewed.orchestrator.review(reference)).status, "clean");
+    assert.equal(reviewed.checkCompletions.length, 3);
+    assert.equal(
+      reviewed.checkCompletions.every((completion) => completion.conclusion === "success"),
+      true,
+    );
   });
 
   it("publishes a finding supported by failed CI evidence without waiting for pending CI", async () => {
@@ -1194,6 +1292,11 @@ describe("clean review orchestrator", () => {
       () => timedOut.events.includes("delete-10"),
       "timed-out review did not finish terminal cleanup",
     );
+    await waitFor(
+      () => timedOut.checkCompletions.length === 1,
+      "timed-out review did not complete its check run",
+    );
+    assert.equal(timedOut.checkCompletions[0]?.conclusion, "timed_out");
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
   });
 

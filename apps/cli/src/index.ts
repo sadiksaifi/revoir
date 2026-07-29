@@ -40,8 +40,12 @@ export {
   GitHubAppReviewGateway,
   createGitHubAppJwt,
   type GitHubPendingReview,
+  type GitHubReviewCheck,
+  type GitHubReviewCheckCompletion,
+  type GitHubReviewCheckConclusion,
   type GitHubReviewGateway,
   type GitHubReviewSession,
+  REVIEW_CHECK_NAME,
 } from "./review/github.js";
 export {
   FINDING_CONTRACT_VERSION,

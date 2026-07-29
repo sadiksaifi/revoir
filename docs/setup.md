@@ -142,9 +142,13 @@ Grant these repository permissions:
 
 - Metadata: read
 - Contents: read
-- Checks: read
+- Checks: read and write
 - Actions: read
 - Pull requests: read and write
+
+If the App was already installed with read-only Checks access, update the App
+permission and approve the installation's new permission request before
+upgrading Revoir.
 
 Subscribe only to the **Pull request** event. Install the App only on the
 repositories listed in `GITHUB_REPOSITORIES`. The same App may be installed in
@@ -276,6 +280,14 @@ Test it manually:
 ~/.local/bin/revoir review https://github.com/OWNER/REPOSITORY/pull/NUMBER
 ```
 
-A clean review adds 👀 while running, then 👍 without posting review text.
+A review creates an **AI Review** check while running and completes it on every
+terminal path. A clean review also adds 👀 while running, then 👍 without
+posting review text.
+
+After the first check is reported, optionally add **AI Review** as a required
+status check in the repository ruleset. This blocks merging while Revoir is
+running or if it fails; findings remain enforced through required conversation
+resolution.
+
 Opening, reopening, marking ready, or pushing a new commit also triggers the
 automatic webhook flow.
