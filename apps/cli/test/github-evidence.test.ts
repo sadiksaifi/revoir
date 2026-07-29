@@ -87,7 +87,7 @@ describe("GitHub review evidence", () => {
           total_count: 4,
           check_runs: [
             {
-              name: "AI Review",
+              name: "RevoirAI Review",
               status: "completed",
               conclusion: "success",
               app: { slug: "revoir-test" },

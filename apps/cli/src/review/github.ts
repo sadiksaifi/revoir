@@ -21,7 +21,7 @@ import {
 
 export type ReviewReaction = "eyes" | "+1" | "confused";
 
-export const REVIEW_CHECK_NAME = "AI Review";
+export const REVIEW_CHECK_NAME = "RevoirAI Review";
 
 export type GitHubReviewCheckConclusion = "cancelled" | "failure" | "success" | "timed_out";
 

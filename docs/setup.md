@@ -280,11 +280,11 @@ Test it manually:
 ~/.local/bin/revoir review https://github.com/OWNER/REPOSITORY/pull/NUMBER
 ```
 
-A review creates an **AI Review** check while running and completes it on every
+A review creates a **RevoirAI Review** check while running and completes it on every
 terminal path. A clean review also adds 👀 while running, then 👍 without
 posting review text.
 
-After the first check is reported, optionally add **AI Review** as a required
+After the first check is reported, optionally add **RevoirAI Review** as a required
 status check in the repository ruleset. This blocks merging while Revoir is
 running or if it fails; findings remain enforced through required conversation
 resolution.

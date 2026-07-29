@@ -272,7 +272,7 @@ describe("GitHub App review gateway", () => {
       runExternalId = externalId,
     ) => ({
       id,
-      name: "AI Review",
+      name: "RevoirAI Review",
       head_sha: headSha,
       status,
       external_id: runExternalId,
@@ -289,7 +289,7 @@ describe("GitHub App review gateway", () => {
       }
       if (
         url.endsWith(
-          `/commits/${headSha}/check-runs?check_name=AI%20Review&filter=all&per_page=100&page=1`,
+          `/commits/${headSha}/check-runs?check_name=RevoirAI%20Review&filter=all&per_page=100&page=1`,
         )
       ) {
         return json({
@@ -332,7 +332,7 @@ describe("GitHub App review gateway", () => {
 
     const reconciliation = requests.find(({ url }) => url.endsWith("/check-runs/70"));
     assert.deepEqual(JSON.parse(String(reconciliation?.init?.body)), {
-      name: "AI Review",
+      name: "RevoirAI Review",
       status: "completed",
       conclusion: "cancelled",
       completed_at: "1970-01-01T00:16:40.000Z",
@@ -357,7 +357,7 @@ describe("GitHub App review gateway", () => {
       ({ url, init }) => url.endsWith("/check-runs") && init?.method === "POST",
     );
     assert.deepEqual(JSON.parse(String(creation?.init?.body)), {
-      name: "AI Review",
+      name: "RevoirAI Review",
       head_sha: headSha,
       status: "in_progress",
       external_id: externalId,
@@ -369,7 +369,7 @@ describe("GitHub App review gateway", () => {
     });
     const completion = requests.find(({ url }) => url.endsWith("/check-runs/80"));
     assert.deepEqual(JSON.parse(String(completion?.init?.body)), {
-      name: "AI Review",
+      name: "RevoirAI Review",
       status: "completed",
       conclusion: "success",
       completed_at: "1970-01-01T00:16:40.000Z",
