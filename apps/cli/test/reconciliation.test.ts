@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { findingFingerprint, type ReviewFindingV1 } from "../src/review/findings.js";
+import { findingFingerprint, type ReviewFindingV2 } from "../src/review/findings.js";
 import { planFindingReconciliation } from "../src/review/reconciliation.js";
 
-function finding(fingerprint: string, startLine: number): ReviewFindingV1 {
+function finding(fingerprint: string, startLine: number): ReviewFindingV2 {
   return {
-    version: 1,
+    version: 2,
     fingerprint,
     priority: "P1",
     path: "source.ts",
@@ -14,6 +14,7 @@ function finding(fingerprint: string, startLine: number): ReviewFindingV1 {
     defectKind: "correctness",
     impactKind: "incorrect-result",
     fixAction: "restore",
+    reason: "The changed value produces an incorrect result for supported callers.",
     anchor: "currentValue",
     attachment: {
       kind: "inline",
@@ -30,26 +31,6 @@ function token(character: string): string {
 }
 
 describe("finding reconciliation", () => {
-  it("keeps a finding published with the prerequisite v1 fingerprint unchanged", () => {
-    const unchanged = finding("a".repeat(64), 40);
-    const publishedV1Fingerprint =
-      "ad56f42afdf550df6ca0ae4627140ed572f1e4a5c4be3754b838503a1aea2920";
-
-    assert.deepEqual(
-      planFindingReconciliation([unchanged], {
-        activeFingerprints: [publishedV1Fingerprint],
-        ownedOpenThreads: [{ id: "THREAD_PUBLISHED_V1", fingerprint: publishedV1Fingerprint }],
-        runHeadShas: ["1".repeat(40)],
-      }),
-      {
-        netNewFindings: [],
-        obsoleteThreadIds: [],
-        currentBodyFindings: [],
-        bodyStateChanged: false,
-      },
-    );
-  });
-
   it("keeps unchanged findings, publishes net-new findings, and resolves obsolete owned threads", () => {
     const unchanged = finding("a".repeat(64), 40);
     const changed = finding("b".repeat(64), 12);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createPublicKey, createVerify } from "node:crypto";
 import { describe, it } from "node:test";
 
-import type { ReviewFindingV1 } from "../src/review/findings.js";
+import type { ReviewFindingV2 } from "../src/review/findings.js";
 import {
   createGitHubAppJwt,
   GitHubAppReviewGateway,
@@ -70,9 +70,9 @@ function ownedReviewThreadResponse(id: string, fingerprint: string) {
   };
 }
 
-function reviewFileFinding(fingerprint: string, path: string): ReviewFindingV1 {
+function reviewFileFinding(fingerprint: string, path: string): ReviewFindingV2 {
   return {
-    version: 1,
+    version: 2,
     fingerprint,
     priority: "P1",
     path,
@@ -80,6 +80,7 @@ function reviewFileFinding(fingerprint: string, path: string): ReviewFindingV1 {
     defectKind: "correctness",
     impactKind: "incorrect-result",
     fixAction: "restore",
+    reason: "The changed file produces an incorrect result for supported callers.",
     anchor: path,
     attachment: { kind: "file", path },
   };
@@ -94,15 +95,15 @@ function ownReview(id: number, body: string | null, state = "COMMENTED") {
   };
 }
 
-function legacyReviewBody(candidate: ReviewFindingV1): string {
+function legacyReviewBody(candidate: ReviewFindingV2): string {
   return renderFileFinding(candidate);
 }
 
-function explicitReviewBody(candidates: readonly ReviewFindingV1[]): string {
+function explicitReviewBody(candidates: readonly ReviewFindingV2[]): string {
   return createReviewPublication("2".repeat(40), [], candidates).payload.body!;
 }
 
-function markerOnlyExplicitReviewBody(candidate: ReviewFindingV1): string {
+function markerOnlyExplicitReviewBody(candidate: ReviewFindingV2): string {
   return `<!-- revoir:body-state:v1 -->\n<!-- revoir:body-finding:v1:${candidate.fingerprint} -->`;
 }
 
@@ -505,8 +506,8 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
     ).authenticate(configuration.github, reference, new AbortController().signal);
-    const candidate: ReviewFindingV1 = {
-      version: 1,
+    const candidate: ReviewFindingV2 = {
+      version: 2,
       fingerprint: "a".repeat(64),
       priority: "P1",
       path: "source.ts",
@@ -514,6 +515,7 @@ describe("GitHub App review gateway", () => {
       defectKind: "concurrency",
       impactKind: "execution-stall",
       fixAction: "propagate",
+      reason: "The signal is not propagated, so the active review cannot stop.",
       anchor: "signal",
       attachment: {
         kind: "inline",
@@ -588,7 +590,7 @@ describe("GitHub App review gateway", () => {
     const ownThreadFingerprint = "b".repeat(64);
     const markerShapedSource = `<!-- revoir:finding:v1:${"c".repeat(64)} -->`;
     const ownThreadBody = renderFileFinding({
-      version: 1,
+      version: 2,
       fingerprint: ownThreadFingerprint,
       fingerprintAliases: ["9".repeat(64)],
       priority: "P1",
@@ -597,6 +599,7 @@ describe("GitHub App review gateway", () => {
       defectKind: "correctness",
       impactKind: "incorrect-result",
       fixAction: "restore",
+      reason: "The marker-shaped path produces an incorrect result.",
       anchor: markerShapedSource,
       attachment: { kind: "file", path: markerShapedSource },
     });
@@ -844,8 +847,8 @@ describe("GitHub App review gateway", () => {
     const olderFingerprint = "a".repeat(64);
     const latestFingerprint = "b".repeat(64);
     const ignoredFingerprint = "c".repeat(64);
-    const latestFinding: ReviewFindingV1 = {
-      version: 1,
+    const latestFinding: ReviewFindingV2 = {
+      version: 2,
       fingerprint: latestFingerprint,
       priority: "P1",
       path: "source.ts",
@@ -853,6 +856,7 @@ describe("GitHub App review gateway", () => {
       defectKind: "correctness",
       impactKind: "incorrect-result",
       fixAction: "restore",
+      reason: "The changed source file produces an incorrect result.",
       anchor: "source.ts",
       attachment: { kind: "file", path: "source.ts" },
     };
@@ -1207,8 +1211,8 @@ describe("GitHub App review gateway", () => {
   it("discovers full body snapshots across delta, retirement, and clean runs", async () => {
     const historicalFingerprint = "a".repeat(64);
     const latestFingerprint = "b".repeat(64);
-    const fileFinding: ReviewFindingV1 = {
-      version: 1,
+    const fileFinding: ReviewFindingV2 = {
+      version: 2,
       fingerprint: historicalFingerprint,
       priority: "P1",
       path: "source.ts",
@@ -1216,10 +1220,11 @@ describe("GitHub App review gateway", () => {
       defectKind: "correctness",
       impactKind: "incorrect-result",
       fixAction: "restore",
+      reason: "The changed source file produces an incorrect result.",
       anchor: "source.ts",
       attachment: { kind: "file", path: "source.ts" },
     };
-    const fallbackFinding: ReviewFindingV1 = {
+    const fallbackFinding: ReviewFindingV2 = {
       ...fileFinding,
       range: { start: 2, end: 2, side: "RIGHT" },
       attachment: {
@@ -1230,7 +1235,7 @@ describe("GitHub App review gateway", () => {
         side: "RIGHT",
       },
     };
-    const latestFinding: ReviewFindingV1 = {
+    const latestFinding: ReviewFindingV2 = {
       ...fileFinding,
       fingerprint: latestFingerprint,
       path: "latest.ts",

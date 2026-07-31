@@ -713,10 +713,10 @@ describe("CLI", () => {
 
     const sourceSecret = "PRIVATE_SOURCE_TOKEN";
     const outputs: readonly [string, RegExp][] = [
-      [`{"version":"${sourceSecret}","findings":[]}`, /expected version 1/u],
+      [`{"version":"${sourceSecret}","findings":[]}`, /expected version 2/u],
       [
         JSON.stringify({
-          version: 1,
+          version: 2,
           findings: [
             {
               priority: "P1",
@@ -725,6 +725,7 @@ describe("CLI", () => {
               defectKind: "correctness",
               impactKind: "incorrect-result",
               fixAction: "guard",
+              reason: "The changed path produces an incorrect result.",
               anchor: "source.ts",
               [sourceSecret]: "echo",
             },
@@ -775,7 +776,7 @@ describe("CLI", () => {
       async review() {
         await validateModelReviewOutput(
           JSON.stringify({
-            version: 1,
+            version: 2,
             findings: [
               {
                 priority: "P1",
@@ -784,6 +785,7 @@ describe("CLI", () => {
                 defectKind: modelDefectKind,
                 impactKind: "incorrect-result",
                 fixAction: "guard",
+                reason: "The changed path produces an incorrect result.",
                 anchor: "source.ts",
               },
             ],
@@ -825,7 +827,7 @@ describe("CLI", () => {
       async review() {
         await validateModelReviewOutput(
           JSON.stringify({
-            version: 1,
+            version: 2,
             findings: [
               {
                 priority: "P1",
@@ -834,6 +836,7 @@ describe("CLI", () => {
                 defectKind: "correctness",
                 impactKind: "incorrect-result",
                 fixAction: "guard",
+                reason: "The changed path produces an incorrect result.",
                 anchor: modelAnchor,
               },
             ],

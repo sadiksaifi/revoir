@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 
 import { createConfiguration } from "../src/config/schema.js";
 import type { GitHubReviewEvidence } from "../src/review/evidence.js";
-import type { ReviewFindingV1 } from "../src/review/findings.js";
+import type { ReviewFindingV2 } from "../src/review/findings.js";
 import type {
   GitHubReviewCheckCompletion,
   GitHubReviewGateway,
@@ -448,9 +448,9 @@ function harness(
   };
 }
 
-function validatedFinding(): ReviewFindingV1 {
+function validatedFinding(): ReviewFindingV2 {
   return {
-    version: 1,
+    version: 2,
     fingerprint: "a".repeat(64),
     priority: "P1",
     path: "source.ts",
@@ -458,6 +458,7 @@ function validatedFinding(): ReviewFindingV1 {
     defectKind: "concurrency",
     impactKind: "execution-stall",
     fixAction: "propagate",
+    reason: "The cancellation signal is not propagated, so the active review cannot stop.",
     anchor: "signal",
     attachment: {
       kind: "inline",

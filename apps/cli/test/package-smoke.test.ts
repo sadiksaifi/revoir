@@ -19,7 +19,7 @@ describe("packaged runtime smoke", () => {
           return {
             abort() {},
             async run() {
-              return '{"version":1,"findings":[]}';
+              return '{"version":2,"findings":[]}';
             },
             dispose() {
               disposed += 1;

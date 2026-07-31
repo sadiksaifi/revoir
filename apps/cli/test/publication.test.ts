@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { ReviewFindingV1 } from "../src/review/findings.js";
+import type { ReviewFindingV2 } from "../src/review/findings.js";
 import {
   createReviewPublication,
   renderFileFinding,
@@ -9,9 +9,9 @@ import {
   renderRunMarker,
 } from "../src/review/publication.js";
 
-function finding(overrides: Partial<ReviewFindingV1> = {}): ReviewFindingV1 {
+function finding(overrides: Partial<ReviewFindingV2> = {}): ReviewFindingV2 {
   return {
-    version: 1,
+    version: 2,
     fingerprint: "a".repeat(64),
     priority: "P1",
     path: "src/review.ts",
@@ -19,6 +19,8 @@ function finding(overrides: Partial<ReviewFindingV1> = {}): ReviewFindingV1 {
     defectKind: "concurrency",
     impactKind: "execution-stall",
     fixAction: "synchronize",
+    reason:
+      "A second submission replaces `submitSignal`, leaving the earlier review without cancellation.",
     anchor: "submitSignal",
     attachment: {
       kind: "inline",
@@ -151,7 +153,7 @@ describe("findings-only review publication", () => {
       assert.match(text, /- Location: ``src\/name`with-tick\.ts:10-12 \(RIGHT\)``/u);
       assert.match(
         text,
-        /- Issue: ``name`with-tick`` performs an unsynchronized concurrent transition\./u,
+        /- Reason: A second submission replaces \\`submitSignal\\`, leaving the earlier review without cancellation\./u,
       );
       assert.match(text, /- Impact: The affected execution path stops making progress\./u);
       assert.match(
@@ -174,5 +176,19 @@ describe("findings-only review publication", () => {
     const publication = createReviewPublication("3".repeat(40), [], []);
     assert.doesNotMatch(publication.payload.body ?? "", /### P[0-3]/u);
     assert.match(publication.payload.body ?? "", /<!-- revoir:body-state:v1 -->/u);
+  });
+
+  it("renders architecture, performance, and privacy semantics honestly", () => {
+    const semantics = [
+      ["architecture", "boundary-violation", "decouple", "Architecture defect"],
+      ["performance", "performance-degradation", "optimize", "Performance regression"],
+      ["privacy", "privacy-exposure", "minimize", "Privacy defect"],
+    ] as const;
+
+    for (const [defectKind, impactKind, fixAction, title] of semantics) {
+      const text = renderInlineFinding(finding({ defectKind, impactKind, fixAction }));
+      assert.match(text, new RegExp(`^### P1 — ${title}$`, "mu"));
+      assert.match(text, /- Reason: A second submission replaces/u);
+    }
   });
 });

@@ -63,7 +63,7 @@ class FakeSessionFactory implements PiSessionFactory {
   readonly options: PiSessionOptions[] = [];
   readonly prompts: string[] = [];
   disposed = 0;
-  result = '{"version":1,"findings":[]}';
+  result = '{"version":2,"findings":[]}';
 
   async create(options: PiSessionOptions): Promise<PiSession> {
     this.options.push(options);
@@ -153,11 +153,13 @@ describe("Pi clean review adapter", () => {
     assert.match(sessions.options[0]?.systemPrompt ?? "", /full local/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /AGENTS\.md takes/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /install dependencies/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /project-native verification/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not push commits/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /"version":1/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /prefer non-fixing verification/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /original reviewed HEAD/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /format-write, code generation/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /"version":2/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /P0\|P1\|P2\|P3/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /"defectKind"/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /"reason"/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /renders all review prose locally/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /formatting or lint automation/u);
     assert.match(
@@ -165,7 +167,10 @@ describe("Pi clean review adapter", () => {
       /Do not repeat a concern already raised as review feedback/u,
     );
     assert.match(sessions.options[0]?.systemPrompt ?? "", /replies and thread resolution/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /linked issue bodies as requirements/u);
+    assert.match(
+      sessions.options[0]?.systemPrompt ?? "",
+      /linked issue and pull-request bodies and comments as requirements/u,
+    );
     assert.match(sessions.options[0]?.systemPrompt ?? "", /do not suppress a defect/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not include a fingerprint/u);
     assert.equal(sessions.prompts.length, 1);
@@ -194,7 +199,7 @@ describe("Pi clean review adapter", () => {
       await commitReviewedHead(checkout);
       const sessions = new FakeSessionFactory();
       sessions.result = JSON.stringify({
-        version: 1,
+        version: 2,
         findings: [
           {
             priority: "P1",
@@ -203,6 +208,7 @@ describe("Pi clean review adapter", () => {
             defectKind: "concurrency",
             impactKind: "execution-stall",
             fixAction: "synchronize",
+            reason: "The new transition can replace the active signal and stall the earlier review.",
             anchor: "const current = true;",
           },
           {
@@ -212,6 +218,7 @@ describe("Pi clean review adapter", () => {
             defectKind: "correctness",
             impactKind: "incorrect-result",
             fixAction: "guard",
+            reason: "The file-level change produces an incorrect result.",
             anchor: "source.ts",
           },
         ],
@@ -241,6 +248,10 @@ index 1111111..2222222 100644
       );
       assert.equal(result.findings.length, 1);
       assert.equal(result.findings[0]?.priority, "P1");
+      assert.equal(
+        result.findings[0]?.reason,
+        "The new transition can replace the active signal and stall the earlier review.",
+      );
       assert.equal(result.diagnostics.length, 1);
       assert.equal(sessions.disposed, 1);
     } finally {
@@ -255,7 +266,7 @@ index 1111111..2222222 100644
       await writeFile(join(checkout, "source.ts"), "const current = true;\n");
       const sessions = new FakeSessionFactory();
       sessions.result = JSON.stringify({
-        version: 1,
+        version: 2,
         findings: [
           {
             priority: "P9",
@@ -264,6 +275,7 @@ index 1111111..2222222 100644
             defectKind: sourceSecret,
             impactKind: "incorrect-result",
             fixAction: "guard",
+            reason: "The invalid candidate contains a private semantic value.",
             anchor: "source.ts",
           },
           {
@@ -273,6 +285,7 @@ index 1111111..2222222 100644
             defectKind: "correctness",
             impactKind: "incorrect-result",
             fixAction: "guard",
+            reason: "The invalid candidate escapes the reviewed repository.",
             anchor: "source.ts",
           },
         ],
@@ -321,7 +334,7 @@ index 1111111..2222222 100644
 
   it("rejects unknown contract versions", async () => {
     const sessions = new FakeSessionFactory();
-    sessions.result = '{"version":2,"findings":[]}';
+    sessions.result = '{"version":1,"findings":[]}';
     const engine = new PiReviewEngine(
       { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
       sessions,
@@ -417,7 +430,7 @@ index 1111111..2222222 100644
       },
       async run() {
         runCalls += 1;
-        return '{"version":1,"findings":[]}';
+        return '{"version":2,"findings":[]}';
       },
       async dispose() {
         disposalStarted = true;
@@ -506,7 +519,7 @@ index 1111111..2222222 100644
     assert.equal(abortCalls, 1);
     assert.equal(disposalStarted, true);
     assert.equal(settled, false);
-    finishRun?.('{"version":1,"findings":[]}');
+    finishRun?.('{"version":2,"findings":[]}');
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
     });
