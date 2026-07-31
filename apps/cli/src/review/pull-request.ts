@@ -23,6 +23,7 @@ export interface PullRequestRepository {
 
 export interface PullRequestSnapshot {
   number: number;
+  title?: string;
   description?: string;
   state: string;
   draft: boolean;

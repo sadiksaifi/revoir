@@ -128,8 +128,9 @@ describe("GitHub App review gateway", () => {
     );
   });
 
-  it("mints the token for the installation that owns the requested repository", async () => {
+  it("mints the token for every configured repository in the owning installation", async () => {
     const requestedUrls: string[] = [];
+    let tokenRequestBody: unknown;
     const secondReference = parsePullRequestUrl("https://github.com/other/second/pull/18");
     const github = {
       ...configuration.github,
@@ -137,14 +138,20 @@ describe("GitHub App review gateway", () => {
         ...configuration.github.installations,
         {
           id: 9,
-          repositories: [{ id: 100, owner: "other", name: "second" }],
+          repositories: [
+            { id: 101, owner: "other", name: "linked-issues" },
+            { id: 100, owner: "other", name: "second" },
+          ],
         },
       ],
     };
     const session = await new GitHubAppReviewGateway(
-      async (input) => {
+      async (input, init) => {
         const url = String(input);
         requestedUrls.push(url);
+        if (url.endsWith("/access_tokens")) {
+          tokenRequestBody = JSON.parse(String(init?.body));
+        }
         return url.endsWith("/app")
           ? json({ slug: "revoir-test" })
           : json({ token: "installation-9-secret" });
@@ -162,6 +169,7 @@ describe("GitHub App review gateway", () => {
       requestedUrls.some((url) => url.endsWith("/app/installations/8/access_tokens")),
       false,
     );
+    assert.deepEqual(tokenRequestBody, { repository_ids: [100, 101] });
   });
 
   it("uses an installation token for PR lookup and exact reaction reconciliation", async () => {

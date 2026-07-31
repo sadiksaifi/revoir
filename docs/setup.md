@@ -144,6 +144,7 @@ Grant these repository permissions:
 - Contents: read
 - Checks: read and write
 - Actions: read
+- Issues: read
 - Pull requests: read and write
 
 If the App was already installed with read-only Checks access, update the App

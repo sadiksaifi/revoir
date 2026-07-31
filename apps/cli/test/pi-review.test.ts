@@ -20,6 +20,7 @@ const execFileAsync = promisify(execFile);
 
 const pullRequest: PullRequestSnapshot = {
   number: 17,
+  title: "Keep review context complete",
   description: "Preserve the public API while changing the implementation.",
   state: "open",
   draft: false,
@@ -99,6 +100,44 @@ describe("Pi clean review adapter", () => {
               failedActionsLog: "FAIL api contract changed",
             },
           ],
+          discussion: {
+            comments: [
+              {
+                author: "maintainer",
+                body: "The retry concern was already raised.",
+                createdAt: "2026-07-29T00:00:00Z",
+                url: "https://github.com/owner/repository/pull/17#issuecomment-1",
+              },
+            ],
+            reviews: [],
+            threads: [
+              {
+                id: "THREAD_1",
+                isResolved: true,
+                path: "source.ts",
+                line: 1,
+                side: "RIGHT",
+                comments: [
+                  {
+                    author: "author",
+                    body: "Fixed in the latest revision.",
+                    createdAt: "2026-07-29T00:01:00Z",
+                    url: "https://github.com/owner/repository/pull/17#discussion_r1",
+                  },
+                ],
+              },
+            ],
+            linkedIssues: [
+              {
+                number: 9,
+                title: "Preserve retry behavior",
+                body: "Retries must remain bounded.",
+                state: "OPEN",
+                url: "https://github.com/owner/repository/issues/9",
+                comments: [],
+              },
+            ],
+          },
         },
       },
       new AbortController().signal,
@@ -121,11 +160,22 @@ describe("Pi clean review adapter", () => {
     assert.match(sessions.options[0]?.systemPrompt ?? "", /"defectKind"/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /renders all review prose locally/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /formatting or lint automation/u);
+    assert.match(
+      sessions.options[0]?.systemPrompt ?? "",
+      /Do not repeat a concern already raised as review feedback/u,
+    );
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /replies and thread resolution/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /linked issue bodies as requirements/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /do not suppress a defect/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not include a fingerprint/u);
     assert.equal(sessions.prompts.length, 1);
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.baseSha, "u"));
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.headSha, "u"));
+    assert.match(sessions.prompts[0] ?? "", /Keep review context complete/u);
     assert.match(sessions.prompts[0] ?? "", /Preserve the public API/u);
+    assert.match(sessions.prompts[0] ?? "", /The retry concern was already raised/u);
+    assert.match(sessions.prompts[0] ?? "", /Fixed in the latest revision/u);
+    assert.match(sessions.prompts[0] ?? "", /Preserve retry behavior/u);
     assert.match(sessions.prompts[0] ?? "", /FAIL api contract changed/u);
     assert.match(sessions.prompts[0] ?? "", /Applicable repository instructions/u);
     assert.match(sessions.prompts[0] ?? "", /Files eligible for detailed line review/u);
