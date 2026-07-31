@@ -144,6 +144,7 @@ Grant these repository permissions:
 - Contents: read
 - Checks: read
 - Actions: read
+- Issues: read
 - Pull requests: read and write
 
 Subscribe only to the **Pull request** event. Install the App only on the

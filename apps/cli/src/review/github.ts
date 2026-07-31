@@ -2,7 +2,15 @@ import { createSign } from "node:crypto";
 
 import { installationForRepository, type RevoirConfiguration } from "../config/schema.js";
 import { SecretRedactor } from "../redaction.js";
-import type { CompletedCheckEvidence, GitHubReviewEvidence } from "./evidence.js";
+import type {
+  CompletedCheckEvidence,
+  DiscussionCommentEvidence,
+  GitHubReviewEvidence,
+  LinkedIssueEvidence,
+  PullRequestDiscussionEvidence,
+  PullRequestReviewEvidence,
+  ReviewThreadEvidence,
+} from "./evidence.js";
 import { REVIEW_FAILURE_MARKER } from "./failure-marker.js";
 import type { GitHubReviewPayload, ReviewPublication } from "./publication.js";
 import { PullRequestEligibilityError } from "./pull-request.js";
@@ -313,8 +321,10 @@ function parsePullRequest(value: unknown): PullRequestSnapshot {
   const user = record(pullRequest.user, "pull request user");
   const base = record(pullRequest.base, "pull request base");
   const head = record(pullRequest.head, "pull request head");
+  const title = optionalString(pullRequest.title, "pull request title");
   return {
     number: positiveInteger(pullRequest.number, "pull request number"),
+    ...(title === undefined ? {} : { title }),
     description: optionalString(pullRequest.body, "pull request description") ?? "",
     state: string(pullRequest.state, "pull request state"),
     draft:
@@ -566,6 +576,177 @@ function parseIssueComment(value: unknown): GitHubIssueCommentResponse {
   };
 }
 
+interface GraphQlConnection {
+  nodes: readonly unknown[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+interface PendingThreadEvidence {
+  evidence: ReviewThreadEvidence;
+  comments: DiscussionCommentEvidence[];
+  commentsEndCursor: string | null;
+}
+
+interface PendingLinkedIssueEvidence {
+  id: string;
+  evidence: LinkedIssueEvidence;
+  comments: DiscussionCommentEvidence[];
+  commentsEndCursor: string | null;
+}
+
+function evidenceText(value: unknown, path: string): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value !== "string") {
+    throw new Error(`GitHub returned an invalid ${path}.`);
+  }
+  return value;
+}
+
+function evidenceAuthor(value: unknown, path: string): string {
+  if (value === undefined || value === null) {
+    return "[deleted]";
+  }
+  return string(record(value, path).login, `${path} login`);
+}
+
+function optionalPositiveInteger(value: unknown, path: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return positiveInteger(value, path);
+}
+
+function graphQlConnection(value: unknown, path: string): GraphQlConnection {
+  const connection = record(value, path);
+  if (!Array.isArray(connection.nodes)) {
+    throw new Error(`GitHub returned invalid ${path} nodes.`);
+  }
+  const pageInfo = record(connection.pageInfo, `${path} page info`);
+  if (typeof pageInfo.hasNextPage !== "boolean") {
+    throw new Error(`GitHub returned invalid ${path} pagination.`);
+  }
+  const endCursor = pageInfo.endCursor;
+  if (endCursor !== null && typeof endCursor !== "string") {
+    throw new Error(`GitHub returned an invalid ${path} end cursor.`);
+  }
+  if (pageInfo.hasNextPage && (typeof endCursor !== "string" || endCursor.length === 0)) {
+    throw new Error(`GitHub returned invalid ${path} pagination.`);
+  }
+  return {
+    nodes: connection.nodes,
+    hasNextPage: pageInfo.hasNextPage,
+    endCursor: endCursor as string | null,
+  };
+}
+
+function parseDiscussionComment(value: unknown, path: string): DiscussionCommentEvidence {
+  const comment = record(value, path);
+  return {
+    author: evidenceAuthor(comment.author, `${path} author`),
+    body: evidenceText(comment.body, `${path} body`),
+    createdAt: string(comment.createdAt, `${path} creation time`),
+    url: string(comment.url, `${path} URL`),
+  };
+}
+
+function isPendingReviewComment(value: unknown, path: string): boolean {
+  const review = record(value, path).pullRequestReview;
+  if (review === undefined || review === null) {
+    return false;
+  }
+  return (
+    string(record(review, `${path} review`).state, `${path} review state`).toUpperCase() ===
+    "PENDING"
+  );
+}
+
+function parseDiscussionComments(
+  value: unknown,
+  path: string,
+): {
+  comments: DiscussionCommentEvidence[];
+  connection: GraphQlConnection;
+} {
+  const connection = graphQlConnection(value, path);
+  return {
+    comments: connection.nodes
+      .filter((node) => node !== null)
+      .filter((node) => !isPendingReviewComment(node, `${path} comment`))
+      .map((node) => parseDiscussionComment(node, `${path} comment`)),
+    connection,
+  };
+}
+
+function parsePullRequestReviewEvidence(value: unknown): PullRequestReviewEvidence | undefined {
+  const review = record(value, "pull request review evidence");
+  const state = string(review.state, "pull request review evidence state");
+  if (state.toUpperCase() === "PENDING") {
+    return undefined;
+  }
+  const submittedAt = optionalString(
+    review.submittedAt,
+    "pull request review evidence submission time",
+  );
+  return {
+    author: evidenceAuthor(review.author, "pull request review evidence author"),
+    body: evidenceText(review.body, "pull request review evidence body"),
+    state,
+    ...(submittedAt === undefined ? {} : { submittedAt }),
+    url: string(review.url, "pull request review evidence URL"),
+  };
+}
+
+function parseReviewThreadEvidence(value: unknown): PendingThreadEvidence {
+  const thread = record(value, "review context thread");
+  if (typeof thread.isResolved !== "boolean") {
+    throw new Error("GitHub returned an invalid review context thread resolution state.");
+  }
+  const line = optionalPositiveInteger(thread.line, "review context thread line");
+  const originalLine = optionalPositiveInteger(
+    thread.originalLine,
+    "review context thread original line",
+  );
+  const parsedComments = parseDiscussionComments(thread.comments, "review context thread comments");
+  return {
+    evidence: {
+      id: string(thread.id, "review context thread id"),
+      isResolved: thread.isResolved,
+      path: string(thread.path, "review context thread path"),
+      ...(line === undefined ? {} : { line }),
+      ...(originalLine === undefined ? {} : { originalLine }),
+      side: string(thread.diffSide, "review context thread diff side"),
+      comments: parsedComments.comments,
+    },
+    comments: parsedComments.comments,
+    commentsEndCursor: parsedComments.connection.hasNextPage
+      ? parsedComments.connection.endCursor
+      : null,
+  };
+}
+
+function parseLinkedIssueEvidence(value: unknown): PendingLinkedIssueEvidence {
+  const issue = record(value, "linked issue evidence");
+  const parsedComments = parseDiscussionComments(issue.comments, "linked issue evidence comments");
+  return {
+    id: string(issue.id, "linked issue evidence id"),
+    evidence: {
+      number: positiveInteger(issue.number, "linked issue evidence number"),
+      title: string(issue.title, "linked issue evidence title"),
+      body: evidenceText(issue.body, "linked issue evidence body"),
+      state: string(issue.state, "linked issue evidence state"),
+      url: string(issue.url, "linked issue evidence URL"),
+      comments: parsedComments.comments,
+    },
+    comments: parsedComments.comments,
+    commentsEndCursor: parsedComments.connection.hasNextPage
+      ? parsedComments.connection.endCursor
+      : null,
+  };
+}
+
 class InstallationSession implements GitHubReviewSession {
   readonly installationToken: string;
   readonly #apiBase: string;
@@ -669,10 +850,19 @@ class InstallationSession implements GitHubReviewSession {
       }
     }
     const jobIds = [...selectedJobIds];
-    const settledLogs = await Promise.allSettled(
-      jobIds.map((jobId) => this.#getActionsJobLog(reference, jobId, signal)),
-    );
+    const [discussionResult, logsResult] = await Promise.allSettled([
+      this.#getReviewDiscussion(reference, signal),
+      Promise.allSettled(jobIds.map((jobId) => this.#getActionsJobLog(reference, jobId, signal))),
+    ]);
     throwIfAborted(signal);
+    if (discussionResult.status === "rejected") {
+      throw discussionResult.reason;
+    }
+    if (logsResult.status === "rejected") {
+      throw logsResult.reason;
+    }
+    const discussion = discussionResult.value;
+    const settledLogs = logsResult.value;
     const logsByJobId = new Map(
       jobIds.map((jobId, index) => [jobId, settledLogs[index]!] as const),
     );
@@ -701,7 +891,7 @@ class InstallationSession implements GitHubReviewSession {
       aggregateLogBytes += logBytes;
       return Object.assign({}, check.evidence, { failedActionsLog: result.value });
     });
-    return { completedChecks };
+    return { completedChecks, discussion };
   }
 
   async #getActionsJobLog(
@@ -854,6 +1044,239 @@ class InstallationSession implements GitHubReviewSession {
       throw new Error(`GitHub ${action} returned GraphQL errors.`);
     }
     return record(envelope.data, `${action} data`);
+  }
+
+  async #getReviewDiscussion(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+  ): Promise<PullRequestDiscussionEvidence> {
+    const comments: DiscussionCommentEvidence[] = [];
+    const reviews: PullRequestReviewEvidence[] = [];
+    const pendingThreads: PendingThreadEvidence[] = [];
+    const pendingLinkedIssues: PendingLinkedIssueEvidence[] = [];
+    let commentsAfter: string | null = null;
+    let reviewsAfter: string | null = null;
+    let threadsAfter: string | null = null;
+    let linkedIssuesAfter: string | null = null;
+    let includeComments = true;
+    let includeReviews = true;
+    let includeThreads = true;
+    let includeLinkedIssues = true;
+
+    while (includeComments || includeReviews || includeThreads || includeLinkedIssues) {
+      // The independent cursors keep every discussion source complete without re-reading pages.
+      // eslint-disable-next-line no-await-in-loop
+      const data = await this.#graphql(
+        `query RevoirReviewContext(
+          $owner: String!
+          $repository: String!
+          $number: Int!
+          $commentsAfter: String
+          $reviewsAfter: String
+          $threadsAfter: String
+          $linkedIssuesAfter: String
+          $includeComments: Boolean!
+          $includeReviews: Boolean!
+          $includeThreads: Boolean!
+          $includeLinkedIssues: Boolean!
+        ) {
+          repository(owner: $owner, name: $repository) {
+            pullRequest(number: $number) {
+              comments(first: 100, after: $commentsAfter) @include(if: $includeComments) {
+                nodes { author { login } body createdAt url }
+                pageInfo { hasNextPage endCursor }
+              }
+              reviews(first: 100, after: $reviewsAfter) @include(if: $includeReviews) {
+                nodes { author { login } body state submittedAt url }
+                pageInfo { hasNextPage endCursor }
+              }
+              reviewThreads(first: 100, after: $threadsAfter) @include(if: $includeThreads) {
+                nodes {
+                  id
+                  isResolved
+                  path
+                  line
+                  originalLine
+                  diffSide
+                  comments(first: 100) {
+                    nodes {
+                      author { login }
+                      body
+                      createdAt
+                      url
+                      pullRequestReview { state }
+                    }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+              closingIssuesReferences(
+                first: 100
+                after: $linkedIssuesAfter
+                userLinkedOnly: false
+              ) @include(if: $includeLinkedIssues) {
+                nodes {
+                  id
+                  number
+                  title
+                  body
+                  state
+                  url
+                  comments(first: 100) {
+                    nodes { author { login } body createdAt url }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }`,
+        {
+          owner: reference.owner,
+          repository: reference.repository,
+          number: reference.number,
+          commentsAfter,
+          reviewsAfter,
+          threadsAfter,
+          linkedIssuesAfter,
+          includeComments,
+          includeReviews,
+          includeThreads,
+          includeLinkedIssues,
+        },
+        "review context lookup",
+        signal,
+      );
+      const repositoryValue = record(data.repository, "review context repository");
+      const pullRequest = record(repositoryValue.pullRequest, "review context pull request");
+
+      if (includeComments) {
+        const parsed = parseDiscussionComments(
+          pullRequest.comments,
+          "review context conversation comments",
+        );
+        comments.push(...parsed.comments);
+        includeComments = parsed.connection.hasNextPage;
+        commentsAfter = includeComments ? parsed.connection.endCursor : null;
+      }
+      if (includeReviews) {
+        const connection = graphQlConnection(pullRequest.reviews, "review context reviews");
+        reviews.push(
+          ...connection.nodes
+            .filter((node) => node !== null)
+            .flatMap((node) => {
+              const review = parsePullRequestReviewEvidence(node);
+              return review === undefined ? [] : [review];
+            }),
+        );
+        includeReviews = connection.hasNextPage;
+        reviewsAfter = includeReviews ? connection.endCursor : null;
+      }
+      if (includeThreads) {
+        const connection = graphQlConnection(pullRequest.reviewThreads, "review context threads");
+        pendingThreads.push(
+          ...connection.nodes
+            .filter((node) => node !== null)
+            .map((node) => parseReviewThreadEvidence(node)),
+        );
+        includeThreads = connection.hasNextPage;
+        threadsAfter = includeThreads ? connection.endCursor : null;
+      }
+      if (includeLinkedIssues) {
+        const connection = graphQlConnection(
+          pullRequest.closingIssuesReferences,
+          "review context linked issues",
+        );
+        pendingLinkedIssues.push(
+          ...connection.nodes
+            .filter((node) => node !== null)
+            .map((node) => parseLinkedIssueEvidence(node)),
+        );
+        includeLinkedIssues = connection.hasNextPage;
+        linkedIssuesAfter = includeLinkedIssues ? connection.endCursor : null;
+      }
+      if (includeComments || includeReviews || includeThreads || includeLinkedIssues) {
+        // eslint-disable-next-line no-await-in-loop
+        await yieldToEventLoop(signal);
+      }
+    }
+
+    for (const thread of pendingThreads) {
+      let after = thread.commentsEndCursor;
+      while (after !== null) {
+        // eslint-disable-next-line no-await-in-loop
+        const data = await this.#graphql(
+          `query RevoirReviewThreadComments($id: ID!, $after: String!) {
+            node(id: $id) {
+              ... on PullRequestReviewThread {
+                comments(first: 100, after: $after) {
+                  nodes {
+                    author { login }
+                    body
+                    createdAt
+                    url
+                    pullRequestReview { state }
+                  }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }`,
+          { id: thread.evidence.id, after },
+          "review thread reply lookup",
+          signal,
+        );
+        const node = record(data.node, "review thread reply node");
+        const parsed = parseDiscussionComments(node.comments, "review thread reply comments");
+        thread.comments.push(...parsed.comments);
+        after = parsed.connection.hasNextPage ? parsed.connection.endCursor : null;
+        if (after !== null) {
+          // eslint-disable-next-line no-await-in-loop
+          await yieldToEventLoop(signal);
+        }
+      }
+    }
+
+    for (const issue of pendingLinkedIssues) {
+      let after = issue.commentsEndCursor;
+      while (after !== null) {
+        // eslint-disable-next-line no-await-in-loop
+        const data = await this.#graphql(
+          `query RevoirLinkedIssueComments($id: ID!, $after: String!) {
+            node(id: $id) {
+              ... on Issue {
+                comments(first: 100, after: $after) {
+                  nodes { author { login } body createdAt url }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }`,
+          { id: issue.id, after },
+          "linked issue comment lookup",
+          signal,
+        );
+        const node = record(data.node, "linked issue comment node");
+        const parsed = parseDiscussionComments(node.comments, "linked issue comments");
+        issue.comments.push(...parsed.comments);
+        after = parsed.connection.hasNextPage ? parsed.connection.endCursor : null;
+        if (after !== null) {
+          // eslint-disable-next-line no-await-in-loop
+          await yieldToEventLoop(signal);
+        }
+      }
+    }
+
+    return {
+      comments,
+      reviews,
+      threads: pendingThreads
+        .filter(({ comments: threadComments }) => threadComments.length > 0)
+        .map(({ evidence }) => evidence),
+      linkedIssues: pendingLinkedIssues.map(({ evidence }) => evidence),
+    };
   }
 
   async getPriorReviewState(
@@ -1451,7 +1874,11 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
             `${this.#apiBase}/app/installations/${configuredInstallation.id}/access_tokens`,
             {
               method: "POST",
-              body: JSON.stringify({ repository_ids: [configuredRepository.id] }),
+              body: JSON.stringify({
+                repository_ids: configuredInstallation.repositories
+                  .map(({ id }) => id)
+                  .toSorted((left, right) => left - right),
+              }),
               headers: { ...headers, "Content-Type": "application/json" },
               signal,
             },

@@ -19,6 +19,41 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
+function emptyReviewContextResponse(): Response {
+  const emptyConnection = {
+    nodes: [],
+    pageInfo: { hasNextPage: false, endCursor: null },
+  };
+  return json({
+    data: {
+      repository: {
+        pullRequest: {
+          comments: emptyConnection,
+          reviews: emptyConnection,
+          reviewThreads: emptyConnection,
+          closingIssuesReferences: emptyConnection,
+        },
+      },
+    },
+  });
+}
+
+function graphQlComment(body: string, suffix: string) {
+  return {
+    author: suffix === "deleted" ? null : { login: `author-${suffix}` },
+    body,
+    createdAt: `2026-07-29T00:00:0${suffix === "deleted" ? "4" : suffix}Z`,
+    url: `https://github.com/owner/repository/comments/${suffix}`,
+  };
+}
+
+function graphQlConnection(nodes: unknown[], hasNextPage = false, endCursor: string | null = null) {
+  return {
+    nodes,
+    pageInfo: { hasNextPage, endCursor },
+  };
+}
+
 function streamingTextResponse(value: string): Response {
   const bytes = Buffer.from(value);
   let offset = 0;
@@ -59,6 +94,7 @@ describe("GitHub review evidence", () => {
       if (url.endsWith("/pulls/17")) {
         return json({
           number: 17,
+          title: "Keep review context complete",
           body: "Keep the public response format stable.",
           state: "open",
           draft: false,
@@ -113,6 +149,9 @@ describe("GitHub review evidence", () => {
       if (url.endsWith("/actions/jobs/201/logs")) {
         return new Response("FAIL api returns the wrong status\n", { status: 200 });
       }
+      if (url.endsWith("/graphql")) {
+        return emptyReviewContextResponse();
+      }
       throw new Error(`Unexpected request ${url}`);
     };
 
@@ -128,6 +167,7 @@ describe("GitHub review evidence", () => {
       new AbortController().signal,
     );
 
+    assert.equal(pullRequest.title, "Keep review context complete");
     assert.equal(pullRequest.description, "Keep the public response format stable.");
     assert.deepEqual(evidence, {
       completedChecks: [
@@ -147,6 +187,7 @@ describe("GitHub review evidence", () => {
           failedActionsLog: "FAIL api returns the wrong status\n",
         },
       ],
+      discussion: { comments: [], reviews: [], threads: [], linkedIssues: [] },
     });
     assert.equal(pendingObserved, true);
     assert.equal(
@@ -218,6 +259,9 @@ describe("GitHub review evidence", () => {
       if (jobId !== undefined) {
         requestedJobIds.push(jobId);
         return new Response(`FAIL job ${jobId}\n`, { status: 200 });
+      }
+      if (url.endsWith("/graphql")) {
+        return emptyReviewContextResponse();
       }
       throw new Error(`Unexpected request ${url}`);
     };
@@ -304,6 +348,9 @@ describe("GitHub review evidence", () => {
       }
       if (url.endsWith("/actions/jobs/304/logs")) {
         throw new Error(privateFailure);
+      }
+      if (url.endsWith("/graphql")) {
+        return emptyReviewContextResponse();
       }
       throw new Error(`Unexpected request ${url}`);
     };
@@ -412,6 +459,9 @@ describe("GitHub review evidence", () => {
           `HEAD-${jobId} installation-secret\n${"m".repeat(100 * 1024)}\nTAIL-${jobId}`,
         );
       }
+      if (url.endsWith("/graphql")) {
+        return emptyReviewContextResponse();
+      }
       throw new Error(`Unexpected request ${url}`);
     };
     const session = await new GitHubAppReviewGateway(
@@ -450,6 +500,191 @@ describe("GitHub review evidence", () => {
       ),
     );
     assert.doesNotMatch(JSON.stringify(evidence), /installation-secret|PRIVATE_MIDDLE_SECRET/u);
+  });
+
+  it("loads paginated reviews, comments, thread replies, and linked-issue discussion", async () => {
+    const graphQlQueries: string[] = [];
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.includes("/check-runs?")) {
+        return json({ total_count: 0, check_runs: [] });
+      }
+      if (url.endsWith("/graphql")) {
+        const request = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables: Record<string, unknown>;
+        };
+        graphQlQueries.push(request.query);
+        if (request.query.includes("RevoirReviewThreadComments")) {
+          return json({
+            data: {
+              node: {
+                comments: graphQlConnection([
+                  graphQlComment("Author replied.", "3"),
+                  {
+                    ...graphQlComment("Unsubmitted reply.", "5"),
+                    pullRequestReview: { state: "PENDING" },
+                  },
+                ]),
+              },
+            },
+          });
+        }
+        if (request.query.includes("RevoirLinkedIssueComments")) {
+          return json({
+            data: {
+              node: {
+                comments: graphQlConnection([graphQlComment("Issue follow-up.", "4")]),
+              },
+            },
+          });
+        }
+        if (request.variables.commentsAfter === "PR_COMMENTS_1") {
+          assert.equal(request.variables.includeReviews, false);
+          assert.equal(request.variables.includeThreads, false);
+          assert.equal(request.variables.includeLinkedIssues, false);
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  comments: graphQlConnection([graphQlComment("Second PR comment.", "2")]),
+                },
+              },
+            },
+          });
+        }
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                comments: graphQlConnection(
+                  [graphQlComment("First PR comment.", "1")],
+                  true,
+                  "PR_COMMENTS_1",
+                ),
+                reviews: graphQlConnection([
+                  {
+                    author: { login: "reviewer" },
+                    body: "This behavior was already reported.",
+                    state: "COMMENTED",
+                    submittedAt: "2026-07-29T00:00:01Z",
+                    url: "https://github.com/owner/repository/pull/17#pullrequestreview-1",
+                  },
+                  {
+                    author: { login: "revoir-test[bot]" },
+                    body: "Not submitted.",
+                    state: "PENDING",
+                    submittedAt: null,
+                    url: "https://github.com/owner/repository/pull/17#pullrequestreview-2",
+                  },
+                ]),
+                reviewThreads: graphQlConnection([
+                  {
+                    id: "THREAD_1",
+                    isResolved: true,
+                    path: "source.ts",
+                    line: 12,
+                    originalLine: 10,
+                    diffSide: "RIGHT",
+                    comments: graphQlConnection(
+                      [graphQlComment("Existing inline concern.", "2")],
+                      true,
+                      "T1",
+                    ),
+                  },
+                  {
+                    id: "THREAD_PENDING",
+                    isResolved: false,
+                    path: "draft.ts",
+                    line: 1,
+                    originalLine: null,
+                    diffSide: "RIGHT",
+                    comments: graphQlConnection([
+                      {
+                        ...graphQlComment("Unsubmitted concern.", "5"),
+                        pullRequestReview: { state: "PENDING" },
+                      },
+                    ]),
+                  },
+                ]),
+                closingIssuesReferences: graphQlConnection([
+                  {
+                    id: "ISSUE_9",
+                    number: 9,
+                    title: "Preserve the API contract",
+                    body: "The linked requirement.",
+                    state: "OPEN",
+                    url: "https://github.com/owner/repository/issues/9",
+                    comments: graphQlConnection(
+                      [graphQlComment("Issue context.", "3")],
+                      true,
+                      "I1",
+                    ),
+                  },
+                ]),
+              },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    const evidence = await session.getReviewEvidence(
+      reference,
+      "2".repeat(40),
+      new AbortController().signal,
+    );
+
+    assert.deepEqual(
+      evidence.discussion?.comments.map(({ body }) => body),
+      ["First PR comment.", "Second PR comment."],
+    );
+    assert.deepEqual(
+      evidence.discussion?.reviews.map(({ body }) => body),
+      ["This behavior was already reported."],
+    );
+    assert.deepEqual(evidence.discussion?.threads, [
+      {
+        id: "THREAD_1",
+        isResolved: true,
+        path: "source.ts",
+        line: 12,
+        originalLine: 10,
+        side: "RIGHT",
+        comments: [
+          {
+            author: "author-2",
+            body: "Existing inline concern.",
+            createdAt: "2026-07-29T00:00:02Z",
+            url: "https://github.com/owner/repository/comments/2",
+          },
+          {
+            author: "author-3",
+            body: "Author replied.",
+            createdAt: "2026-07-29T00:00:03Z",
+            url: "https://github.com/owner/repository/comments/3",
+          },
+        ],
+      },
+    ]);
+    assert.deepEqual(
+      evidence.discussion?.linkedIssues[0]?.comments.map(({ body }) => body),
+      ["Issue context.", "Issue follow-up."],
+    );
+    assert.equal(graphQlQueries.length, 4);
+    assert.ok(graphQlQueries.every((query) => !query.includes("mutation")));
   });
 
   it("still fails when required completed-check context is unavailable", async () => {
@@ -516,6 +751,9 @@ describe("GitHub review evidence", () => {
             once: true,
           });
         });
+      }
+      if (url.endsWith("/graphql")) {
+        return emptyReviewContextResponse();
       }
       throw new Error(`Unexpected request ${url}`);
     };

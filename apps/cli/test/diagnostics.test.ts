@@ -86,6 +86,7 @@ describe("diagnostic contracts", () => {
             contents: "read",
             checks: "read",
             actions: "read",
+            issues: "read",
             pull_requests: "write",
           },
         };
@@ -188,6 +189,7 @@ describe("diagnostic contracts", () => {
             contents: "read",
             checks: "read",
             actions: "read",
+            issues: "read",
             pull_requests: "write",
           },
         };
@@ -224,6 +226,7 @@ describe("diagnostic contracts", () => {
       contents: "read",
       checks: "read",
       actions: "read",
+      issues: "read",
       pull_requests: "write",
     } as const;
 
@@ -272,6 +275,7 @@ describe("diagnostic contracts", () => {
                 contents: "read",
                 checks: "read",
                 actions: "read",
+                issues: "read",
                 pull_requests: "write",
               },
             }
