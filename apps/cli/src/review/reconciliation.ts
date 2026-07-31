@@ -1,8 +1,4 @@
-import {
-  exactFindingFingerprint,
-  findingFingerprint,
-  type ReviewFindingV2,
-} from "./findings.js";
+import { exactFindingFingerprint, findingFingerprint, type ReviewFindingV2 } from "./findings.js";
 
 const FINDING_MARKER = /^<!-- revoir:finding:v1:([0-9a-f]{64}) -->\r?$/gmu;
 const FINDING_ALIAS_MARKER =

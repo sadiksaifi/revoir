@@ -6,7 +6,8 @@ import type {
   CompletedCheckEvidence,
   DiscussionCommentEvidence,
   GitHubReviewEvidence,
-  LinkedIssueEvidence,
+  LinkedArtifactEvidence,
+  LinkedArtifactKind,
   PullRequestDiscussionEvidence,
   PullRequestReviewEvidence,
   ReviewThreadEvidence,
@@ -652,9 +653,9 @@ interface PendingThreadEvidence {
   commentsEndCursor: string | null;
 }
 
-interface PendingLinkedIssueEvidence {
+interface PendingLinkedArtifactEvidence {
   id: string;
-  evidence: LinkedIssueEvidence;
+  evidence: LinkedArtifactEvidence;
   comments: DiscussionCommentEvidence[];
   commentsEndCursor: string | null;
 }
@@ -791,24 +792,76 @@ function parseReviewThreadEvidence(value: unknown): PendingThreadEvidence {
   };
 }
 
-function parseLinkedIssueEvidence(value: unknown): PendingLinkedIssueEvidence {
-  const issue = record(value, "linked issue evidence");
-  const parsedComments = parseDiscussionComments(issue.comments, "linked issue evidence comments");
+function parseLinkedArtifactEvidence(
+  value: unknown,
+  depth: 1 | 2,
+  directClosing: boolean,
+): PendingLinkedArtifactEvidence {
+  const artifact = record(value, "linked artifact evidence");
+  const kind: LinkedArtifactKind = directClosing
+    ? "issue"
+    : (() => {
+        const typeName = string(artifact.__typename, "linked artifact evidence type");
+        if (typeName === "Issue") {
+          return "issue";
+        }
+        if (typeName === "PullRequest") {
+          return "pull-request";
+        }
+        throw new Error("GitHub returned an invalid linked artifact evidence type.");
+      })();
+  const parsedComments = parseDiscussionComments(
+    artifact.comments,
+    "linked artifact evidence comments",
+  );
   return {
-    id: string(issue.id, "linked issue evidence id"),
+    id: string(artifact.id, "linked artifact evidence id"),
     evidence: {
-      number: positiveInteger(issue.number, "linked issue evidence number"),
-      title: string(issue.title, "linked issue evidence title"),
-      body: evidenceText(issue.body, "linked issue evidence body"),
-      state: string(issue.state, "linked issue evidence state"),
-      url: string(issue.url, "linked issue evidence URL"),
+      kind,
+      number: positiveInteger(artifact.number, "linked artifact evidence number"),
+      title: string(artifact.title, "linked artifact evidence title"),
+      body: evidenceText(artifact.body, "linked artifact evidence body"),
+      state: string(artifact.state, "linked artifact evidence state"),
+      url: string(artifact.url, "linked artifact evidence URL"),
       comments: parsedComments.comments,
+      depth,
+      directClosing,
     },
     comments: parsedComments.comments,
     commentsEndCursor: parsedComments.connection.hasNextPage
       ? parsedComments.connection.endCursor
       : null,
   };
+}
+
+const MAX_LINKED_ARTIFACTS = 20;
+const LINKED_ARTIFACT_REFERENCE =
+  /https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/(?:issues|pull)\/([1-9][0-9]*)|([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)|#([1-9][0-9]*)/giu;
+
+function linkedArtifactReferences(
+  values: readonly string[],
+  reference: PullRequestReference,
+): number[] {
+  const numbers = new Set<number>();
+  for (const value of values) {
+    for (const match of value.matchAll(LINKED_ARTIFACT_REFERENCE)) {
+      const owner = match[1] ?? match[4];
+      const repositoryName = match[2] ?? match[5];
+      if (
+        owner !== undefined &&
+        repositoryName !== undefined &&
+        (!asciiCaseInsensitiveEqual(owner, reference.owner) ||
+          !asciiCaseInsensitiveEqual(repositoryName, reference.repository))
+      ) {
+        continue;
+      }
+      const number = Number(match[3] ?? match[6] ?? match[7]);
+      if (Number.isSafeInteger(number) && number > 0 && number !== reference.number) {
+        numbers.add(number);
+      }
+    }
+  }
+  return [...numbers].toSorted((left, right) => left - right);
 }
 
 class InstallationSession implements GitHubReviewSession {
@@ -1257,6 +1310,89 @@ class InstallationSession implements GitHubReviewSession {
     return record(envelope.data, `${action} data`);
   }
 
+  async #completeLinkedArtifactComments(
+    artifact: PendingLinkedArtifactEvidence,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let after = artifact.commentsEndCursor;
+    while (after !== null) {
+      // eslint-disable-next-line no-await-in-loop
+      const data = await this.#graphql(
+        `query RevoirLinkedArtifactComments($id: ID!, $after: String!) {
+          node(id: $id) {
+            ... on Issue {
+              comments(first: 100, after: $after) {
+                nodes { author { login } body createdAt url }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+            ... on PullRequest {
+              comments(first: 100, after: $after) {
+                nodes { author { login } body createdAt url }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }`,
+        { id: artifact.id, after },
+        "linked artifact comment lookup",
+        signal,
+      );
+      const node = record(data.node, "linked artifact comment node");
+      const parsed = parseDiscussionComments(node.comments, "linked artifact comments");
+      artifact.comments.push(...parsed.comments);
+      after = parsed.connection.hasNextPage ? parsed.connection.endCursor : null;
+      if (after !== null) {
+        // eslint-disable-next-line no-await-in-loop
+        await yieldToEventLoop(signal);
+      }
+    }
+  }
+
+  async #getLinkedArtifact(
+    reference: PullRequestReference,
+    number: number,
+    depth: 1 | 2,
+    signal: AbortSignal,
+  ): Promise<PendingLinkedArtifactEvidence | undefined> {
+    const data = await this.#graphql(
+      `query RevoirLinkedArtifact($owner: String!, $repository: String!, $number: Int!) {
+        repository(owner: $owner, name: $repository) {
+          issueOrPullRequest(number: $number) {
+            __typename
+            ... on Issue {
+              id number title body state url
+              comments(first: 100) {
+                nodes { author { login } body createdAt url }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+            ... on PullRequest {
+              id number title body state url
+              comments(first: 100) {
+                nodes { author { login } body createdAt url }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+      }`,
+      { owner: reference.owner, repository: reference.repository, number },
+      "linked artifact lookup",
+      signal,
+    );
+    const repositoryValue = record(data.repository, "linked artifact repository");
+    if (repositoryValue.issueOrPullRequest === null) {
+      return undefined;
+    }
+    const artifact = parseLinkedArtifactEvidence(repositoryValue.issueOrPullRequest, depth, false);
+    if (artifact.evidence.number !== number) {
+      throw new Error("GitHub returned a different linked artifact number.");
+    }
+    await this.#completeLinkedArtifactComments(artifact, signal);
+    return artifact;
+  }
+
   async #getReviewDiscussion(
     reference: PullRequestReference,
     signal: AbortSignal,
@@ -1264,17 +1400,18 @@ class InstallationSession implements GitHubReviewSession {
     const comments: DiscussionCommentEvidence[] = [];
     const reviews: PullRequestReviewEvidence[] = [];
     const pendingThreads: PendingThreadEvidence[] = [];
-    const pendingLinkedIssues: PendingLinkedIssueEvidence[] = [];
+    const directClosingByNumber = new Map<number, PendingLinkedArtifactEvidence>();
+    let pullRequestBody = "";
     let commentsAfter: string | null = null;
     let reviewsAfter: string | null = null;
     let threadsAfter: string | null = null;
-    let linkedIssuesAfter: string | null = null;
+    let closingIssuesAfter: string | null = null;
     let includeComments = true;
     let includeReviews = true;
     let includeThreads = true;
-    let includeLinkedIssues = true;
+    let includeClosingIssues = true;
 
-    while (includeComments || includeReviews || includeThreads || includeLinkedIssues) {
+    while (includeComments || includeReviews || includeThreads || includeClosingIssues) {
       // The independent cursors keep every discussion source complete without re-reading pages.
       // eslint-disable-next-line no-await-in-loop
       const data = await this.#graphql(
@@ -1285,14 +1422,15 @@ class InstallationSession implements GitHubReviewSession {
           $commentsAfter: String
           $reviewsAfter: String
           $threadsAfter: String
-          $linkedIssuesAfter: String
+          $closingIssuesAfter: String
           $includeComments: Boolean!
           $includeReviews: Boolean!
           $includeThreads: Boolean!
-          $includeLinkedIssues: Boolean!
+          $includeClosingIssues: Boolean!
         ) {
           repository(owner: $owner, name: $repository) {
             pullRequest(number: $number) {
+              body
               comments(first: 100, after: $commentsAfter) @include(if: $includeComments) {
                 nodes { author { login } body createdAt url }
                 pageInfo { hasNextPage endCursor }
@@ -1303,12 +1441,7 @@ class InstallationSession implements GitHubReviewSession {
               }
               reviewThreads(first: 100, after: $threadsAfter) @include(if: $includeThreads) {
                 nodes {
-                  id
-                  isResolved
-                  path
-                  line
-                  originalLine
-                  diffSide
+                  id isResolved path line originalLine diffSide
                   comments(first: 100) {
                     nodes {
                       author { login }
@@ -1324,16 +1457,11 @@ class InstallationSession implements GitHubReviewSession {
               }
               closingIssuesReferences(
                 first: 100
-                after: $linkedIssuesAfter
+                after: $closingIssuesAfter
                 userLinkedOnly: false
-              ) @include(if: $includeLinkedIssues) {
+              ) @include(if: $includeClosingIssues) {
                 nodes {
-                  id
-                  number
-                  title
-                  body
-                  state
-                  url
+                  id number title body state url
                   comments(first: 100) {
                     nodes { author { login } body createdAt url }
                     pageInfo { hasNextPage endCursor }
@@ -1351,17 +1479,18 @@ class InstallationSession implements GitHubReviewSession {
           commentsAfter,
           reviewsAfter,
           threadsAfter,
-          linkedIssuesAfter,
+          closingIssuesAfter,
           includeComments,
           includeReviews,
           includeThreads,
-          includeLinkedIssues,
+          includeClosingIssues,
         },
         "review context lookup",
         signal,
       );
       const repositoryValue = record(data.repository, "review context repository");
       const pullRequest = record(repositoryValue.pullRequest, "review context pull request");
+      pullRequestBody = evidenceText(pullRequest.body, "review context pull request body");
 
       if (includeComments) {
         const parsed = parseDiscussionComments(
@@ -1395,20 +1524,19 @@ class InstallationSession implements GitHubReviewSession {
         includeThreads = connection.hasNextPage;
         threadsAfter = includeThreads ? connection.endCursor : null;
       }
-      if (includeLinkedIssues) {
+      if (includeClosingIssues) {
         const connection = graphQlConnection(
           pullRequest.closingIssuesReferences,
-          "review context linked issues",
+          "review context closing issues",
         );
-        pendingLinkedIssues.push(
-          ...connection.nodes
-            .filter((node) => node !== null)
-            .map((node) => parseLinkedIssueEvidence(node)),
-        );
-        includeLinkedIssues = connection.hasNextPage;
-        linkedIssuesAfter = includeLinkedIssues ? connection.endCursor : null;
+        for (const node of connection.nodes.filter((candidate) => candidate !== null)) {
+          const artifact = parseLinkedArtifactEvidence(node, 1, true);
+          directClosingByNumber.set(artifact.evidence.number, artifact);
+        }
+        includeClosingIssues = connection.hasNextPage;
+        closingIssuesAfter = includeClosingIssues ? connection.endCursor : null;
       }
-      if (includeComments || includeReviews || includeThreads || includeLinkedIssues) {
+      if (includeComments || includeReviews || includeThreads || includeClosingIssues) {
         // eslint-disable-next-line no-await-in-loop
         await yieldToEventLoop(signal);
       }
@@ -1450,33 +1578,63 @@ class InstallationSession implements GitHubReviewSession {
       }
     }
 
-    for (const issue of pendingLinkedIssues) {
-      let after = issue.commentsEndCursor;
-      while (after !== null) {
-        // eslint-disable-next-line no-await-in-loop
-        const data = await this.#graphql(
-          `query RevoirLinkedIssueComments($id: ID!, $after: String!) {
-            node(id: $id) {
-              ... on Issue {
-                comments(first: 100, after: $after) {
-                  nodes { author { login } body createdAt url }
-                  pageInfo { hasNextPage endCursor }
-                }
-              }
-            }
-          }`,
-          { id: issue.id, after },
-          "linked issue comment lookup",
-          signal,
-        );
-        const node = record(data.node, "linked issue comment node");
-        const parsed = parseDiscussionComments(node.comments, "linked issue comments");
-        issue.comments.push(...parsed.comments);
-        after = parsed.connection.hasNextPage ? parsed.connection.endCursor : null;
-        if (after !== null) {
-          // eslint-disable-next-line no-await-in-loop
-          await yieldToEventLoop(signal);
-        }
+    const linkedArtifacts = [...directClosingByNumber.values()]
+      .toSorted((left, right) => left.evidence.number - right.evidence.number)
+      .slice(0, MAX_LINKED_ARTIFACTS);
+    for (const artifact of linkedArtifacts) {
+      // eslint-disable-next-line no-await-in-loop
+      await this.#completeLinkedArtifactComments(artifact, signal);
+    }
+
+    const seenNumbers = new Set([
+      reference.number,
+      ...linkedArtifacts.map(({ evidence }) => evidence.number),
+    ]);
+    const rootReferences = linkedArtifactReferences(
+      [
+        pullRequestBody,
+        ...comments.map(({ body }) => body),
+        ...reviews.map(({ body }) => body),
+        ...pendingThreads.flatMap(({ comments: threadComments }) =>
+          threadComments.map(({ body }) => body),
+        ),
+      ],
+      reference,
+    );
+    for (const number of rootReferences) {
+      if (linkedArtifacts.length >= MAX_LINKED_ARTIFACTS) {
+        break;
+      }
+      if (seenNumbers.has(number)) {
+        continue;
+      }
+      seenNumbers.add(number);
+      // eslint-disable-next-line no-await-in-loop
+      const artifact = await this.#getLinkedArtifact(reference, number, 1, signal);
+      if (artifact !== undefined) {
+        linkedArtifacts.push(artifact);
+      }
+    }
+
+    const nestedReferences = linkedArtifactReferences(
+      linkedArtifacts.flatMap(({ evidence }) => [
+        evidence.body,
+        ...evidence.comments.map(({ body }) => body),
+      ]),
+      reference,
+    );
+    for (const number of nestedReferences) {
+      if (linkedArtifacts.length >= MAX_LINKED_ARTIFACTS) {
+        break;
+      }
+      if (seenNumbers.has(number)) {
+        continue;
+      }
+      seenNumbers.add(number);
+      // eslint-disable-next-line no-await-in-loop
+      const artifact = await this.#getLinkedArtifact(reference, number, 2, signal);
+      if (artifact !== undefined) {
+        linkedArtifacts.push(artifact);
       }
     }
 
@@ -1486,7 +1644,14 @@ class InstallationSession implements GitHubReviewSession {
       threads: pendingThreads
         .filter(({ comments: threadComments }) => threadComments.length > 0)
         .map(({ evidence }) => evidence),
-      linkedIssues: pendingLinkedIssues.map(({ evidence }) => evidence),
+      linkedArtifacts: linkedArtifacts
+        .map(({ evidence }) => evidence)
+        .toSorted(
+          (left, right) =>
+            left.depth - right.depth ||
+            Number(right.directClosing) - Number(left.directClosing) ||
+            left.number - right.number,
+        ),
     };
   }
 

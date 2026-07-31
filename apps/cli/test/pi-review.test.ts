@@ -127,14 +127,17 @@ describe("Pi clean review adapter", () => {
                 ],
               },
             ],
-            linkedIssues: [
+            linkedArtifacts: [
               {
+                kind: "issue",
                 number: 9,
                 title: "Preserve retry behavior",
                 body: "Retries must remain bounded.",
                 state: "OPEN",
                 url: "https://github.com/owner/repository/issues/9",
                 comments: [],
+                depth: 1,
+                directClosing: true,
               },
             ],
           },
@@ -178,6 +181,8 @@ describe("Pi clean review adapter", () => {
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.headSha, "u"));
     assert.match(sessions.prompts[0] ?? "", /Keep review context complete/u);
     assert.match(sessions.prompts[0] ?? "", /Preserve the public API/u);
+    assert.match(sessions.prompts[0] ?? "", /feedback for duplicate suppression/u);
+    assert.match(sessions.prompts[0] ?? "", /requirements context/u);
     assert.match(sessions.prompts[0] ?? "", /The retry concern was already raised/u);
     assert.match(sessions.prompts[0] ?? "", /Fixed in the latest revision/u);
     assert.match(sessions.prompts[0] ?? "", /Preserve retry behavior/u);
@@ -208,7 +213,8 @@ describe("Pi clean review adapter", () => {
             defectKind: "concurrency",
             impactKind: "execution-stall",
             fixAction: "synchronize",
-            reason: "The new transition can replace the active signal and stall the earlier review.",
+            reason:
+              "The new transition can replace the active signal and stall the earlier review.",
             anchor: "const current = true;",
           },
           {

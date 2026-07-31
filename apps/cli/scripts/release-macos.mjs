@@ -164,7 +164,7 @@ function fakeProviderResponse(response) {
     connection: "keep-alive",
     "cache-control": "no-cache",
   });
-  const message = '{"version":1,"findings":[]}';
+  const message = '{"version":2,"findings":[]}';
   response.write(
     `data: ${JSON.stringify({
       id: "revoir-package-smoke",

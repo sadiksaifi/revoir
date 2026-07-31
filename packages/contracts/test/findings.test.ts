@@ -11,7 +11,8 @@ function finding(priority = "P1") {
     defectKind: "concurrency",
     impactKind: "execution-stall",
     fixAction: "synchronize",
-    reason: "Concurrent submissions can overwrite the active cancellation signal and stall the earlier review.",
+    reason:
+      "Concurrent submissions can overwrite the active cancellation signal and stall the earlier review.",
     anchor: "submitSignal",
   };
 }
@@ -155,10 +156,7 @@ describe("finding contract v2", () => {
         ["performance", "performance-degradation", "optimize"],
         ["privacy", "privacy-exposure", "minimize"],
       ].map(([defectKind, impactKind, fixAction]) => {
-        const parsed = parseModelFinding(
-          { ...finding(), defectKind, impactKind, fixAction },
-          0,
-        );
+        const parsed = parseModelFinding({ ...finding(), defectKind, impactKind, fixAction }, 0);
         return [parsed.defectKind, parsed.impactKind, parsed.fixAction];
       }),
       [
@@ -186,8 +184,14 @@ describe("finding contract v2", () => {
   });
 
   it("normalizes a bounded plain-text reason and rejects malformed reasons", () => {
-    assert.equal(parseModelFinding({ ...finding(), reason: "  Concrete defect.  " }, 0).reason, "Concrete defect.");
-    assert.equal(parseModelFinding({ ...finding(), reason: "🚀".repeat(1000) }, 0).reason, "🚀".repeat(1000));
+    assert.equal(
+      parseModelFinding({ ...finding(), reason: "  Concrete defect.  " }, 0).reason,
+      "Concrete defect.",
+    );
+    assert.equal(
+      parseModelFinding({ ...finding(), reason: "🚀".repeat(1000) }, 0).reason,
+      "🚀".repeat(1000),
+    );
 
     for (const reason of ["", " \t ", "two\nlines", "x\u0000y", "x".repeat(1001), "\ud800"]) {
       assert.throws(() => parseModelFinding({ ...finding(), reason }, 0), FindingSchemaError);

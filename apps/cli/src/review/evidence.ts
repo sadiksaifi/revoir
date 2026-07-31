@@ -33,20 +33,25 @@ export interface ReviewThreadEvidence {
   comments: readonly DiscussionCommentEvidence[];
 }
 
-export interface LinkedIssueEvidence {
+export type LinkedArtifactKind = "issue" | "pull-request";
+
+export interface LinkedArtifactEvidence {
+  kind: LinkedArtifactKind;
   number: number;
   title: string;
   body: string;
   state: string;
   url: string;
   comments: readonly DiscussionCommentEvidence[];
+  depth: 1 | 2;
+  directClosing: boolean;
 }
 
 export interface PullRequestDiscussionEvidence {
   comments: readonly DiscussionCommentEvidence[];
   reviews: readonly PullRequestReviewEvidence[];
   threads: readonly ReviewThreadEvidence[];
-  linkedIssues: readonly LinkedIssueEvidence[];
+  linkedArtifacts: readonly LinkedArtifactEvidence[];
 }
 
 export interface GitHubReviewEvidence {

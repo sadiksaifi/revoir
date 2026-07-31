@@ -49,7 +49,8 @@ const IMPACTS: Readonly<Record<FindingImpactKind, string>> = {
   "resource-leak": "The affected resource remains retained after the operation ends.",
   "execution-stall": "The affected execution path stops making progress.",
   "security-exposure": "The affected boundary exposes data or authority to an untrusted input.",
-  "privacy-exposure": "The affected path exposes or retains personal data beyond its intended scope.",
+  "privacy-exposure":
+    "The affected path exposes or retains personal data beyond its intended scope.",
   "performance-degradation": "The affected path consumes materially more time or resources.",
   "boundary-violation": "The affected change violates a required architectural boundary.",
   "compatibility-break": "Existing consumers no longer receive the supported behavior.",

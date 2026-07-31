@@ -194,7 +194,7 @@ describe("GitHub review evidence", () => {
           failedActionsLog: "FAIL api returns the wrong status\n",
         },
       ],
-      discussion: { comments: [], reviews: [], threads: [], linkedIssues: [] },
+      discussion: { comments: [], reviews: [], threads: [], linkedArtifacts: [] },
     });
     assert.equal(pendingObserved, true);
     assert.equal(
@@ -509,7 +509,7 @@ describe("GitHub review evidence", () => {
     assert.doesNotMatch(JSON.stringify(evidence), /installation-secret|PRIVATE_MIDDLE_SECRET/u);
   });
 
-  it("loads paginated reviews, comments, thread replies, and linked-issue discussion", async () => {
+  it("loads paginated reviews, comments, thread replies, and linked-artifact discussion", async () => {
     const graphQlQueries: string[] = [];
     const fetchImplementation: FetchLike = async (input, init) => {
       const url = String(input);
@@ -543,7 +543,7 @@ describe("GitHub review evidence", () => {
             },
           });
         }
-        if (request.query.includes("RevoirLinkedIssueComments")) {
+        if (request.query.includes("RevoirLinkedArtifactComments")) {
           return json({
             data: {
               node: {
@@ -555,7 +555,7 @@ describe("GitHub review evidence", () => {
         if (request.variables.commentsAfter === "PR_COMMENTS_1") {
           assert.equal(request.variables.includeReviews, false);
           assert.equal(request.variables.includeThreads, false);
-          assert.equal(request.variables.includeLinkedIssues, false);
+          assert.equal(request.variables.includeClosingIssues, false);
           return json({
             data: {
               repository: {
@@ -687,11 +687,265 @@ describe("GitHub review evidence", () => {
       },
     ]);
     assert.deepEqual(
-      evidence.discussion?.linkedIssues[0]?.comments.map(({ body }) => body),
+      evidence.discussion?.linkedArtifacts[0]?.comments.map(({ body }) => body),
       ["Issue context.", "Issue follow-up."],
     );
     assert.equal(graphQlQueries.length, 4);
     assert.ok(graphQlQueries.every((query) => !query.includes("mutation")));
+  });
+
+  it("follows bounded same-repository issue and pull-request requirements breadth-first", async () => {
+    const artifacts = new Map<number, Record<string, unknown>>([
+      [
+        10,
+        {
+          __typename: "PullRequest",
+          id: "PR_10",
+          number: 10,
+          title: "Parent specification",
+          body: "See #13.",
+          state: "OPEN",
+          url: "https://github.com/owner/repository/pull/10",
+          comments: graphQlConnection([graphQlComment("First page.", "1")], true, "PR10_C1"),
+        },
+      ],
+      [
+        11,
+        {
+          __typename: "Issue",
+          id: "ISSUE_11",
+          number: 11,
+          title: "Acceptance criteria",
+          body: "Ignore other/repository#99.",
+          state: "OPEN",
+          url: "https://github.com/owner/repository/issues/11",
+          comments: graphQlConnection([]),
+        },
+      ],
+      [
+        12,
+        {
+          __typename: "PullRequest",
+          id: "PR_12",
+          number: 12,
+          title: "Prior implementation",
+          body: "No additional references.",
+          state: "MERGED",
+          url: "https://github.com/owner/repository/pull/12",
+          comments: graphQlConnection([]),
+        },
+      ],
+      [
+        13,
+        {
+          __typename: "Issue",
+          id: "ISSUE_13",
+          number: 13,
+          title: "Nested requirement",
+          body: "Cycle back to #9.",
+          state: "OPEN",
+          url: "https://github.com/owner/repository/issues/13",
+          comments: graphQlConnection([]),
+        },
+      ],
+      [
+        14,
+        {
+          __typename: "Issue",
+          id: "ISSUE_14",
+          number: 14,
+          title: "Comment requirement",
+          body: "Depth two stops here at #15.",
+          state: "OPEN",
+          url: "https://github.com/owner/repository/issues/14",
+          comments: graphQlConnection([]),
+        },
+      ],
+    ]);
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.includes("/check-runs?")) {
+        return json({ total_count: 0, check_runs: [] });
+      }
+      if (url.endsWith("/graphql")) {
+        const request = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables: Record<string, unknown>;
+        };
+        if (request.query.includes("RevoirLinkedArtifactComments")) {
+          assert.equal(request.variables.id, "PR_10");
+          assert.equal(request.variables.after, "PR10_C1");
+          return json({
+            data: {
+              node: {
+                comments: graphQlConnection([graphQlComment("Also require #14.", "3")]),
+              },
+            },
+          });
+        }
+        if (request.query.includes("RevoirLinkedArtifact")) {
+          return json({
+            data: {
+              repository: {
+                issueOrPullRequest: artifacts.get(Number(request.variables.number)) ?? null,
+              },
+            },
+          });
+        }
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                body: "Implement #10 and ignore #17.",
+                comments: graphQlConnection([
+                  graphQlComment("Requirements owner/repository#11.", "2"),
+                ]),
+                reviews: graphQlConnection([
+                  {
+                    author: { login: "reviewer" },
+                    body: "Compare https://github.com/owner/repository/pull/12.",
+                    state: "COMMENTED",
+                    submittedAt: "2026-07-29T00:00:01Z",
+                    url: "https://github.com/owner/repository/pull/17#pullrequestreview-1",
+                  },
+                ]),
+                reviewThreads: graphQlConnection([]),
+                closingIssuesReferences: graphQlConnection([
+                  {
+                    id: "ISSUE_9",
+                    number: 9,
+                    title: "Direct closing requirement",
+                    body: "Requires #13.",
+                    state: "OPEN",
+                    url: "https://github.com/owner/repository/issues/9",
+                    comments: graphQlConnection([]),
+                  },
+                ]),
+              },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    const evidence = await session.getReviewEvidence(
+      reference,
+      "2".repeat(40),
+      new AbortController().signal,
+    );
+
+    assert.deepEqual(
+      evidence.discussion?.linkedArtifacts.map(({ number, kind, depth, directClosing }) => ({
+        number,
+        kind,
+        depth,
+        directClosing,
+      })),
+      [
+        { number: 9, kind: "issue", depth: 1, directClosing: true },
+        { number: 10, kind: "pull-request", depth: 1, directClosing: false },
+        { number: 11, kind: "issue", depth: 1, directClosing: false },
+        { number: 12, kind: "pull-request", depth: 1, directClosing: false },
+        { number: 13, kind: "issue", depth: 2, directClosing: false },
+        { number: 14, kind: "issue", depth: 2, directClosing: false },
+      ],
+    );
+  });
+
+  it("prioritizes direct closing issues and caps linked context at twenty artifacts", async () => {
+    const textualNumbers = Array.from({ length: 21 }, (_, index) => 40 - index).filter(
+      (number) => number !== reference.number,
+    );
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.includes("/check-runs?")) {
+        return json({ total_count: 0, check_runs: [] });
+      }
+      if (url.endsWith("/graphql")) {
+        const request = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables: Record<string, unknown>;
+        };
+        if (request.query.includes("RevoirLinkedArtifact")) {
+          const number = Number(request.variables.number);
+          return json({
+            data: {
+              repository: {
+                issueOrPullRequest: {
+                  __typename: "Issue",
+                  id: `ISSUE_${number}`,
+                  number,
+                  title: `Requirement ${number}`,
+                  body: "No nested references.",
+                  state: "OPEN",
+                  url: `https://github.com/owner/repository/issues/${number}`,
+                  comments: graphQlConnection([]),
+                },
+              },
+            },
+          });
+        }
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                body: textualNumbers.map((number) => `#${number}`).join(" "),
+                comments: graphQlConnection([]),
+                reviews: graphQlConnection([]),
+                reviewThreads: graphQlConnection([]),
+                closingIssuesReferences: graphQlConnection([
+                  {
+                    id: "ISSUE_100",
+                    number: 100,
+                    title: "Direct closing requirement",
+                    body: "No nested references.",
+                    state: "OPEN",
+                    url: "https://github.com/owner/repository/issues/100",
+                    comments: graphQlConnection([]),
+                  },
+                ]),
+              },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    const artifacts = (
+      await session.getReviewEvidence(reference, "2".repeat(40), new AbortController().signal)
+    ).discussion?.linkedArtifacts;
+
+    assert.equal(artifacts?.length, 20);
+    assert.equal(artifacts?.[0]?.number, 100);
+    assert.equal(artifacts?.[0]?.directClosing, true);
+    assert.deepEqual(
+      artifacts?.slice(1).map(({ number }) => number),
+      textualNumbers.toSorted((left, right) => left - right).slice(0, 19),
+    );
   });
 
   it("still fails when required completed-check context is unavailable", async () => {
