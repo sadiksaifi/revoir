@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import type { ReviewJobV1 } from "@revoir/contracts";
+import { parseReviewJob, type ReviewJobV1 } from "@revoir/contracts";
 import {
   QueueReviewRunner,
   classifyReviewFailure,
@@ -55,6 +55,10 @@ const configuration: RevoirConfiguration = {
         id: 8,
         repositories: [{ id: 99, owner: "owner", name: "repository" }],
       },
+      {
+        id: 9,
+        repositories: [{ id: 100, owner: "other", name: "second" }],
+      },
     ],
   },
   cloudflare: {
@@ -77,19 +81,70 @@ async function fixture(): Promise<string> {
   return readFile(join(import.meta.dirname, "fixtures/pull-request.synchronize.json"), "utf8");
 }
 
-async function enqueueSignedWebhook(deliveryId: string): Promise<ReviewJobV1[]> {
-  const queued: ReviewJobV1[] = [];
+interface PipelineWebhookPayload {
+  installation: { id: number };
+  repository: {
+    id: number;
+    name: string;
+    full_name: string;
+    owner: { login: string };
+  };
+  pull_request: {
+    base: { sha: string; repo: { id: number; full_name: string } };
+    head: { sha: string; repo: { id: number; full_name: string } };
+  };
+}
+
+function webhookBody(
+  rawBody: string,
+  installationId: number,
+  repository: { id: number; owner: string; name: string },
+): string {
+  const payload = JSON.parse(rawBody) as PipelineWebhookPayload;
+  const fullName = `${repository.owner}/${repository.name}`;
+  return JSON.stringify({
+    ...payload,
+    installation: { id: installationId },
+    repository: {
+      id: repository.id,
+      name: repository.name,
+      full_name: fullName,
+      owner: { login: repository.owner },
+    },
+    pull_request: {
+      ...payload.pull_request,
+      base: {
+        ...payload.pull_request.base,
+        repo: { id: repository.id, full_name: fullName },
+      },
+      head: {
+        ...payload.pull_request.head,
+        repo: { id: repository.id, full_name: fullName },
+      },
+    },
+  });
+}
+
+async function enqueueSignedWebhook(
+  deliveryId: string,
+  options: { queued?: ReviewJobV1[]; body?: string } = {},
+): Promise<ReviewJobV1[]> {
+  const queued = options.queued ?? [];
+  const queuedBefore = queued.length;
   const environment: RelayEnvironment = {
     GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
     GITHUB_USER_ID: "42",
-    GITHUB_REPOSITORIES: JSON.stringify([{ id: 99, owner: "owner", name: "repository" }]),
+    GITHUB_REPOSITORIES: JSON.stringify([
+      { id: 99, owner: "owner", name: "repository" },
+      { id: 100, owner: "other", name: "second" },
+    ]),
     REVIEW_QUEUE: {
       async send(job) {
-        queued.push(job);
+        queued.push(parseReviewJob(job));
       },
     },
   };
-  const body = await fixture();
+  const body = options.body ?? (await fixture());
   const signature = createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
   const response = await createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z")).fetch(
     new Request("https://relay.example/github/webhook", {
@@ -105,7 +160,7 @@ async function enqueueSignedWebhook(deliveryId: string): Promise<ReviewJobV1[]> 
     environment,
   );
   assert.equal(response.status, 202);
-  assert.equal(queued.length, 1);
+  assert.equal(queued.length, queuedBefore + 1);
   return queued;
 }
 
@@ -176,6 +231,74 @@ describe("webhook-to-review pipeline", () => {
       assert.equal(queued.length, 0);
     });
   }
+
+  it("settles signed webhooks for owning installations and skips a cross-match", async () => {
+    const rawBody = await fixture();
+    const firstRepository = { id: 99, owner: "owner", name: "repository" };
+    const secondRepository = { id: 100, owner: "other", name: "second" };
+    const queued: ReviewJobV1[] = [];
+    await enqueueSignedWebhook("pipeline-installation-8", {
+      queued,
+      body: webhookBody(rawBody, 8, firstRepository),
+    });
+    await enqueueSignedWebhook("pipeline-installation-9", {
+      queued,
+      body: webhookBody(rawBody, 9, secondRepository),
+    });
+    await enqueueSignedWebhook("pipeline-cross-match", {
+      queued,
+      body: webhookBody(rawBody, 9, firstRepository),
+    });
+    assert.equal(queued.length, 3);
+
+    const acknowledged: string[] = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        const job = queued.shift();
+        return job === undefined
+          ? undefined
+          : { leaseId: `lease-${job.deliveryId}`, attempt: 1, body: job };
+      },
+      async acknowledge(leaseId) {
+        acknowledged.push(leaseId);
+      },
+      async retry() {
+        assert.fail("Eligible and cross-matched jobs must settle without retrying.");
+      },
+    };
+    const reviews: string[] = [];
+    const reviewService: ManualReviewService = {
+      async review(reference) {
+        reviews.push(reference.url);
+        return {
+          status: "clean",
+          reviewedSha: "2".repeat(40),
+          currentSha: "2".repeat(40),
+        };
+      },
+    };
+    const runner = new QueueReviewRunner(
+      configuration,
+      queue,
+      reviewService,
+      silentFailureReporter,
+      memoryFailureStore(),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.deepEqual(reviews, [
+      "https://github.com/owner/repository/pull/17",
+      "https://github.com/other/second/pull/17",
+    ]);
+    assert.deepEqual(acknowledged, [
+      "lease-pipeline-installation-8",
+      "lease-pipeline-installation-9",
+      "lease-pipeline-cross-match",
+    ]);
+    assert.equal(queued.length, 0);
+  });
 
   it("acknowledges a signed webhook when the queued head is stale", async () => {
     const queued = await enqueueSignedWebhook("pipeline-stale");
