@@ -269,6 +269,125 @@ describe("GitHub App review gateway", () => {
     assert.ok(requests.every((request) => request.init?.signal === abortController.signal));
   });
 
+  it("creates, completes, and reconciles exact App-owned review checks", async () => {
+    const headSha = "2".repeat(40);
+    const externalId = `revoir:ai-review:v1:owner/repository#17@${headSha}`;
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const checkRun = (
+      id: number,
+      status: "completed" | "in_progress",
+      appSlug = "revoir-test",
+      runExternalId = externalId,
+    ) => ({
+      id,
+      name: "RevoirAI Review",
+      head_sha: headSha,
+      status,
+      external_id: runExternalId,
+      app: { slug: appSlug },
+    });
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (
+        url.endsWith(
+          `/commits/${headSha}/check-runs?check_name=RevoirAI%20Review&filter=all&per_page=100&page=1`,
+        )
+      ) {
+        return json({
+          total_count: 4,
+          check_runs: [
+            checkRun(70, "in_progress"),
+            checkRun(71, "in_progress", "another-app"),
+            checkRun(72, "completed"),
+            checkRun(73, "in_progress", "revoir-test", "another-execution"),
+          ],
+        });
+      }
+      if (url.endsWith("/check-runs/70") && init?.method === "PATCH") {
+        return json(checkRun(70, "completed"));
+      }
+      if (url.endsWith("/check-runs") && init?.method === "POST") {
+        return json(checkRun(80, "in_progress"), 201);
+      }
+      if (url.endsWith("/check-runs/80") && init?.method === "PATCH") {
+        return json(checkRun(80, "completed"));
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    const check = await session.startReviewCheck(reference, headSha, new AbortController().signal);
+    assert.equal(check.id, 80);
+    await check.complete(
+      {
+        conclusion: "success",
+        title: "Review completed",
+        summary: "Revoir completed the review.",
+      },
+      new AbortController().signal,
+    );
+
+    const reconciliation = requests.find(({ url }) => url.endsWith("/check-runs/70"));
+    assert.deepEqual(JSON.parse(String(reconciliation?.init?.body)), {
+      name: "RevoirAI Review",
+      status: "completed",
+      conclusion: "cancelled",
+      completed_at: "1970-01-01T00:16:40.000Z",
+      output: {
+        title: "Review superseded",
+        summary: "A new Revoir execution replaced an incomplete review for this commit.",
+      },
+    });
+    assert.equal(
+      requests.some(({ url }) => url.endsWith("/check-runs/71")),
+      false,
+    );
+    assert.equal(
+      requests.some(({ url }) => url.endsWith("/check-runs/72")),
+      false,
+    );
+    assert.equal(
+      requests.some(({ url }) => url.endsWith("/check-runs/73")),
+      false,
+    );
+    const creation = requests.find(
+      ({ url, init }) => url.endsWith("/check-runs") && init?.method === "POST",
+    );
+    assert.deepEqual(JSON.parse(String(creation?.init?.body)), {
+      name: "RevoirAI Review",
+      head_sha: headSha,
+      status: "in_progress",
+      external_id: externalId,
+      started_at: "1970-01-01T00:16:40.000Z",
+      output: {
+        title: "Review in progress",
+        summary: "Revoir is reviewing pull request #17 at 2222222.",
+      },
+    });
+    const completion = requests.find(({ url }) => url.endsWith("/check-runs/80"));
+    assert.deepEqual(JSON.parse(String(completion?.init?.body)), {
+      name: "RevoirAI Review",
+      status: "completed",
+      conclusion: "success",
+      completed_at: "1970-01-01T00:16:40.000Z",
+      output: {
+        title: "Review completed",
+        summary: "Revoir completed the review.",
+      },
+    });
+  });
+
   it("creates, updates, and removes one bot-owned failure comment without touching humans", async () => {
     const comments = [
       {

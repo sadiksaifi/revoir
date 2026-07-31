@@ -84,7 +84,7 @@ describe("diagnostic contracts", () => {
           permissions: {
             metadata: "read",
             contents: "read",
-            checks: "read",
+            checks: "write",
             actions: "read",
             issues: "read",
             pull_requests: "write",
@@ -187,7 +187,7 @@ describe("diagnostic contracts", () => {
           permissions: {
             metadata: "read",
             contents: "read",
-            checks: "read",
+            checks: "write",
             actions: "read",
             issues: "read",
             pull_requests: "write",
@@ -224,7 +224,7 @@ describe("diagnostic contracts", () => {
     const requiredPermissions = {
       metadata: "read",
       contents: "read",
-      checks: "read",
+      checks: "write",
       actions: "read",
       issues: "read",
       pull_requests: "write",
@@ -263,7 +263,7 @@ describe("diagnostic contracts", () => {
     );
   });
 
-  it("rejects mismatched immutable repository values", async () => {
+  it("rejects read-only Checks access now that review checks are published", async () => {
     const gateway = createDefaultDiagnosticGateway(async (url) => {
       const body = url.endsWith("/app")
         ? { id: 7 }
@@ -276,6 +276,39 @@ describe("diagnostic contracts", () => {
                 checks: "read",
                 actions: "read",
                 issues: "read",
+                pull_requests: "write",
+              },
+            }
+          : url.endsWith("/user/42")
+            ? { id: 42 }
+            : { id: 99, full_name: "owner/repository" };
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return body;
+        },
+      };
+    });
+
+    await assert.rejects(
+      gateway.checkGitHub(configuration.github),
+      /checks must be "write" \(found "read"\)/u,
+    );
+  });
+
+  it("rejects mismatched immutable repository values", async () => {
+    const gateway = createDefaultDiagnosticGateway(async (url) => {
+      const body = url.endsWith("/app")
+        ? { id: 7 }
+        : url.endsWith("/access_tokens")
+          ? {
+              token: "installation-secret",
+              permissions: {
+                metadata: "read",
+                contents: "read",
+                checks: "write",
+                actions: "read",
                 pull_requests: "write",
               },
             }

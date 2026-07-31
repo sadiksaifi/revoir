@@ -10,7 +10,7 @@ const CLOUDFLARE_PULL_ACKNOWLEDGEMENT_ERROR =
 const REQUIRED_GITHUB_PERMISSIONS = {
   metadata: "read",
   contents: "read",
-  checks: "read",
+  checks: "write",
   actions: "read",
   issues: "read",
   pull_requests: "write",
