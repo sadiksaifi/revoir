@@ -801,7 +801,10 @@ function parseLinkedArtifactEvidence(
   const kind: LinkedArtifactKind = directClosing
     ? "issue"
     : (() => {
-        const typeName = string(artifact.__typename, "linked artifact evidence type");
+        const typeName = string(
+          Reflect.get(artifact, "__typename"),
+          "linked artifact evidence type",
+        );
         if (typeName === "Issue") {
           return "issue";
         }
