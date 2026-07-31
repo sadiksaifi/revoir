@@ -4,6 +4,8 @@ import {
   GitHubAppReviewGateway,
   PendingReviewUncertainError,
   ReviewSubmissionUncertainError,
+  type GitHubReviewCheck,
+  type GitHubReviewCheckCompletion,
   type GitHubReviewGateway,
 } from "./github.js";
 import { FileReviewLock, type ReviewLock } from "./lock.js";
@@ -182,6 +184,25 @@ async function completePendingReview(operation: TerminalHandle): Promise<Error[]
   return failures;
 }
 
+async function completeReviewCheck(operation: TerminalHandle): Promise<Error[]> {
+  let failure: Error | undefined;
+  for (let attempt = 1; attempt <= MAX_TERMINAL_ATTEMPTS; attempt += 1) {
+    try {
+      // Check-run completion is idempotent, so a confirmed retry settles earlier ambiguity.
+      // eslint-disable-next-line no-await-in-loop
+      await operation();
+      return [];
+    } catch (error) {
+      failure ??= asError(error);
+      if (attempt < MAX_TERMINAL_ATTEMPTS) {
+        // eslint-disable-next-line no-await-in-loop
+        await terminalBackoff(attempt);
+      }
+    }
+  }
+  return failure === undefined ? [] : [failure];
+}
+
 function throwCleanupFailures(failures: readonly Error[], message: string): void {
   if (failures.length === 1 && failures[0] instanceof PendingReviewUncertainError) {
     throw failures[0];
@@ -189,6 +210,55 @@ function throwCleanupFailures(failures: readonly Error[], message: string): void
   if (failures.length > 0) {
     throw new AggregateError(failures, message);
   }
+}
+
+function reviewCheckCompletion(
+  result: ManualReviewResult | undefined,
+  failure: unknown,
+  signal: AbortSignal,
+): GitHubReviewCheckCompletion {
+  if (failure !== undefined) {
+    if (signal.reason instanceof ReviewTimeoutError) {
+      return {
+        conclusion: "timed_out",
+        title: "Review timed out",
+        summary: "Revoir exceeded its configured review timeout before it could finish.",
+      };
+    }
+    if (signal.aborted) {
+      return {
+        conclusion: "cancelled",
+        title: "Review cancelled",
+        summary: "The Revoir process stopped before this review could finish.",
+      };
+    }
+    return {
+      conclusion: "failure",
+      title: "Review failed",
+      summary:
+        "Revoir could not complete this review. See the failure comment or service logs for details.",
+    };
+  }
+  if (result?.status === "stale") {
+    return {
+      conclusion: "cancelled",
+      title: "Review superseded",
+      summary: `The pull request head changed from ${result.reviewedSha.slice(0, 7)} to ${result.currentSha.slice(0, 7)} before the review completed.`,
+    };
+  }
+  if (result?.status === "findings") {
+    const findingLabel = result.publishedFindings === 1 ? "finding" : "findings";
+    return {
+      conclusion: "success",
+      title: "Review completed with findings",
+      summary: `Revoir completed the review and published ${result.publishedFindings} new ${findingLabel}. Review threads contain the details.`,
+    };
+  }
+  return {
+    conclusion: "success",
+    title: "Review completed",
+    summary: "Revoir completed the review and found no actionable issues.",
+  };
 }
 
 export class CleanReviewOrchestrator implements ManualReviewService {
@@ -303,6 +373,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     let workspaceCleanup: TerminalHandle | undefined;
     let activeReaction: TerminalHandle | undefined;
     let pendingReviewCleanup: TerminalHandle | undefined;
+    let reviewCheck: GitHubReviewCheck | undefined;
     let result: ManualReviewResult | undefined;
     let failure: unknown;
 
@@ -334,6 +405,8 @@ export class CleanReviewOrchestrator implements ManualReviewService {
           currentSha: startingSha,
         };
       } else {
+        reviewCheck = await github.startReviewCheck(reference, pullRequest.headSha, signal);
+        throwIfAborted(signal);
         await github.removeOwnCompletionReaction(reference, signal);
         throwIfAborted(signal);
         activeReaction = createTerminalHandle(() =>
@@ -553,14 +626,46 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       activeReaction = undefined;
     }
 
-    if (failure !== undefined) {
-      throw combineFailures(
-        failure,
+    let terminalFailure = failure;
+    if (terminalFailure !== undefined) {
+      terminalFailure = combineFailures(
+        terminalFailure,
         cleanupFailures,
         "Review failed and cleanup also encountered errors.",
       );
+    } else {
+      try {
+        throwCleanupFailures(cleanupFailures, "Review cleanup failed.");
+      } catch (error) {
+        terminalFailure = error;
+      }
     }
-    throwCleanupFailures(cleanupFailures, "Review cleanup failed.");
+    if (terminalFailure === undefined && result === undefined) {
+      terminalFailure = new Error("Review ended without a result.");
+    }
+
+    if (reviewCheck !== undefined) {
+      const check = reviewCheck;
+      reviewCheck = undefined;
+      const completion = reviewCheckCompletion(result, terminalFailure, signal);
+      const checkFailures = await completeReviewCheck(
+        createTerminalHandle(() => check.complete(completion, terminalSignal)),
+      );
+      if (checkFailures.length > 0) {
+        terminalFailure =
+          terminalFailure === undefined
+            ? new AggregateError(checkFailures, "Review check completion failed.")
+            : combineFailures(
+                terminalFailure,
+                checkFailures,
+                "Review failed and its check run could not be completed.",
+              );
+      }
+    }
+
+    if (terminalFailure !== undefined) {
+      throw terminalFailure;
+    }
     if (result === undefined) {
       throw new Error("Review ended without a result.");
     }

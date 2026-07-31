@@ -21,6 +21,21 @@ import {
 
 export type ReviewReaction = "eyes" | "+1" | "confused";
 
+export const REVIEW_CHECK_NAME = "RevoirAI Review";
+
+export type GitHubReviewCheckConclusion = "cancelled" | "failure" | "success" | "timed_out";
+
+export interface GitHubReviewCheckCompletion {
+  readonly conclusion: GitHubReviewCheckConclusion;
+  readonly summary: string;
+  readonly title: string;
+}
+
+export interface GitHubReviewCheck {
+  readonly id: number;
+  complete(completion: GitHubReviewCheckCompletion, signal: AbortSignal): Promise<void>;
+}
+
 export interface GitHubPendingReview {
   readonly id: number;
   delete(signal: AbortSignal): Promise<void>;
@@ -33,6 +48,11 @@ export type ReviewThreadResolution =
 
 export interface GitHubReviewSession {
   readonly installationToken: string;
+  startReviewCheck(
+    reference: PullRequestReference,
+    headSha: string,
+    signal: AbortSignal,
+  ): Promise<GitHubReviewCheck>;
   getPullRequest(
     reference: PullRequestReference,
     signal: AbortSignal,
@@ -137,6 +157,15 @@ interface GitHubIssueCommentResponse {
   body: string;
   id: number;
   userLogin: string;
+}
+
+interface GitHubCheckRunResponse {
+  appSlug?: string;
+  externalId?: string;
+  headSha: string;
+  id: number;
+  name: string;
+  status: string;
 }
 
 function base64Url(value: string | Buffer): string {
@@ -297,6 +326,41 @@ function optionalString(value: unknown, path: string): string | undefined {
     throw new Error(`GitHub returned an invalid ${path}.`);
   }
   return value;
+}
+
+function parseCheckRun(value: unknown): GitHubCheckRunResponse {
+  const checkRun = record(value, "check run");
+  const app =
+    checkRun.app === undefined || checkRun.app === null
+      ? undefined
+      : record(checkRun.app, "check run App");
+  const externalId = optionalString(checkRun.external_id, "check run external id");
+  const appSlug = optionalString(app?.slug, "check run App slug");
+  return {
+    id: positiveInteger(checkRun.id, "check run id"),
+    name: string(checkRun.name, "check run name"),
+    headSha: string(checkRun.head_sha, "check run head SHA"),
+    status: string(checkRun.status, "check run status"),
+    ...(externalId === undefined ? {} : { externalId }),
+    ...(appSlug === undefined ? {} : { appSlug }),
+  };
+}
+
+function isOwnReviewCheck(value: unknown, appSlug: string): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const checkRun = value as Record<string, unknown>;
+  if (checkRun.name !== REVIEW_CHECK_NAME) {
+    return false;
+  }
+  const app = checkRun.app;
+  return (
+    typeof app === "object" &&
+    app !== null &&
+    !Array.isArray(app) &&
+    (app as Record<string, unknown>).slug === appSlug
+  );
 }
 
 function repository(value: unknown, path: string): PullRequestRepository {
@@ -569,8 +633,10 @@ function parseIssueComment(value: unknown): GitHubIssueCommentResponse {
 class InstallationSession implements GitHubReviewSession {
   readonly installationToken: string;
   readonly #apiBase: string;
+  readonly #appSlug: string;
   readonly #botLogin: string;
   readonly #fetch: FetchLike;
+  readonly #now: () => number;
   readonly #pendingFenceAttemptMs: number;
   readonly #redactor: SecretRedactor;
   #ownedOpenThreadIds = new Set<string>();
@@ -581,13 +647,16 @@ class InstallationSession implements GitHubReviewSession {
     appSlug: string,
     fetchImplementation: FetchLike,
     apiBase: string,
+    now: () => number,
     pendingFenceAttemptMs: number,
     redactor: SecretRedactor,
   ) {
     this.installationToken = installationToken;
     this.#apiBase = apiBase;
+    this.#appSlug = appSlug;
     this.#botLogin = `${appSlug}[bot]`.toLowerCase();
     this.#fetch = fetchImplementation;
+    this.#now = now;
     this.#pendingFenceAttemptMs = pendingFenceAttemptMs;
     this.#redactor = redactor;
   }
@@ -608,6 +677,145 @@ class InstallationSession implements GitHubReviewSession {
       }),
       signal,
     );
+  }
+
+  #timestamp(): string {
+    return new Date(this.#now() * 1_000).toISOString();
+  }
+
+  #reviewCheckExternalId(reference: PullRequestReference, headSha: string): string {
+    return `revoir:ai-review:v1:${reference.owner}/${reference.repository}#${reference.number}@${headSha}`;
+  }
+
+  async #completeReviewCheck(
+    reference: PullRequestReference,
+    id: number,
+    completion: GitHubReviewCheckCompletion,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const response = await this.#request(
+      `/repos/${reference.owner}/${reference.repository}/check-runs/${id}`,
+      signal,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: REVIEW_CHECK_NAME,
+          status: "completed",
+          conclusion: completion.conclusion,
+          completed_at: this.#timestamp(),
+          output: {
+            title: completion.title,
+            summary: completion.summary,
+          },
+        }),
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+    const updated = parseCheckRun(await responseJson(response, "review check completion", signal));
+    if (updated.id !== id || updated.status !== "completed") {
+      throw new Error("GitHub review check completion returned an unexpected check run.");
+    }
+  }
+
+  async #reconcileIncompleteReviewChecks(
+    reference: PullRequestReference,
+    headSha: string,
+    externalId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const incompleteIds = new Set<number>();
+    let page = 1;
+    for (;;) {
+      throwIfAborted(signal);
+      // Check-run pages must be requested and validated in order.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await this.#request(
+        `/repos/${reference.owner}/${reference.repository}/commits/${headSha}/check-runs?check_name=${encodeURIComponent(REVIEW_CHECK_NAME)}&filter=all&per_page=100&page=${page}`,
+        signal,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      const responseValue = await responseJson(response, "review check lookup", signal);
+      const value = record(responseValue, "review check lookup");
+      if (!Array.isArray(value.check_runs)) {
+        throw new Error("GitHub review check lookup returned an invalid response.");
+      }
+      const checkRuns = value.check_runs.map((checkRun) => parseCheckRun(checkRun));
+      for (const checkRun of checkRuns) {
+        if (
+          checkRun.name === REVIEW_CHECK_NAME &&
+          checkRun.headSha === headSha &&
+          checkRun.status !== "completed" &&
+          checkRun.externalId === externalId &&
+          checkRun.appSlug === this.#appSlug
+        ) {
+          incompleteIds.add(checkRun.id);
+        }
+      }
+      if (checkRuns.length < 100) {
+        break;
+      }
+      page += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
+    settledValues(
+      await Promise.allSettled(
+        [...incompleteIds].map((id) =>
+          this.#completeReviewCheck(
+            reference,
+            id,
+            {
+              conclusion: "cancelled",
+              title: "Review superseded",
+              summary: "A new Revoir execution replaced an incomplete review for this commit.",
+            },
+            signal,
+          ),
+        ),
+      ),
+      "GitHub incomplete review check reconciliation failed.",
+    );
+  }
+
+  async startReviewCheck(
+    reference: PullRequestReference,
+    headSha: string,
+    signal: AbortSignal,
+  ): Promise<GitHubReviewCheck> {
+    const externalId = this.#reviewCheckExternalId(reference, headSha);
+    await this.#reconcileIncompleteReviewChecks(reference, headSha, externalId, signal);
+    const response = await this.#request(
+      `/repos/${reference.owner}/${reference.repository}/check-runs`,
+      signal,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          name: REVIEW_CHECK_NAME,
+          head_sha: headSha,
+          status: "in_progress",
+          external_id: externalId,
+          started_at: this.#timestamp(),
+          output: {
+            title: "Review in progress",
+            summary: `Revoir is reviewing pull request #${reference.number} at ${headSha.slice(0, 7)}.`,
+          },
+        }),
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+    const created = parseCheckRun(await responseJson(response, "review check creation", signal));
+    if (
+      created.name !== REVIEW_CHECK_NAME ||
+      created.headSha !== headSha ||
+      created.status !== "in_progress"
+    ) {
+      throw new Error("GitHub review check creation returned an unexpected check run.");
+    }
+    return {
+      id: created.id,
+      complete: (completion, completionSignal) =>
+        this.#completeReviewCheck(reference, created.id, completion, completionSignal),
+    };
   }
 
   async getPullRequest(
@@ -647,6 +855,9 @@ class InstallationSession implements GitHubReviewSession {
         throw new Error("GitHub check run lookup returned an invalid response.");
       }
       for (const check of value.check_runs) {
+        if (isOwnReviewCheck(check, this.#appSlug)) {
+          continue;
+        }
         const parsed = parseCompletedCheck(check, reference);
         if (parsed !== undefined) {
           checks.push(parsed);
@@ -1475,6 +1686,7 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
       app.slug,
       this.#fetch,
       this.#apiBase,
+      this.#now,
       this.#pendingFenceAttemptMs,
       new SecretRedactor({
         configuration,
