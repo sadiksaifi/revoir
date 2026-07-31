@@ -133,7 +133,19 @@ ID and Queue ID shown by Wrangler or the Cloudflare API.
 
 ## 3. Create the GitHub App
 
-Create a private GitHub App with webhooks enabled.
+Create a GitHub App with webhooks enabled. Under **Where can this GitHub App be
+installed?**, choose the visibility that matches the installation plan:
+
+- **Only on this account** is sufficient when every reviewed repository belongs
+  to the personal account or organization that owns the App.
+- **Any account** is required when the same App will be installed on a personal
+  account and an organization, or across multiple organizations or accounts.
+
+GitHub describes an **Any account** App as public, but this only allows other
+accounts to install it. It does not publish the App's private key, webhook
+secret, installation tokens, or private repositories. Each installation
+token remains limited to the repositories selected for that installation and
+the permissions approved by that account.
 
 Set the webhook URL to the Worker endpoint and use the same
 `GITHUB_WEBHOOK_SECRET`.
@@ -144,16 +156,28 @@ Grant these repository permissions:
 - Contents: read
 - Checks: read and write
 - Actions: read
-- Issues: read
+- Issues: read and write
 - Pull requests: read and write
 
-If the App was already installed with read-only Checks access, update the App
-permission and approve the installation's new permission request before
-upgrading Revoir.
+If the App was already installed with read-only Checks or Issues access, update
+the App permissions and approve each installation's new permission request
+before upgrading Revoir.
 
-Subscribe only to the **Pull request** event. Install the App only on the
-repositories listed in `GITHUB_REPOSITORIES`. The same App may be installed in
-multiple organizations or accounts.
+Subscribe only to the **Pull request** event. Install the App on each target
+account:
+
+1. For a personal account, open the App's installation page, select the
+   personal account, choose **Only select repositories**, and select the
+   repositories listed in `GITHUB_REPOSITORIES`.
+2. For an organization, return to the installation page, select the
+   organization, and select its listed repositories. If GitHub offers
+   **Request** instead of **Install**, have an organization owner approve the
+   request and repository selection.
+
+Repeat the organization step for any additional accounts. GitHub creates a
+separate installation ID for every account, including the App owner's account;
+record each ID with only the repositories selected in that installation. A
+single-account setup follows the same flow but records just one installation.
 
 Generate and download a private key for the App. Record:
 
