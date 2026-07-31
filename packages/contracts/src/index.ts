@@ -10,11 +10,11 @@ export {
   type FindingFixAction,
   type FindingImpactKind,
   type FindingPriority,
-  type FindingRangeV1,
+  type FindingRangeV2,
   type FindingSide,
-  type FindingV1,
-  type ModelFindingV1,
-  type ModelReviewOutputV1,
+  type FindingV2,
+  type ModelFindingV2,
+  type ModelReviewOutputV2,
 } from "./findings.js";
 export {
   REQUESTED_REVIEW_JOB_CONTRACT_VERSION,
