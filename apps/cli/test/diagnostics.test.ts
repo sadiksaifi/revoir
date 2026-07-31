@@ -309,6 +309,7 @@ describe("diagnostic contracts", () => {
                 contents: "read",
                 checks: "write",
                 actions: "read",
+                issues: "read",
                 pull_requests: "write",
               },
             }
