@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { parseReviewJob, ReviewJobSchemaError, type ReviewJobV1 } from "@revoir/contracts";
+import { parseReviewQueueJob, ReviewJobSchemaError, type ReviewQueueJob } from "@revoir/contracts";
 
 import { isCallerCancellation } from "../cancellation.js";
 import type { RevoirConfiguration } from "../config/schema.js";
@@ -26,6 +26,11 @@ import {
   type OperationalFailureState,
   type OperationalFailureStore,
 } from "./failure-store.js";
+import {
+  FileReviewRequestCompletionStore,
+  type ReviewRequestCompletionStore,
+  type ReviewRequestIdentity,
+} from "./request-completion-store.js";
 
 export type { OperationalFailureState, OperationalFailureStore } from "./failure-store.js";
 
@@ -64,7 +69,7 @@ type LocalEligibility =
     };
 
 function localEligibility(
-  job: ReviewJobV1,
+  job: ReviewQueueJob,
   configuration: RevoirConfiguration["github"],
 ): LocalEligibility {
   const installation = configuration.installations.find(
@@ -82,16 +87,17 @@ function localEligibility(
   if (!repositoryAllowed) {
     return { eligible: false, reason: "repository_not_allowed_for_installation" };
   }
+  const senderId = job.version === 1 ? job.pullRequest.senderId : job.request.senderId;
   if (
-    job.pullRequest.authorId !== configuration.userId ||
-    job.pullRequest.senderId !== configuration.userId
+    senderId !== configuration.userId ||
+    (job.version === 1 && job.pullRequest.authorId !== configuration.userId)
   ) {
     return { eligible: false, reason: "author_or_sender_not_allowed" };
   }
   return { eligible: true };
 }
 
-function referenceFor(job: ReviewJobV1): PullRequestReference {
+function referenceFor(job: ReviewQueueJob): PullRequestReference {
   const { owner, name } = job.repository;
   const number = job.pullRequest.number;
   return {
@@ -100,6 +106,16 @@ function referenceFor(job: ReviewJobV1): PullRequestReference {
     number,
     url: `https://github.com/${owner}/${name}/pull/${number}`,
   };
+}
+
+function requestIdentity(job: ReviewQueueJob): ReviewRequestIdentity | undefined {
+  return job.version === 2
+    ? { repositoryId: job.repository.id, commentId: job.request.commentId }
+    : undefined;
+}
+
+function requestKey(identity: ReviewRequestIdentity): string {
+  return `${identity.repositoryId}:${identity.commentId}`;
 }
 
 function waitForNextPoll(signal?: AbortSignal): Promise<void> {
@@ -249,6 +265,8 @@ export class QueueReviewRunner implements QueueRunService {
   // the store; transport delivery attempts are intentionally audit-only.
   readonly #outageFloors = new Map<string, OperationalFailureCount>();
   readonly #operationalFailures: OperationalFailureStore;
+  readonly #requestCompletions: ReviewRequestCompletionStore;
+  readonly #knownCompletedRequests = new Set<string>();
   readonly #ownerToken = randomUUID();
   readonly #pendingLoads = new Map<string, StoreOperationRecord<OperationalFailureState>>();
   readonly #pendingSaves = new Map<string, Set<StoreOperationRecord<void>>>();
@@ -267,6 +285,9 @@ export class QueueReviewRunner implements QueueRunService {
       configuration.paths.stateDir,
     ),
     logger: QueueRunLogger = NOOP_LOGGER,
+    requestCompletions: ReviewRequestCompletionStore = new FileReviewRequestCompletionStore(
+      configuration.paths.stateDir,
+    ),
   ) {
     this.#configuration = configuration;
     this.#queue = queue;
@@ -274,6 +295,7 @@ export class QueueReviewRunner implements QueueRunService {
     this.#failures = failures;
     this.#operationalFailures = operationalFailures;
     this.#logger = logger;
+    this.#requestCompletions = requestCompletions;
   }
 
   consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
@@ -292,9 +314,9 @@ export class QueueReviewRunner implements QueueRunService {
       return "idle";
     }
 
-    let job: ReviewJobV1;
+    let job: ReviewQueueJob;
     try {
-      job = parseReviewJob(delivery.body);
+      job = parseReviewQueueJob(delivery.body);
     } catch (error) {
       if (!(error instanceof ReviewJobSchemaError)) {
         throw error;
@@ -312,6 +334,25 @@ export class QueueReviewRunner implements QueueRunService {
         reason: eligibility.reason,
       });
       return "settled";
+    }
+
+    const requestedReview = requestIdentity(job);
+    if (requestedReview !== undefined) {
+      const completedRequestKey = requestKey(requestedReview);
+      const completed =
+        this.#knownCompletedRequests.has(completedRequestKey) ||
+        (await this.#requestCompletions.has(requestedReview, signal));
+      if (completed) {
+        this.#knownCompletedRequests.add(completedRequestKey);
+        await this.#queue.acknowledge(delivery.leaseId, signal);
+        await this.#clearFailureState(job.deliveryId);
+        await this.#logger.write("queue_review_skipped", {
+          deliveryId: job.deliveryId,
+          reason: "completed_request",
+          commentId: requestedReview.commentId,
+        });
+        return "settled";
+      }
     }
 
     const pendingSettlement = this.#pendingStoreSettlements.get(job.deliveryId);
@@ -366,7 +407,10 @@ export class QueueReviewRunner implements QueueRunService {
       deliveryId: job.deliveryId,
       repository: `${job.repository.owner}/${job.repository.name}`,
       pullRequest: job.pullRequest.number,
-      headSha: job.pullRequest.headSha,
+      trigger: job.version === 1 ? job.action : job.request.kind,
+      ...(job.version === 1
+        ? { headSha: job.pullRequest.headSha }
+        : { commentId: job.request.commentId }),
     };
     const startedAt = Date.now();
     await this.#logger.write("queue_review_started", metadata);
@@ -374,7 +418,7 @@ export class QueueReviewRunner implements QueueRunService {
     let result: Awaited<ReturnType<ManualReviewService["review"]>>;
     try {
       result = await this.#reviews.review(referenceFor(job), {
-        expectedHeadSha: job.pullRequest.headSha,
+        ...(job.version === 1 ? { expectedHeadSha: job.pullRequest.headSha } : {}),
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
@@ -434,6 +478,10 @@ export class QueueReviewRunner implements QueueRunService {
     // The review completed. From this point onward even caller cancellation cannot
     // safely prove that Pi did not run, so the reservation remains for redelivery.
     throwIfCancelled(signal);
+    if (requestedReview !== undefined) {
+      this.#knownCompletedRequests.add(requestKey(requestedReview));
+      await this.#requestCompletions.mark(requestedReview, signal);
+    }
     await this.#queue.acknowledge(delivery.leaseId, signal);
     await this.#clearFailureState(job.deliveryId);
     await this.#logger.write("queue_review_settled", {
@@ -749,7 +797,7 @@ export class QueueReviewRunner implements QueueRunService {
 
   async #settleTerminalFailure(
     delivery: QueueDelivery,
-    job: ReviewJobV1,
+    job: ReviewQueueJob,
     category: ReviewFailureCategory,
     signal?: AbortSignal,
   ): Promise<QueueConsumption> {
@@ -767,7 +815,7 @@ export class QueueReviewRunner implements QueueRunService {
 
   async #settleStoreFailure(
     delivery: QueueDelivery,
-    job: ReviewJobV1,
+    job: ReviewQueueJob,
     failure: unknown,
     signal?: AbortSignal,
   ): Promise<QueueConsumption> {

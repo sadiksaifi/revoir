@@ -15,6 +15,7 @@ const REQUIRED_GITHUB_PERMISSIONS = {
   issues: "write",
   pull_requests: "write",
 } as const;
+const REQUIRED_GITHUB_EVENTS = ["pull_request", "issue_comment"] as const;
 
 function execFile(
   executable: string,
@@ -145,6 +146,18 @@ function validateGitHubPermissions(value: unknown): void {
   );
 }
 
+function validateGitHubEvents(value: unknown): void {
+  if (!Array.isArray(value) || value.some((event) => typeof event !== "string")) {
+    throw new Error("GitHub App webhook subscriptions are invalid: events are unavailable.");
+  }
+  const missingEvents = REQUIRED_GITHUB_EVENTS.filter((event) => !value.includes(event));
+  if (missingEvents.length > 0) {
+    throw new Error(
+      `GitHub App webhook subscriptions are invalid: missing ${missingEvents.join(", ")}. Subscribe to the Pull request and Issue comment events in the GitHub App settings, then rerun diagnostics.`,
+    );
+  }
+}
+
 export function createDefaultDiagnosticGateway(
   fetchImplementation: FetchFunction = fetch,
 ): DiagnosticGateway {
@@ -206,6 +219,7 @@ export function createDefaultDiagnosticGateway(
           `GitHub authenticated app id ${String(app.id)} does not match configured app id ${configuration.appId}.`,
         );
       }
+      validateGitHubEvents(app.events);
 
       const installationResults = await Promise.all(
         configuration.installations.map(async (installation) => {

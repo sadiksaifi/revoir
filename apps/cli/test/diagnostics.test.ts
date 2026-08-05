@@ -77,7 +77,11 @@ describe("diagnostic contracts", () => {
 
       let body: unknown;
       if (url.endsWith("/app")) {
-        body = { id: 7, slug: "revoir-test" };
+        body = {
+          id: 7,
+          slug: "revoir-test",
+          events: ["pull_request", "issue_comment"],
+        };
       } else if (url.endsWith("/access_tokens")) {
         body = {
           token: "installation-secret",
@@ -178,7 +182,11 @@ describe("diagnostic contracts", () => {
     const gateway = createDefaultDiagnosticGateway(async (url, init) => {
       let body: unknown;
       if (url.endsWith("/app")) {
-        body = { id: 7, slug: "revoir-test" };
+        body = {
+          id: 7,
+          slug: "revoir-test",
+          events: ["pull_request", "issue_comment"],
+        };
       } else if (url.includes("/app/installations/")) {
         const installationId = /installations\/(?<id>\d+)/u.exec(url)?.groups?.id ?? "";
         requestedInstallations.push(installationId);
@@ -220,6 +228,40 @@ describe("diagnostic contracts", () => {
     assert.equal(repositoryAuthorizations.get("100"), "Bearer installation-9-secret");
   });
 
+  it("requires the pull-request and issue-comment webhook subscriptions", async () => {
+    const gateway = createDefaultDiagnosticGateway(async (url) => {
+      const body = url.endsWith("/app")
+        ? { id: 7, events: ["pull_request"] }
+        : url.endsWith("/access_tokens")
+          ? {
+              token: "installation-secret",
+              permissions: {
+                metadata: "read",
+                contents: "read",
+                checks: "write",
+                actions: "read",
+                issues: "write",
+                pull_requests: "write",
+              },
+            }
+          : url.endsWith("/user/42")
+            ? { id: 42 }
+            : { id: 99, full_name: "owner/repository" };
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return body;
+        },
+      };
+    });
+
+    await assert.rejects(
+      gateway.checkGitHub(configuration.github),
+      /missing issue_comment.*Issue comment events/u,
+    );
+  });
+
   it("reports every missing GitHub installation permission with an actionable fix", async () => {
     const requiredPermissions = {
       metadata: "read",
@@ -236,7 +278,7 @@ describe("diagnostic contracts", () => {
         delete permissions[missingPermission];
         const gateway = createDefaultDiagnosticGateway(async (url) => {
           const body = url.endsWith("/app")
-            ? { id: 7 }
+            ? { id: 7, events: ["pull_request", "issue_comment"] }
             : url.endsWith("/access_tokens")
               ? { token: "installation-secret", permissions }
               : url.endsWith("/user/42")
@@ -266,7 +308,7 @@ describe("diagnostic contracts", () => {
   it("rejects read-only Checks access now that review checks are published", async () => {
     const gateway = createDefaultDiagnosticGateway(async (url) => {
       const body = url.endsWith("/app")
-        ? { id: 7 }
+        ? { id: 7, events: ["pull_request", "issue_comment"] }
         : url.endsWith("/access_tokens")
           ? {
               token: "installation-secret",
@@ -300,7 +342,7 @@ describe("diagnostic contracts", () => {
   it("rejects read-only Issues access because review reactions require writes", async () => {
     const gateway = createDefaultDiagnosticGateway(async (url) => {
       const body = url.endsWith("/app")
-        ? { id: 7 }
+        ? { id: 7, events: ["pull_request", "issue_comment"] }
         : url.endsWith("/access_tokens")
           ? {
               token: "installation-secret",
@@ -334,7 +376,7 @@ describe("diagnostic contracts", () => {
   it("rejects mismatched immutable repository values", async () => {
     const gateway = createDefaultDiagnosticGateway(async (url) => {
       const body = url.endsWith("/app")
-        ? { id: 7 }
+        ? { id: 7, events: ["pull_request", "issue_comment"] }
         : url.endsWith("/access_tokens")
           ? {
               token: "installation-secret",

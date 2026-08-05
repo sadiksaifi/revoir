@@ -4,7 +4,12 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { parseReviewJob, type ReviewJobV1 } from "@revoir/contracts";
+import {
+  parseReviewJob,
+  parseReviewQueueJob,
+  type ReviewJobV1,
+  type ReviewQueueJob,
+} from "@revoir/contracts";
 
 import { createWebhookRelay, type RelayEnvironment } from "../src/index.js";
 
@@ -88,6 +93,39 @@ function environment(
     GITHUB_USER_ID: "42",
     GITHUB_REPOSITORIES: JSON.stringify([{ id: 99, owner: "owner", name: "repository" }]),
     REVIEW_QUEUE: { send },
+  };
+}
+
+function requestedReviewEnvironment(messages: ReviewQueueJob[]): RelayEnvironment {
+  return {
+    GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
+    GITHUB_USER_ID: "42",
+    GITHUB_REPOSITORIES: JSON.stringify([{ id: 99, owner: "owner", name: "repository" }]),
+    REVIEW_QUEUE: {
+      async send(body) {
+        messages.push(parseReviewQueueJob(body));
+      },
+    },
+  };
+}
+
+async function issueCommentPayload(overrides: Record<string, unknown> = {}) {
+  const pullRequest = await fixture();
+  return {
+    action: "created",
+    installation: pullRequest.installation,
+    repository: pullRequest.repository,
+    sender: { id: 42 },
+    issue: {
+      number: pullRequest.number,
+      pull_request: { url: "https://api.github.com/repos/owner/repository/pulls/17" },
+    },
+    comment: {
+      id: 123456789,
+      body: "@revoirapp review",
+      user: { id: 42 },
+    },
+    ...overrides,
   };
 }
 
@@ -175,6 +213,64 @@ describe("GitHub webhook relay", () => {
       await worker.fetch(request, environment(messages));
     }
     assert.equal(messages.length, 4);
+  });
+
+  it("enqueues an authorized ad hoc review request from a pull-request comment", async () => {
+    const messages: ReviewQueueJob[] = [];
+    const worker = createWebhookRelay(() => new Date("2026-08-05T00:00:00.000Z"));
+    const body = JSON.stringify(await issueCommentPayload());
+
+    const response = await worker.fetch(
+      signedRequest(body, {
+        deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
+        event: "issue_comment",
+      }),
+      requestedReviewEnvironment(messages),
+    );
+
+    assert.equal(response.status, 202);
+    assert.deepEqual(messages, [
+      {
+        version: 2,
+        deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
+        installationId: 8,
+        repository: { id: 99, owner: "owner", name: "repository" },
+        pullRequest: { number: 17 },
+        request: {
+          kind: "issue_comment",
+          commentId: 123456789,
+          senderId: 42,
+        },
+        enqueuedAt: "2026-08-05T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("ignores issue-comment requests that are not exact, authorized, created PR commands", async () => {
+    const worker = createWebhookRelay(() => new Date("2026-08-05T00:00:00.000Z"));
+    const original = await issueCommentPayload();
+    const cases = [
+      { ...original, action: "edited" },
+      { ...original, issue: { number: 17 } },
+      { ...original, sender: { id: 43 } },
+      { ...original, comment: { ...original.comment, user: { id: 43 } } },
+      { ...original, comment: { ...original.comment, body: "@revoirapp review this" } },
+      { ...original, comment: { ...original.comment, body: "please @revoirapp review" } },
+      { ...original, comment: { ...original.comment, body: "@otherapp review" } },
+      { ...original, comment: { ...original.comment, id: 0 } },
+    ];
+
+    for (const payload of cases) {
+      const messages: ReviewQueueJob[] = [];
+      // Validate one ignored command shape per isolated queue.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await worker.fetch(
+        signedRequest(JSON.stringify(payload), { event: "issue_comment" }),
+        requestedReviewEnvironment(messages),
+      );
+      assert.equal(response.status, 202);
+      assert.deepEqual(messages, []);
+    }
   });
 
   it("rejects every configured identity and repository policy violation", async () => {
