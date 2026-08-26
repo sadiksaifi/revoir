@@ -84,6 +84,25 @@ describe("operational failure state", () => {
     }
   });
 
+  it("persists completed ad hoc review state separately from an attempt reservation", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-completed-request-"));
+    const deliveryId = "2f5f7475-33ee-4f91-9b68-0f8af72f6640";
+    const completed = {
+      committedFailures: 1 as const,
+      reviewCompleted: true as const,
+    };
+    try {
+      await new FileOperationalFailureStore(stateDirectory).save(deliveryId, completed);
+
+      assert.deepEqual(
+        await new FileOperationalFailureStore(stateDirectory).load(deliveryId),
+        completed,
+      );
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("validates reservation ownership, sequencing, and terminal state", async () => {
     const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-invalid-failure-state-"));
     const deliveryId = "2f5f7475-33ee-4f91-9b68-0f8af72f6640";

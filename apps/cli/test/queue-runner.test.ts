@@ -375,6 +375,106 @@ describe("queue review runner", () => {
     assert.equal(reviews, 1);
   });
 
+  it("retries a requested review after a pre-review reservation survives restart", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    failures.failures.set(job.deliveryId, {
+      committedFailures: 0,
+      reservation: {
+        slot: 1,
+        ownerToken: "stopped-runner:reservation",
+        transportAttempt: 1,
+      },
+    });
+    let reviews = 0;
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return delivery("redelivery", job, 2);
+        },
+        async acknowledge() {},
+        async retry() {},
+      },
+      {
+        async review() {
+          reviews += 1;
+          return {
+            status: "clean",
+            reviewedSha: "3".repeat(40),
+            currentSha: "3".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      failures,
+      undefined,
+      new MemoryReviewRequestCompletionStore(),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(reviews, 1);
+  });
+
+  it("bounds a stalled completion marker without repeating the successful review", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    let completed = false;
+    let markerAttempts = 0;
+    const completions: ReviewRequestCompletionStore = {
+      async has() {
+        return completed;
+      },
+      async mark() {
+        markerAttempts += 1;
+        if (markerAttempts === 1) {
+          return new Promise<void>(() => {});
+        }
+        completed = true;
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        return {
+          status: "clean",
+          reviewedSha: "3".repeat(40),
+          currentSha: "3".repeat(40),
+        };
+      },
+    };
+    function runnerFor(leaseId: string, attempt: number): QueueReviewRunner {
+      let pending: QueueDelivery | undefined = delivery(leaseId, job, attempt);
+      return new QueueReviewRunner(
+        configuration({ shellCommandMs: 5 }),
+        {
+          async pullOne() {
+            const next = pending;
+            pending = undefined;
+            return next;
+          },
+          async acknowledge() {},
+          async retry() {},
+        },
+        reviewService,
+        silentFailureReporter,
+        failures,
+        undefined,
+        completions,
+      );
+    }
+
+    await assert.rejects(
+      settleWithin(runnerFor("stalled-marker", 1).consumeOne(), "marker did not time out"),
+      /request completion timed out/u,
+    );
+    assert.equal(await runnerFor("redelivery", 2).consumeOne(), "settled");
+
+    assert.equal(reviews, 1);
+    assert.equal(markerAttempts, 2);
+  });
+
   it("acknowledges terminal jobs and retries only operational review failures", async () => {
     const deliveries = [
       delivery("malformed", { version: 2 }),

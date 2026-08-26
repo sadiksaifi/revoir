@@ -159,6 +159,7 @@ function committedState(
 function statesEqual(left: OperationalFailureState, right: OperationalFailureState): boolean {
   return (
     left.committedFailures === right.committedFailures &&
+    left.reviewCompleted === right.reviewCompleted &&
     left.terminalCategory === right.terminalCategory &&
     left.reservation?.slot === right.reservation?.slot &&
     left.reservation?.ownerToken === right.reservation?.ownerToken &&
@@ -170,6 +171,9 @@ function moreConservativeState(
   left: OperationalFailureState,
   right: OperationalFailureState,
 ): OperationalFailureState {
+  if (left.reviewCompleted === true || right.reviewCompleted === true) {
+    return left.reviewCompleted === true ? left : right;
+  }
   const leftAttempt = effectiveAttempt(left);
   const rightAttempt = effectiveAttempt(right);
   if (leftAttempt !== rightAttempt) {
@@ -185,7 +189,7 @@ function moreConservativeState(
 }
 
 function consumeReservation(state: OperationalFailureState): OperationalFailureState {
-  if (state.reservation === undefined) {
+  if (state.reviewCompleted === true || state.reservation === undefined) {
     return state;
   }
   return committedState(state.reservation.slot, state.terminalCategory);
@@ -356,7 +360,7 @@ export class QueueReviewRunner implements QueueRunService {
         throwIfCancelled(signal);
         return this.#settleStoreFailure(delivery, job, error, signal);
       }
-      if (loadedFailureState.reservation !== undefined) {
+      if (loadedFailureState.reviewCompleted === true) {
         return this.#settleCompletedRequest(delivery, job, requestedReview, true, signal);
       }
     }
@@ -482,10 +486,18 @@ export class QueueReviewRunner implements QueueRunService {
     }
 
     // The review completed. From this point onward even caller cancellation cannot
-    // safely prove that Pi did not run, so the reservation remains for redelivery.
+    // safely cause another attempt, so persist an explicit post-review fence first.
     if (requestedReview !== undefined) {
       this.#knownCompletedRequests.add(requestKey(requestedReview));
-      await this.#requestCompletions.mark(requestedReview);
+      await this.#saveFailureState(
+        job.deliveryId,
+        {
+          committedFailures: operationalState.committedFailures,
+          reviewCompleted: true,
+        },
+        slot,
+      );
+      await this.#markRequestCompletion(requestedReview);
     } else {
       throwIfCancelled(signal);
     }
@@ -511,7 +523,7 @@ export class QueueReviewRunner implements QueueRunService {
       // A successful review has already crossed the point where caller cancellation
       // can safely cause another attempt. Complete this durable write independently;
       // the pre-review reservation remains as the restart fence until it succeeds.
-      await this.#requestCompletions.mark(request);
+      await this.#markRequestCompletion(request);
     }
     await this.#queue.acknowledge(delivery.leaseId, signal);
     await this.#clearFailureState(job.deliveryId);
@@ -521,6 +533,13 @@ export class QueueReviewRunner implements QueueRunService {
       commentId: request.commentId,
     });
     return "settled";
+  }
+
+  async #markRequestCompletion(request: ReviewRequestIdentity): Promise<void> {
+    const { operation, operationSignal } = this.#startStoreOperation((storeSignal) =>
+      this.#requestCompletions.mark(request, storeSignal),
+    );
+    await waitForStoreOperation(operation, "request completion", operationSignal);
   }
 
   async #loadFailureState(
