@@ -151,9 +151,10 @@ describe("findings-only review publication", () => {
     for (const text of [inline, file]) {
       assert.match(text, /^### P1 — Concurrency defect$/mu);
       assert.match(text, /- Location: ``src\/name`with-tick\.ts:10-12 \(RIGHT\)``/u);
-      assert.match(
-        text,
-        /- Reason: A second submission replaces \\`submitSignal\\`, leaving the earlier review without cancellation\./u,
+      assert.ok(
+        text.includes(
+          "- Reason: A second submission replaces \\`submitSignal\\`\\, leaving the earlier review without cancellation\\.",
+        ),
       );
       assert.match(text, /- Impact: The affected execution path stops making progress\./u);
       assert.match(
@@ -170,6 +171,20 @@ describe("findings-only review publication", () => {
         /\b(?:could|do not merge|great work|likely|looks good|may|merge this|must not merge|P1 means|summary)\b/iu,
       );
     }
+  });
+
+  it("renders every ASCII Markdown punctuation character in a reason literally", () => {
+    const rendered = renderInlineFinding(
+      finding({
+        reason: "~~hidden~~ links to https://example.com?a=1&b=2.",
+      }),
+    );
+
+    assert.ok(
+      rendered.includes(
+        String.raw`- Reason: \~\~hidden\~\~ links to https\:\/\/example\.com\?a\=1\&b\=2\.`,
+      ),
+    );
   });
 
   it("publishes an empty body-state transition without visible finding prose", () => {

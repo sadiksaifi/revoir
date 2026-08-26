@@ -83,7 +83,7 @@ function canonicalEvidence(finding: ReviewFindingV2): string {
 }
 
 function markdownText(value: string): string {
-  return value.replace(/[\\`*_[\]<>|]/gu, "\\$&");
+  return value.replace(/[\u0021-\u002f\u003a-\u0040\u005b-\u0060\u007b-\u007e]/gu, "\\$&");
 }
 
 function details(finding: ReviewFindingV2, location?: string): string {
