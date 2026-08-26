@@ -7,6 +7,7 @@ import type { ReviewFailureCategory } from "../review/failure.js";
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
 const STATE_DIRECTORY = "queue-review-failures";
+const LEGACY_STATE_VERSION = 4;
 const STATE_VERSION = 5;
 const MAX_OPERATIONAL_FAILURES = 3;
 
@@ -33,7 +34,7 @@ export interface OperationalFailureStore {
 }
 
 type PersistedOperationalFailureState = OperationalFailureState & {
-  readonly version: typeof STATE_VERSION;
+  readonly version: typeof LEGACY_STATE_VERSION | typeof STATE_VERSION;
   readonly deliveryId: string;
 };
 
@@ -115,7 +116,8 @@ function isValidPersistedState(
   expectedDeliveryId: string,
 ): boolean {
   if (
-    value.version !== STATE_VERSION ||
+    (value.version !== LEGACY_STATE_VERSION && value.version !== STATE_VERSION) ||
+    (value.version === LEGACY_STATE_VERSION && "reviewCompleted" in value) ||
     value.deliveryId !== expectedDeliveryId ||
     !("committedFailures" in value)
   ) {
@@ -158,7 +160,6 @@ function parseState(
     parsed === null ||
     Array.isArray(parsed) ||
     !("version" in parsed) ||
-    parsed.version !== STATE_VERSION ||
     !isValidPersistedState(parsed as Record<string, unknown>, expectedDeliveryId)
   ) {
     throw new Error("Operational review failure state is invalid.");
