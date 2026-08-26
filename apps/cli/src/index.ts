@@ -28,6 +28,11 @@ export {
 export { SecretRedactor } from "./redaction.js";
 export { CloudflareQueueClient, type QueueDelivery } from "./queue/client.js";
 export {
+  FileReviewRequestCompletionStore,
+  type ReviewRequestCompletionStore,
+  type ReviewRequestIdentity,
+} from "./queue/request-completion-store.js";
+export {
   createDefaultQueueRunService,
   QueueReviewRunner,
   type OperationalFailureState,

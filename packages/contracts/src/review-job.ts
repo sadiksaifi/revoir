@@ -1,4 +1,5 @@
 export const REVIEW_JOB_CONTRACT_VERSION = 1 as const;
+export const REQUESTED_REVIEW_JOB_CONTRACT_VERSION = 2 as const;
 
 export const REVIEW_JOB_ACTIONS = [
   "opened",
@@ -31,6 +32,28 @@ export interface ReviewJobV1 {
   enqueuedAt: string;
 }
 
+export interface RequestedReviewJobV2 {
+  version: typeof REQUESTED_REVIEW_JOB_CONTRACT_VERSION;
+  deliveryId: string;
+  installationId: number;
+  repository: {
+    id: number;
+    owner: string;
+    name: string;
+  };
+  pullRequest: {
+    number: number;
+  };
+  request: {
+    kind: "issue_comment";
+    commentId: number;
+    senderId: number;
+  };
+  enqueuedAt: string;
+}
+
+export type ReviewQueueJob = ReviewJobV1 | RequestedReviewJobV2;
+
 export class ReviewJobSchemaError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -61,6 +84,17 @@ const PULL_REQUEST_FIELDS = [
   "baseSha",
   "headSha",
 ] as const;
+const REQUESTED_REVIEW_TOP_LEVEL_FIELDS = [
+  "version",
+  "deliveryId",
+  "installationId",
+  "repository",
+  "pullRequest",
+  "request",
+  "enqueuedAt",
+] as const;
+const REQUESTED_REVIEW_PULL_REQUEST_FIELDS = ["number"] as const;
+const REQUEST_FIELDS = ["kind", "commentId", "senderId"] as const;
 
 function record(value: unknown, path: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -93,42 +127,67 @@ function positiveInteger(value: unknown, path: string): number {
   return value as number;
 }
 
-export function parseReviewJob(value: unknown): ReviewJobV1 {
-  let candidate = value;
-  if (typeof value === "string") {
-    try {
-      candidate = JSON.parse(value) as unknown;
-    } catch (error) {
-      throw new ReviewJobSchemaError("Review job must be valid JSON.", { cause: error });
-    }
+function candidate(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
   }
+  try {
+    return JSON.parse(value) as unknown;
+  } catch (error) {
+    throw new ReviewJobSchemaError("Review job must be valid JSON.", { cause: error });
+  }
+}
 
-  const job = record(candidate, "review job");
+function deliveryId(value: unknown): string {
+  const parsed = string(value, "review job.deliveryId");
+  if (!DELIVERY_ID.test(parsed)) {
+    throw new ReviewJobSchemaError("review job.deliveryId is malformed.");
+  }
+  return parsed;
+}
+
+function repository(value: unknown): ReviewJobV1["repository"] {
+  const parsed = record(value, "review job.repository");
+  checkKeys(parsed, "review job.repository", REPOSITORY_FIELDS);
+  const id = positiveInteger(parsed.id, "review job.repository.id");
+  const owner = string(parsed.owner, "review job.repository.owner");
+  if (!GITHUB_OWNER.test(owner)) {
+    throw new ReviewJobSchemaError("review job.repository.owner is malformed.");
+  }
+  const name = string(parsed.name, "review job.repository.name");
+  if (!GITHUB_REPOSITORY.test(name)) {
+    throw new ReviewJobSchemaError("review job.repository.name is malformed.");
+  }
+  return { id, owner, name };
+}
+
+function enqueuedAt(value: unknown): string {
+  const parsed = string(value, "review job.enqueuedAt");
+  if (
+    !parsed.endsWith("Z") ||
+    Number.isNaN(Date.parse(parsed)) ||
+    new Date(parsed).toISOString() !== parsed
+  ) {
+    throw new ReviewJobSchemaError("review job.enqueuedAt must be a canonical UTC timestamp.");
+  }
+  return parsed;
+}
+
+export function parseReviewJob(value: unknown): ReviewJobV1 {
+  const job = record(candidate(value), "review job");
   checkKeys(job, "review job", TOP_LEVEL_FIELDS);
   if (job.version !== REVIEW_JOB_CONTRACT_VERSION) {
     throw new ReviewJobSchemaError(`review job.version must be ${REVIEW_JOB_CONTRACT_VERSION}.`);
   }
-  const repository = record(job.repository, "review job.repository");
-  checkKeys(repository, "review job.repository", REPOSITORY_FIELDS);
+  const parsedRepository = repository(job.repository);
   const pullRequest = record(job.pullRequest, "review job.pullRequest");
   checkKeys(pullRequest, "review job.pullRequest", PULL_REQUEST_FIELDS);
   const action = string(job.action, "review job.action");
   if (!(REVIEW_JOB_ACTIONS as readonly string[]).includes(action)) {
     throw new ReviewJobSchemaError("review job.action is not supported.");
   }
-  const deliveryId = string(job.deliveryId, "review job.deliveryId");
-  if (!DELIVERY_ID.test(deliveryId)) {
-    throw new ReviewJobSchemaError("review job.deliveryId is malformed.");
-  }
-  const repositoryId = positiveInteger(repository.id, "review job.repository.id");
-  const owner = string(repository.owner, "review job.repository.owner");
-  if (!GITHUB_OWNER.test(owner)) {
-    throw new ReviewJobSchemaError("review job.repository.owner is malformed.");
-  }
-  const name = string(repository.name, "review job.repository.name");
-  if (!GITHUB_REPOSITORY.test(name)) {
-    throw new ReviewJobSchemaError("review job.repository.name is malformed.");
-  }
+  const parsedDeliveryId = deliveryId(job.deliveryId);
+  const repositoryId = parsedRepository.id;
   const baseRepositoryId = positiveInteger(
     pullRequest.baseRepositoryId,
     "review job.pullRequest.baseRepositoryId",
@@ -147,23 +206,16 @@ export function parseReviewJob(value: unknown): ReviewJobV1 {
   if (!SHA.test(baseSha) || !SHA.test(headSha)) {
     throw new ReviewJobSchemaError("review job revisions must be lowercase 40-character SHAs.");
   }
-  const enqueuedAt = string(job.enqueuedAt, "review job.enqueuedAt");
-  if (
-    !enqueuedAt.endsWith("Z") ||
-    Number.isNaN(Date.parse(enqueuedAt)) ||
-    new Date(enqueuedAt).toISOString() !== enqueuedAt
-  ) {
-    throw new ReviewJobSchemaError("review job.enqueuedAt must be a canonical UTC timestamp.");
-  }
+  const parsedEnqueuedAt = enqueuedAt(job.enqueuedAt);
 
   return {
     version: REVIEW_JOB_CONTRACT_VERSION,
-    deliveryId,
+    deliveryId: parsedDeliveryId,
     installationId: positiveInteger(job.installationId, "review job.installationId"),
     repository: {
       id: repositoryId,
-      owner,
-      name,
+      owner: parsedRepository.owner,
+      name: parsedRepository.name,
     },
     pullRequest: {
       number: positiveInteger(pullRequest.number, "review job.pullRequest.number"),
@@ -175,6 +227,52 @@ export function parseReviewJob(value: unknown): ReviewJobV1 {
       headSha,
     },
     action: action as ReviewJobAction,
-    enqueuedAt,
+    enqueuedAt: parsedEnqueuedAt,
   };
+}
+
+export function parseRequestedReviewJob(value: unknown): RequestedReviewJobV2 {
+  const job = record(candidate(value), "review job");
+  checkKeys(job, "review job", REQUESTED_REVIEW_TOP_LEVEL_FIELDS);
+  if (job.version !== REQUESTED_REVIEW_JOB_CONTRACT_VERSION) {
+    throw new ReviewJobSchemaError(
+      `review job.version must be ${REQUESTED_REVIEW_JOB_CONTRACT_VERSION}.`,
+    );
+  }
+  const parsedRepository = repository(job.repository);
+  const pullRequest = record(job.pullRequest, "review job.pullRequest");
+  checkKeys(pullRequest, "review job.pullRequest", REQUESTED_REVIEW_PULL_REQUEST_FIELDS);
+  const request = record(job.request, "review job.request");
+  checkKeys(request, "review job.request", REQUEST_FIELDS);
+  if (request.kind !== "issue_comment") {
+    throw new ReviewJobSchemaError("review job.request.kind is not supported.");
+  }
+
+  return {
+    version: REQUESTED_REVIEW_JOB_CONTRACT_VERSION,
+    deliveryId: deliveryId(job.deliveryId),
+    installationId: positiveInteger(job.installationId, "review job.installationId"),
+    repository: parsedRepository,
+    pullRequest: {
+      number: positiveInteger(pullRequest.number, "review job.pullRequest.number"),
+    },
+    request: {
+      kind: request.kind,
+      commentId: positiveInteger(request.commentId, "review job.request.commentId"),
+      senderId: positiveInteger(request.senderId, "review job.request.senderId"),
+    },
+    enqueuedAt: enqueuedAt(job.enqueuedAt),
+  };
+}
+
+export function parseReviewQueueJob(value: unknown): ReviewQueueJob {
+  const parsedCandidate = candidate(value);
+  const job = record(parsedCandidate, "review job");
+  if (job.version === REVIEW_JOB_CONTRACT_VERSION) {
+    return parseReviewJob(parsedCandidate);
+  }
+  if (job.version === REQUESTED_REVIEW_JOB_CONTRACT_VERSION) {
+    return parseRequestedReviewJob(parsedCandidate);
+  }
+  throw new ReviewJobSchemaError("review job.version is not supported.");
 }

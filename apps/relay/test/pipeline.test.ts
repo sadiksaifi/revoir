@@ -4,7 +4,12 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { parseReviewJob, type ReviewJobV1 } from "@revoir/contracts";
+import {
+  parseReviewJob,
+  parseReviewQueueJob,
+  type RequestedReviewJobV2,
+  type ReviewJobV1,
+} from "@revoir/contracts";
 import {
   QueueReviewRunner,
   classifyReviewFailure,
@@ -15,6 +20,8 @@ import {
   type OperationalFailureStore,
   type QueueClient,
   type ReviewFailureReporter,
+  type ReviewRequestCompletionStore,
+  type ReviewRequestIdentity,
   type RevoirConfiguration,
 } from "cli";
 
@@ -39,6 +46,18 @@ function memoryFailureStore(
     },
     async clear(deliveryId) {
       states.delete(deliveryId);
+    },
+  };
+}
+
+function memoryRequestCompletionStore(): ReviewRequestCompletionStore {
+  const completions = new Set<string>();
+  return {
+    async has(identity: ReviewRequestIdentity) {
+      return completions.has(`${identity.repositoryId}:${identity.commentId}`);
+    },
+    async mark(identity: ReviewRequestIdentity) {
+      completions.add(`${identity.repositoryId}:${identity.commentId}`);
     },
   };
 }
@@ -164,7 +183,101 @@ async function enqueueSignedWebhook(
   return queued;
 }
 
+async function enqueueSignedReviewRequest(deliveryId: string): Promise<RequestedReviewJobV2[]> {
+  const queued: RequestedReviewJobV2[] = [];
+  const pullRequest = JSON.parse(await fixture()) as PipelineWebhookPayload;
+  const body = JSON.stringify({
+    action: "created",
+    installation: pullRequest.installation,
+    repository: pullRequest.repository,
+    sender: { id: 42 },
+    issue: {
+      number: 17,
+      pull_request: { url: "https://api.github.com/repos/owner/repository/pulls/17" },
+    },
+    comment: {
+      id: 123456789,
+      body: "@revoirapp review",
+      user: { id: 42 },
+    },
+  });
+  const signature = createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
+  const response = await createWebhookRelay(() => new Date("2026-08-05T00:00:00.000Z")).fetch(
+    new Request("https://relay.example/github/webhook", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-GitHub-Delivery": deliveryId,
+        "X-GitHub-Event": "issue_comment",
+        "X-Hub-Signature-256": `sha256=${signature}`,
+      },
+      body,
+    }),
+    {
+      GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
+      GITHUB_USER_ID: "42",
+      GITHUB_REPOSITORIES: JSON.stringify([{ id: 99, owner: "owner", name: "repository" }]),
+      REVIEW_QUEUE: {
+        async send(job) {
+          const parsed = parseReviewQueueJob(job);
+          assert.equal(parsed.version, 2);
+          queued.push(parsed);
+        },
+      },
+    },
+  );
+  assert.equal(response.status, 202);
+  assert.equal(queued.length, 1);
+  return queued;
+}
+
 describe("webhook-to-review pipeline", () => {
+  it("runs a signed comment request against the latest pull-request head", async () => {
+    const queued = await enqueueSignedReviewRequest("pipeline-requested");
+    const acknowledged: string[] = [];
+    const reviews: Array<{ url: string; expectedHeadSha: string | undefined }> = [];
+    const runner = new QueueReviewRunner(
+      configuration,
+      {
+        async pullOne() {
+          const job = queued.shift();
+          return job === undefined
+            ? undefined
+            : { leaseId: "lease-requested", attempt: 1, body: job };
+        },
+        async acknowledge(leaseId) {
+          acknowledged.push(leaseId);
+        },
+        async retry() {
+          assert.fail("A completed requested review must not be retried.");
+        },
+      },
+      {
+        async review(reference, options) {
+          reviews.push({ url: reference.url, expectedHeadSha: options?.expectedHeadSha });
+          return {
+            status: "clean",
+            reviewedSha: "3".repeat(40),
+            currentSha: "3".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      memoryFailureStore(),
+      undefined,
+      memoryRequestCompletionStore(),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.deepEqual(reviews, [
+      {
+        url: "https://github.com/owner/repository/pull/17",
+        expectedHeadSha: undefined,
+      },
+    ]);
+    assert.deepEqual(acknowledged, ["lease-requested"]);
+  });
+
   for (const outcome of ["clean", "findings"] as const) {
     it(`acknowledges a signed webhook after a ${outcome} review settlement`, async () => {
       const queued = await enqueueSignedWebhook(`pipeline-${outcome}`);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -79,6 +80,53 @@ describe("operational failure state", () => {
         await new FileOperationalFailureStore(stateDirectory).load(deliveryId),
         reserved,
       );
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("persists completed ad hoc review state separately from an attempt reservation", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-completed-request-"));
+    const deliveryId = "2f5f7475-33ee-4f91-9b68-0f8af72f6640";
+    const completed = {
+      committedFailures: 1 as const,
+      reviewCompleted: true as const,
+    };
+    try {
+      await new FileOperationalFailureStore(stateDirectory).save(deliveryId, completed);
+
+      assert.deepEqual(
+        await new FileOperationalFailureStore(stateDirectory).load(deliveryId),
+        completed,
+      );
+    } finally {
+      await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("loads version 4 failure state written by an earlier daemon", async () => {
+    const stateDirectory = await mkdtemp(join(tmpdir(), "revoir-legacy-failure-state-"));
+    const deliveryId = "2f5f7475-33ee-4f91-9b68-0f8af72f6640";
+    const legacyState = {
+      version: 4,
+      deliveryId,
+      committedFailures: 1,
+      reservation: {
+        slot: 2,
+        ownerToken: "earlier-daemon:reservation",
+        transportAttempt: 7,
+      },
+    };
+    try {
+      const failureDirectory = join(stateDirectory, "queue-review-failures");
+      const stateFile = `${createHash("sha256").update(deliveryId).digest("hex")}.json`;
+      await mkdir(failureDirectory, { recursive: true });
+      await writeFile(join(failureDirectory, stateFile), `${JSON.stringify(legacyState)}\n`);
+
+      assert.deepEqual(await new FileOperationalFailureStore(stateDirectory).load(deliveryId), {
+        committedFailures: 1,
+        reservation: legacyState.reservation,
+      });
     } finally {
       await rm(stateDirectory, { recursive: true, force: true });
     }

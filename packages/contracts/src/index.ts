@@ -17,10 +17,15 @@ export {
   type ModelReviewOutputV1,
 } from "./findings.js";
 export {
+  REQUESTED_REVIEW_JOB_CONTRACT_VERSION,
   REVIEW_JOB_ACTIONS,
   REVIEW_JOB_CONTRACT_VERSION,
   ReviewJobSchemaError,
+  parseRequestedReviewJob,
   parseReviewJob,
+  parseReviewQueueJob,
+  type RequestedReviewJobV2,
   type ReviewJobAction,
+  type ReviewQueueJob,
   type ReviewJobV1,
 } from "./review-job.js";

@@ -7,7 +7,8 @@ import type { ReviewFailureCategory } from "../review/failure.js";
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
 const STATE_DIRECTORY = "queue-review-failures";
-const STATE_VERSION = 4;
+const LEGACY_STATE_VERSION = 4;
+const STATE_VERSION = 5;
 const MAX_OPERATIONAL_FAILURES = 3;
 
 export type OperationalFailureCount = 0 | 1 | 2 | 3;
@@ -22,6 +23,7 @@ export interface OperationalFailureReservation {
 export interface OperationalFailureState {
   readonly committedFailures: OperationalFailureCount;
   readonly reservation?: OperationalFailureReservation;
+  readonly reviewCompleted?: true;
   readonly terminalCategory?: ReviewFailureCategory;
 }
 
@@ -32,7 +34,7 @@ export interface OperationalFailureStore {
 }
 
 type PersistedOperationalFailureState = OperationalFailureState & {
-  readonly version: typeof STATE_VERSION;
+  readonly version: typeof LEGACY_STATE_VERSION | typeof STATE_VERSION;
   readonly deliveryId: string;
 };
 
@@ -67,6 +69,16 @@ function isValidState(value: OperationalFailureState): boolean {
     return false;
   }
   const reservation = value.reservation;
+  const reviewCompleted = value.reviewCompleted === true;
+  if (
+    ("reviewCompleted" in value && !reviewCompleted) ||
+    (reviewCompleted &&
+      (reservation !== undefined ||
+        "terminalCategory" in value ||
+        value.committedFailures === MAX_OPERATIONAL_FAILURES))
+  ) {
+    return false;
+  }
   if (
     reservation !== undefined &&
     (typeof reservation !== "object" ||
@@ -82,7 +94,9 @@ function isValidState(value: OperationalFailureState): boolean {
   ) {
     return false;
   }
-  const terminal = value.committedFailures === MAX_OPERATIONAL_FAILURES || reservation?.slot === 3;
+  const terminal =
+    !reviewCompleted &&
+    (value.committedFailures === MAX_OPERATIONAL_FAILURES || reservation?.slot === 3);
   if (
     terminal !== "terminalCategory" in value ||
     (terminal &&
@@ -91,7 +105,10 @@ function isValidState(value: OperationalFailureState): boolean {
   ) {
     return false;
   }
-  return Object.keys(value).length === 1 + (reservation === undefined ? 0 : 1) + (terminal ? 1 : 0);
+  return (
+    Object.keys(value).length ===
+    1 + (reservation === undefined ? 0 : 1) + (reviewCompleted ? 1 : 0) + (terminal ? 1 : 0)
+  );
 }
 
 function isValidPersistedState(
@@ -99,7 +116,8 @@ function isValidPersistedState(
   expectedDeliveryId: string,
 ): boolean {
   if (
-    value.version !== STATE_VERSION ||
+    (value.version !== LEGACY_STATE_VERSION && value.version !== STATE_VERSION) ||
+    (value.version === LEGACY_STATE_VERSION && "reviewCompleted" in value) ||
     value.deliveryId !== expectedDeliveryId ||
     !("committedFailures" in value)
   ) {
@@ -110,6 +128,7 @@ function isValidPersistedState(
     ...("reservation" in value
       ? { reservation: value.reservation as OperationalFailureReservation }
       : {}),
+    ...("reviewCompleted" in value ? { reviewCompleted: value.reviewCompleted as true } : {}),
     ...("terminalCategory" in value
       ? { terminalCategory: value.terminalCategory as ReviewFailureCategory }
       : {}),
@@ -121,6 +140,7 @@ function persistedState(value: PersistedOperationalFailureState): OperationalFai
   return {
     committedFailures: value.committedFailures,
     ...(value.reservation === undefined ? {} : { reservation: value.reservation }),
+    ...(value.reviewCompleted === true ? { reviewCompleted: true as const } : {}),
     ...(value.terminalCategory === undefined ? {} : { terminalCategory: value.terminalCategory }),
   };
 }
@@ -140,7 +160,6 @@ function parseState(
     parsed === null ||
     Array.isArray(parsed) ||
     !("version" in parsed) ||
-    parsed.version !== STATE_VERSION ||
     !isValidPersistedState(parsed as Record<string, unknown>, expectedDeliveryId)
   ) {
     throw new Error("Operational review failure state is invalid.");

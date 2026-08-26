@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { REVIEW_JOB_ACTIONS, ReviewJobSchemaError, parseReviewJob } from "../src/review-job.js";
+import {
+  REVIEW_JOB_ACTIONS,
+  ReviewJobSchemaError,
+  parseRequestedReviewJob,
+  parseReviewJob,
+  parseReviewQueueJob,
+} from "../src/review-job.js";
 
 function reviewJob() {
   return {
@@ -24,6 +30,28 @@ function reviewJob() {
     },
     action: "synchronize",
     enqueuedAt: "2026-07-29T00:00:00.000Z",
+  };
+}
+
+function requestedReviewJob() {
+  return {
+    version: 2,
+    deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
+    installationId: 8,
+    repository: {
+      id: 99,
+      owner: "owner",
+      name: "repository",
+    },
+    pullRequest: {
+      number: 17,
+    },
+    request: {
+      kind: "issue_comment",
+      commentId: 123456789,
+      senderId: 42,
+    },
+    enqueuedAt: "2026-08-05T00:00:00.000Z",
   };
 }
 
@@ -107,5 +135,56 @@ describe("review job contract v1", () => {
     for (const candidate of cases) {
       assert.throws(() => parseReviewJob(candidate), ReviewJobSchemaError);
     }
+  });
+});
+
+describe("requested review job contract v2", () => {
+  it("round-trips an issue-comment request and dispatches both contract versions", () => {
+    const requested = requestedReviewJob();
+
+    assert.deepEqual(
+      parseRequestedReviewJob(JSON.stringify(structuredClone(requested))),
+      requested,
+    );
+    assert.deepEqual(parseReviewQueueJob(requested), requested);
+    assert.deepEqual(parseReviewQueueJob(reviewJob()), reviewJob());
+  });
+
+  it("requires every field and rejects unknown or malformed request fields", () => {
+    for (const field of Object.keys(requestedReviewJob())) {
+      const candidate = structuredClone(requestedReviewJob()) as Record<string, unknown>;
+      delete candidate[field];
+      assert.throws(() => parseRequestedReviewJob(candidate), ReviewJobSchemaError);
+    }
+    for (const field of Object.keys(requestedReviewJob().request)) {
+      const candidate = structuredClone(requestedReviewJob());
+      delete (candidate.request as Record<string, unknown>)[field];
+      assert.throws(() => parseRequestedReviewJob(candidate), ReviewJobSchemaError);
+    }
+
+    const cases = [
+      { ...requestedReviewJob(), version: 1 },
+      { ...requestedReviewJob(), retryCount: 1 },
+      {
+        ...requestedReviewJob(),
+        pullRequest: { ...requestedReviewJob().pullRequest, headSha: "2".repeat(40) },
+      },
+      {
+        ...requestedReviewJob(),
+        request: { ...requestedReviewJob().request, kind: "pull_request_review" },
+      },
+      {
+        ...requestedReviewJob(),
+        request: { ...requestedReviewJob().request, commentId: 0 },
+      },
+      {
+        ...requestedReviewJob(),
+        request: { ...requestedReviewJob().request, senderId: "42" },
+      },
+    ];
+    for (const candidate of cases) {
+      assert.throws(() => parseRequestedReviewJob(candidate), ReviewJobSchemaError);
+    }
+    assert.throws(() => parseReviewQueueJob({ ...reviewJob(), version: 3 }), ReviewJobSchemaError);
   });
 });

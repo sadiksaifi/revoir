@@ -163,8 +163,9 @@ If the App was already installed with read-only Checks or Issues access, update
 the App permissions and approve each installation's new permission request
 before upgrading Revoir.
 
-Subscribe only to the **Pull request** event. Install the App on each target
-account:
+Subscribe to the **Pull request** and **Issue comment** events. The latter is
+used only for explicit ad hoc review commands on pull requests. Install the App
+on each target account:
 
 1. For a personal account, open the App's installation page, select the
    personal account, choose **Only select repositories**, and select the
@@ -316,3 +317,15 @@ resolution.
 
 Opening, reopening, marking ready, or pushing a new commit also triggers the
 automatic webhook flow.
+
+To request one ad hoc review of the latest eligible head, add this exact
+standalone comment to the pull request:
+
+```text
+@revoirapp review
+```
+
+Only a newly created pull-request comment from the configured GitHub user is
+accepted. Issue comments, edited comments, additional comment text, and commands
+from other users are ignored. A completed request is recorded locally before its
+queue lease is acknowledged, so a webhook redelivery does not repeat the review.

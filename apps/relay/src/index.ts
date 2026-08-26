@@ -1,7 +1,10 @@
 import {
   REVIEW_JOB_ACTIONS,
+  parseRequestedReviewJob,
   parseReviewJob,
+  type RequestedReviewJobV2,
   type ReviewJobAction,
+  type ReviewQueueJob,
   type ReviewJobV1,
 } from "@revoir/contracts";
 
@@ -13,7 +16,7 @@ export interface RelayEnvironment {
   GITHUB_WEBHOOK_SECRET: string;
   GITHUB_USER_ID: string;
   GITHUB_REPOSITORIES: string;
-  REVIEW_QUEUE: QueueProducer<ReviewJobV1>;
+  REVIEW_QUEUE: QueueProducer<ReviewQueueJob>;
 }
 
 interface RepositoryPolicy {
@@ -28,6 +31,7 @@ interface RelayPolicy {
 }
 
 const SIGNATURE = /^sha256=([0-9a-f]{64})$/u;
+const REVIEW_COMMAND = /^@revoirapp[\t ]+review$/iu;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -125,7 +129,7 @@ function repositoryPolicy(
   );
 }
 
-function createReviewJob(
+function createAutomaticReviewJob(
   payloadValue: unknown,
   deliveryId: string,
   policy: RelayPolicy,
@@ -215,6 +219,72 @@ function createReviewJob(
   }
 }
 
+function createRequestedReviewJob(
+  payloadValue: unknown,
+  deliveryId: string,
+  policy: RelayPolicy,
+  now: Date,
+): RequestedReviewJobV2 | undefined {
+  const payload = record(payloadValue);
+  const repository = record(payload?.repository);
+  const installation = record(payload?.installation);
+  const sender = record(payload?.sender);
+  const issue = record(payload?.issue);
+  const pullRequest = record(issue?.pull_request);
+  const comment = record(payload?.comment);
+  const commentAuthor = record(comment?.user);
+  if (
+    payload === undefined ||
+    repository === undefined ||
+    installation === undefined ||
+    sender === undefined ||
+    issue === undefined ||
+    pullRequest === undefined ||
+    comment === undefined ||
+    commentAuthor === undefined
+  ) {
+    return undefined;
+  }
+
+  const configuredRepository = repositoryPolicy(repository, policy);
+  const installationId = positiveInteger(installation.id);
+  const pullRequestNumber = positiveInteger(issue.number);
+  const commentId = positiveInteger(comment.id);
+  const senderId = positiveInteger(sender.id);
+  const commentAuthorId = positiveInteger(commentAuthor.id);
+  if (
+    payload.action !== "created" ||
+    configuredRepository === undefined ||
+    installationId === undefined ||
+    pullRequestNumber === undefined ||
+    commentId === undefined ||
+    senderId !== policy.userId ||
+    commentAuthorId !== senderId ||
+    typeof comment.body !== "string" ||
+    !REVIEW_COMMAND.test(comment.body.trim())
+  ) {
+    return undefined;
+  }
+
+  try {
+    return parseRequestedReviewJob({
+      version: 2,
+      deliveryId,
+      installationId,
+      repository: configuredRepository,
+      pullRequest: { number: pullRequestNumber },
+      request: {
+        kind: "issue_comment",
+        commentId,
+        senderId,
+      },
+      enqueuedAt: now.toISOString(),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 export function createWebhookRelay(now: () => Date = () => new Date()) {
   return {
     async fetch(request: Request, environment: RelayEnvironment): Promise<Response> {
@@ -239,7 +309,8 @@ export function createWebhookRelay(now: () => Date = () => new Date()) {
       ) {
         return new Response("Unauthorized", { status: 401 });
       }
-      if (request.headers.get("X-GitHub-Event") !== "pull_request") {
+      const event = request.headers.get("X-GitHub-Event");
+      if (event !== "pull_request" && event !== "issue_comment") {
         return new Response("Accepted", { status: 202 });
       }
 
@@ -258,7 +329,11 @@ export function createWebhookRelay(now: () => Date = () => new Date()) {
       }
       const deliveryId = request.headers.get("X-GitHub-Delivery");
       const job =
-        deliveryId === null ? undefined : createReviewJob(payload, deliveryId, policy, now());
+        deliveryId === null
+          ? undefined
+          : event === "pull_request"
+            ? createAutomaticReviewJob(payload, deliveryId, policy, now())
+            : createRequestedReviewJob(payload, deliveryId, policy, now());
       if (job === undefined) {
         return new Response("Accepted", { status: 202 });
       }

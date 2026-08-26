@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { parseReviewJob, ReviewJobSchemaError, type ReviewJobV1 } from "@revoir/contracts";
+import { parseReviewQueueJob, ReviewJobSchemaError, type ReviewQueueJob } from "@revoir/contracts";
 
 import { isCallerCancellation } from "../cancellation.js";
 import type { RevoirConfiguration } from "../config/schema.js";
@@ -26,6 +26,11 @@ import {
   type OperationalFailureState,
   type OperationalFailureStore,
 } from "./failure-store.js";
+import {
+  FileReviewRequestCompletionStore,
+  type ReviewRequestCompletionStore,
+  type ReviewRequestIdentity,
+} from "./request-completion-store.js";
 
 export type { OperationalFailureState, OperationalFailureStore } from "./failure-store.js";
 
@@ -64,7 +69,7 @@ type LocalEligibility =
     };
 
 function localEligibility(
-  job: ReviewJobV1,
+  job: ReviewQueueJob,
   configuration: RevoirConfiguration["github"],
 ): LocalEligibility {
   const installation = configuration.installations.find(
@@ -82,16 +87,17 @@ function localEligibility(
   if (!repositoryAllowed) {
     return { eligible: false, reason: "repository_not_allowed_for_installation" };
   }
+  const senderId = job.version === 1 ? job.pullRequest.senderId : job.request.senderId;
   if (
-    job.pullRequest.authorId !== configuration.userId ||
-    job.pullRequest.senderId !== configuration.userId
+    senderId !== configuration.userId ||
+    (job.version === 1 && job.pullRequest.authorId !== configuration.userId)
   ) {
     return { eligible: false, reason: "author_or_sender_not_allowed" };
   }
   return { eligible: true };
 }
 
-function referenceFor(job: ReviewJobV1): PullRequestReference {
+function referenceFor(job: ReviewQueueJob): PullRequestReference {
   const { owner, name } = job.repository;
   const number = job.pullRequest.number;
   return {
@@ -100,6 +106,16 @@ function referenceFor(job: ReviewJobV1): PullRequestReference {
     number,
     url: `https://github.com/${owner}/${name}/pull/${number}`,
   };
+}
+
+function requestIdentity(job: ReviewQueueJob): ReviewRequestIdentity | undefined {
+  return job.version === 2
+    ? { repositoryId: job.repository.id, commentId: job.request.commentId }
+    : undefined;
+}
+
+function requestKey(identity: ReviewRequestIdentity): string {
+  return `${identity.repositoryId}:${identity.commentId}`;
 }
 
 function waitForNextPoll(signal?: AbortSignal): Promise<void> {
@@ -143,6 +159,7 @@ function committedState(
 function statesEqual(left: OperationalFailureState, right: OperationalFailureState): boolean {
   return (
     left.committedFailures === right.committedFailures &&
+    left.reviewCompleted === right.reviewCompleted &&
     left.terminalCategory === right.terminalCategory &&
     left.reservation?.slot === right.reservation?.slot &&
     left.reservation?.ownerToken === right.reservation?.ownerToken &&
@@ -154,6 +171,9 @@ function moreConservativeState(
   left: OperationalFailureState,
   right: OperationalFailureState,
 ): OperationalFailureState {
+  if (left.reviewCompleted === true || right.reviewCompleted === true) {
+    return left.reviewCompleted === true ? left : right;
+  }
   const leftAttempt = effectiveAttempt(left);
   const rightAttempt = effectiveAttempt(right);
   if (leftAttempt !== rightAttempt) {
@@ -169,7 +189,7 @@ function moreConservativeState(
 }
 
 function consumeReservation(state: OperationalFailureState): OperationalFailureState {
-  if (state.reservation === undefined) {
+  if (state.reviewCompleted === true || state.reservation === undefined) {
     return state;
   }
   return committedState(state.reservation.slot, state.terminalCategory);
@@ -249,6 +269,8 @@ export class QueueReviewRunner implements QueueRunService {
   // the store; transport delivery attempts are intentionally audit-only.
   readonly #outageFloors = new Map<string, OperationalFailureCount>();
   readonly #operationalFailures: OperationalFailureStore;
+  readonly #requestCompletions: ReviewRequestCompletionStore;
+  readonly #knownCompletedRequests = new Set<string>();
   readonly #ownerToken = randomUUID();
   readonly #pendingLoads = new Map<string, StoreOperationRecord<OperationalFailureState>>();
   readonly #pendingSaves = new Map<string, Set<StoreOperationRecord<void>>>();
@@ -267,6 +289,9 @@ export class QueueReviewRunner implements QueueRunService {
       configuration.paths.stateDir,
     ),
     logger: QueueRunLogger = NOOP_LOGGER,
+    requestCompletions: ReviewRequestCompletionStore = new FileReviewRequestCompletionStore(
+      configuration.paths.stateDir,
+    ),
   ) {
     this.#configuration = configuration;
     this.#queue = queue;
@@ -274,6 +299,7 @@ export class QueueReviewRunner implements QueueRunService {
     this.#failures = failures;
     this.#operationalFailures = operationalFailures;
     this.#logger = logger;
+    this.#requestCompletions = requestCompletions;
   }
 
   consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
@@ -292,9 +318,9 @@ export class QueueReviewRunner implements QueueRunService {
       return "idle";
     }
 
-    let job: ReviewJobV1;
+    let job: ReviewQueueJob;
     try {
-      job = parseReviewJob(delivery.body);
+      job = parseReviewQueueJob(delivery.body);
     } catch (error) {
       if (!(error instanceof ReviewJobSchemaError)) {
         throw error;
@@ -314,6 +340,31 @@ export class QueueReviewRunner implements QueueRunService {
       return "settled";
     }
 
+    const requestedReview = requestIdentity(job);
+    if (requestedReview !== undefined) {
+      const completedRequestKey = requestKey(requestedReview);
+      if (this.#knownCompletedRequests.has(completedRequestKey)) {
+        return this.#settleCompletedRequest(delivery, job, requestedReview, true, signal);
+      }
+      if (await this.#hasRequestCompletion(requestedReview, signal)) {
+        return this.#settleCompletedRequest(delivery, job, requestedReview, false, signal);
+      }
+    }
+
+    let loadedFailureState: OperationalFailureState | undefined;
+    if (requestedReview !== undefined) {
+      try {
+        loadedFailureState = await this.#loadPersistedFailureState(job.deliveryId, signal);
+        throwIfCancelled(signal);
+      } catch (error) {
+        throwIfCancelled(signal);
+        return this.#settleStoreFailure(delivery, job, error, signal);
+      }
+      if (loadedFailureState.reviewCompleted === true) {
+        return this.#settleCompletedRequest(delivery, job, requestedReview, true, signal);
+      }
+    }
+
     const pendingSettlement = this.#pendingStoreSettlements.get(job.deliveryId);
     if (pendingSettlement !== undefined) {
       return this.#settleStoreFailure(delivery, job, pendingSettlement, signal);
@@ -321,7 +372,7 @@ export class QueueReviewRunner implements QueueRunService {
 
     let operationalState: OperationalFailureState;
     try {
-      operationalState = await this.#loadFailureState(job.deliveryId, signal);
+      operationalState = await this.#loadFailureState(job.deliveryId, signal, loadedFailureState);
       throwIfCancelled(signal);
     } catch (error) {
       throwIfCancelled(signal);
@@ -366,7 +417,10 @@ export class QueueReviewRunner implements QueueRunService {
       deliveryId: job.deliveryId,
       repository: `${job.repository.owner}/${job.repository.name}`,
       pullRequest: job.pullRequest.number,
-      headSha: job.pullRequest.headSha,
+      trigger: job.version === 1 ? job.action : job.request.kind,
+      ...(job.version === 1
+        ? { headSha: job.pullRequest.headSha }
+        : { commentId: job.request.commentId }),
     };
     const startedAt = Date.now();
     await this.#logger.write("queue_review_started", metadata);
@@ -374,7 +428,7 @@ export class QueueReviewRunner implements QueueRunService {
     let result: Awaited<ReturnType<ManualReviewService["review"]>>;
     try {
       result = await this.#reviews.review(referenceFor(job), {
-        expectedHeadSha: job.pullRequest.headSha,
+        ...(job.version === 1 ? { expectedHeadSha: job.pullRequest.headSha } : {}),
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
@@ -432,8 +486,21 @@ export class QueueReviewRunner implements QueueRunService {
     }
 
     // The review completed. From this point onward even caller cancellation cannot
-    // safely prove that Pi did not run, so the reservation remains for redelivery.
-    throwIfCancelled(signal);
+    // safely cause another attempt, so persist an explicit post-review fence first.
+    if (requestedReview !== undefined) {
+      this.#knownCompletedRequests.add(requestKey(requestedReview));
+      await this.#saveFailureState(
+        job.deliveryId,
+        {
+          committedFailures: operationalState.committedFailures,
+          reviewCompleted: true,
+        },
+        slot,
+      );
+      await this.#markRequestCompletion(requestedReview);
+    } else {
+      throwIfCancelled(signal);
+    }
     await this.#queue.acknowledge(delivery.leaseId, signal);
     await this.#clearFailureState(job.deliveryId);
     await this.#logger.write("queue_review_settled", {
@@ -444,7 +511,86 @@ export class QueueReviewRunner implements QueueRunService {
     return "settled";
   }
 
+  async #settleCompletedRequest(
+    delivery: QueueDelivery,
+    job: ReviewQueueJob,
+    request: ReviewRequestIdentity,
+    persistCompletion: boolean,
+    signal?: AbortSignal,
+  ): Promise<QueueConsumption> {
+    this.#knownCompletedRequests.add(requestKey(request));
+    if (persistCompletion) {
+      // A successful review has already crossed the point where caller cancellation
+      // can safely cause another attempt. Complete this durable write independently;
+      // the pre-review reservation remains as the restart fence until it succeeds.
+      await this.#markRequestCompletion(request);
+    }
+    await this.#queue.acknowledge(delivery.leaseId, signal);
+    await this.#clearFailureState(job.deliveryId);
+    await this.#logger.write("queue_review_skipped", {
+      deliveryId: job.deliveryId,
+      reason: "completed_request",
+      commentId: request.commentId,
+    });
+    return "settled";
+  }
+
+  async #markRequestCompletion(request: ReviewRequestIdentity): Promise<void> {
+    const { operation, operationSignal } = this.#startStoreOperation((storeSignal) =>
+      this.#requestCompletions.mark(request, storeSignal),
+    );
+    await waitForStoreOperation(operation, "request completion", operationSignal);
+  }
+
+  async #hasRequestCompletion(
+    request: ReviewRequestIdentity,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const { operation, operationSignal } = this.#startStoreOperation(
+      (storeSignal) => this.#requestCompletions.has(request, storeSignal),
+      signal,
+    );
+    return waitForStoreOperation(operation, "request completion lookup", operationSignal, signal);
+  }
+
   async #loadFailureState(
+    deliveryId: string,
+    signal?: AbortSignal,
+    persistedState?: OperationalFailureState,
+  ): Promise<OperationalFailureState> {
+    const loaded = persistedState ?? (await this.#loadPersistedFailureState(deliveryId, signal));
+    const known = this.#knownStates.get(deliveryId);
+    const outageFloor = this.#outageFloors.get(deliveryId) ?? 0;
+    const loadedCommitted = consumeReservation(loaded);
+    const knownCommitted = known === undefined ? undefined : consumeReservation(known);
+    const reconciledFailures = Math.max(
+      outageFloor,
+      loadedCommitted.committedFailures,
+      knownCommitted?.committedFailures ?? 0,
+    ) as OperationalFailureCount;
+    const terminalCategory =
+      reconciledFailures === MAX_OPERATIONAL_ATTEMPTS
+        ? outageFloor === MAX_OPERATIONAL_ATTEMPTS
+          ? "filesystem"
+          : this.#strongestTerminalCategory(loadedCommitted, knownCommitted)
+        : undefined;
+    const conservative = committedState(reconciledFailures, terminalCategory ?? "unknown");
+    this.#rememberState(deliveryId, conservative);
+    if (outageFloor > 0 || !statesEqual(loaded, conservative)) {
+      await this.#saveFailureState(
+        deliveryId,
+        conservative,
+        this.#nextFailureSlot(deliveryId, reconciledFailures),
+        signal,
+      );
+    }
+    if (outageFloor > 0 && reconciledFailures >= outageFloor) {
+      this.#outageFloors.delete(deliveryId);
+    }
+    return conservative;
+  }
+
+  async #loadPersistedFailureState(
     deliveryId: string,
     signal?: AbortSignal,
   ): Promise<OperationalFailureState> {
@@ -491,35 +637,7 @@ export class QueueReviewRunner implements QueueRunService {
       }
       throw error;
     }
-    const known = this.#knownStates.get(deliveryId);
-    const outageFloor = this.#outageFloors.get(deliveryId) ?? 0;
-    const loadedCommitted = consumeReservation(loaded);
-    const knownCommitted = known === undefined ? undefined : consumeReservation(known);
-    const reconciledFailures = Math.max(
-      outageFloor,
-      loadedCommitted.committedFailures,
-      knownCommitted?.committedFailures ?? 0,
-    ) as OperationalFailureCount;
-    const terminalCategory =
-      reconciledFailures === MAX_OPERATIONAL_ATTEMPTS
-        ? outageFloor === MAX_OPERATIONAL_ATTEMPTS
-          ? "filesystem"
-          : this.#strongestTerminalCategory(loadedCommitted, knownCommitted)
-        : undefined;
-    const conservative = committedState(reconciledFailures, terminalCategory ?? "unknown");
-    this.#rememberState(deliveryId, conservative);
-    if (outageFloor > 0 || !statesEqual(loaded, conservative)) {
-      await this.#saveFailureState(
-        deliveryId,
-        conservative,
-        this.#nextFailureSlot(deliveryId, reconciledFailures),
-        signal,
-      );
-    }
-    if (outageFloor > 0 && reconciledFailures >= outageFloor) {
-      this.#outageFloors.delete(deliveryId);
-    }
-    return conservative;
+    return loaded;
   }
 
   async #saveFailureState(
@@ -749,7 +867,7 @@ export class QueueReviewRunner implements QueueRunService {
 
   async #settleTerminalFailure(
     delivery: QueueDelivery,
-    job: ReviewJobV1,
+    job: ReviewQueueJob,
     category: ReviewFailureCategory,
     signal?: AbortSignal,
   ): Promise<QueueConsumption> {
@@ -767,7 +885,7 @@ export class QueueReviewRunner implements QueueRunService {
 
   async #settleStoreFailure(
     delivery: QueueDelivery,
-    job: ReviewJobV1,
+    job: ReviewQueueJob,
     failure: unknown,
     signal?: AbortSignal,
   ): Promise<QueueConsumption> {

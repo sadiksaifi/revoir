@@ -3,6 +3,10 @@ import { describe, it } from "node:test";
 
 import { createConfiguration } from "../src/config/schema.js";
 import type { QueueDelivery } from "../src/queue/client.js";
+import type {
+  ReviewRequestCompletionStore,
+  ReviewRequestIdentity,
+} from "../src/queue/request-completion-store.js";
 import {
   QueueReviewRunner,
   type OperationalFailureState,
@@ -67,6 +71,23 @@ function reviewJob(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function requestedReviewJob(overrides: Record<string, unknown> = {}) {
+  return {
+    version: 2,
+    deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
+    installationId: 8,
+    repository: { id: 99, owner: "owner", name: "repository" },
+    pullRequest: { number: 17 },
+    request: {
+      kind: "issue_comment",
+      commentId: 123456789,
+      senderId: 42,
+    },
+    enqueuedAt: "2026-08-05T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
 function delivery(leaseId: string, body: unknown, attempt = 1): QueueDelivery {
   return { leaseId, attempt, body };
 }
@@ -110,7 +131,389 @@ class MemoryOperationalFailureStore implements OperationalFailureStore {
   }
 }
 
-describe("automatic queue review runner", () => {
+class MemoryReviewRequestCompletionStore implements ReviewRequestCompletionStore {
+  readonly completions = new Set<string>();
+
+  async has(identity: ReviewRequestIdentity): Promise<boolean> {
+    return this.completions.has(`${identity.repositoryId}:${identity.commentId}`);
+  }
+
+  async mark(identity: ReviewRequestIdentity): Promise<void> {
+    this.completions.add(`${identity.repositoryId}:${identity.commentId}`);
+  }
+}
+
+describe("queue review runner", () => {
+  it("reviews an authorized issue-comment request at the latest eligible head", async () => {
+    const deliveries = [
+      delivery("requested", requestedReviewJob()),
+      delivery(
+        "duplicate",
+        requestedReviewJob({
+          deliveryId: "8aa276d7-2d38-471c-9f4d-b62d9fbd82e5",
+        }),
+      ),
+      delivery(
+        "unauthorized",
+        requestedReviewJob({
+          deliveryId: "5c8efc84-c42f-47e1-91c2-bd64a36ec817",
+          request: {
+            ...requestedReviewJob().request,
+            senderId: 43,
+          },
+        }),
+      ),
+    ];
+    const acknowledgements: string[] = [];
+    const reviews: Array<{ url: string; expectedHeadSha: string | undefined }> = [];
+    const events: Array<{ event: string; data: Readonly<Record<string, unknown>> }> = [];
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return deliveries.shift();
+        },
+        async acknowledge(leaseId) {
+          acknowledgements.push(leaseId);
+        },
+        async retry() {},
+      },
+      {
+        async review(reference, options) {
+          reviews.push({ url: reference.url, expectedHeadSha: options?.expectedHeadSha });
+          return {
+            status: "clean",
+            reviewedSha: "3".repeat(40),
+            currentSha: "3".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      new MemoryOperationalFailureStore(),
+      {
+        async write(event, data = {}) {
+          events.push({ event, data });
+        },
+      },
+      new MemoryReviewRequestCompletionStore(),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.deepEqual(acknowledgements, ["requested", "duplicate", "unauthorized"]);
+    assert.deepEqual(reviews, [
+      {
+        url: "https://github.com/owner/repository/pull/17",
+        expectedHeadSha: undefined,
+      },
+    ]);
+    assert.deepEqual(events[0]?.data, {
+      deliveryId: requestedReviewJob().deliveryId,
+      repository: "owner/repository",
+      pullRequest: 17,
+      trigger: "issue_comment",
+      commentId: 123456789,
+    });
+    assert.deepEqual(events[2]?.data, {
+      deliveryId: "8aa276d7-2d38-471c-9f4d-b62d9fbd82e5",
+      reason: "completed_request",
+      commentId: 123456789,
+    });
+    assert.deepEqual(events[3]?.data, {
+      deliveryId: "5c8efc84-c42f-47e1-91c2-bd64a36ec817",
+      reason: "author_or_sender_not_allowed",
+    });
+  });
+
+  it("does not repeat a completed comment review after queue acknowledgement loss", async () => {
+    const job = requestedReviewJob();
+    const deliveries = [delivery("lost-ack", job), delivery("redelivery", job, 2)];
+    let acknowledgements = 0;
+    let reviews = 0;
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return deliveries.shift();
+        },
+        async acknowledge() {
+          acknowledgements += 1;
+          if (acknowledgements === 1) {
+            throw new Error("acknowledgement response was lost");
+          }
+        },
+        async retry() {},
+      },
+      {
+        async review() {
+          reviews += 1;
+          return {
+            status: "clean",
+            reviewedSha: "3".repeat(40),
+            currentSha: "3".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      new MemoryOperationalFailureStore(),
+      undefined,
+      new MemoryReviewRequestCompletionStore(),
+    );
+
+    await assert.rejects(runner.consumeOne(), /acknowledgement response was lost/u);
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(reviews, 1);
+    assert.equal(acknowledgements, 2);
+  });
+
+  it("bounds a stalled completion lookup before starting a requested review", async () => {
+    let reviews = 0;
+    const runner = new QueueReviewRunner(
+      configuration({ shellCommandMs: 5 }),
+      {
+        async pullOne() {
+          return delivery("stalled-lookup", requestedReviewJob());
+        },
+        async acknowledge() {},
+        async retry() {},
+      },
+      {
+        async review() {
+          reviews += 1;
+          return {
+            status: "clean",
+            reviewedSha: "3".repeat(40),
+            currentSha: "3".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      new MemoryOperationalFailureStore(),
+      undefined,
+      {
+        async has() {
+          return new Promise<boolean>(() => {});
+        },
+        async mark() {},
+      },
+    );
+
+    await assert.rejects(
+      settleWithin(runner.consumeOne(), "completion lookup did not time out"),
+      /request completion lookup timed out/u,
+    );
+    assert.equal(reviews, 0);
+  });
+
+  it("does not repeat a successful comment review after completion persistence rejects", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    let completed = false;
+    let markerAttempts = 0;
+    const completions: ReviewRequestCompletionStore = {
+      async has() {
+        return completed;
+      },
+      async mark() {
+        markerAttempts += 1;
+        if (markerAttempts === 1) {
+          throw new Error("completion marker failed");
+        }
+        completed = true;
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        return {
+          status: "clean",
+          reviewedSha: "3".repeat(40),
+          currentSha: "3".repeat(40),
+        };
+      },
+    };
+    function runnerFor(leaseId: string, attempt: number): QueueReviewRunner {
+      let pending: QueueDelivery | undefined = delivery(leaseId, job, attempt);
+      return new QueueReviewRunner(
+        configuration(),
+        {
+          async pullOne() {
+            const next = pending;
+            pending = undefined;
+            return next;
+          },
+          async acknowledge() {},
+          async retry() {},
+        },
+        reviewService,
+        silentFailureReporter,
+        failures,
+        undefined,
+        completions,
+      );
+    }
+
+    await assert.rejects(runnerFor("failed-marker", 1).consumeOne(), /completion marker failed/u);
+    assert.equal(await runnerFor("redelivery", 2).consumeOne(), "settled");
+
+    assert.equal(reviews, 1);
+    assert.equal(markerAttempts, 2);
+  });
+
+  it("persists a successful comment review before honoring cancellation", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    const completions = new MemoryReviewRequestCompletionStore();
+    const controller = new AbortController();
+    const cancellation = new Error("stop after review");
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        if (reviews === 1) {
+          controller.abort(cancellation);
+        }
+        return {
+          status: "clean",
+          reviewedSha: "3".repeat(40),
+          currentSha: "3".repeat(40),
+        };
+      },
+    };
+    function runnerFor(leaseId: string, attempt: number): QueueReviewRunner {
+      let pending: QueueDelivery | undefined = delivery(leaseId, job, attempt);
+      return new QueueReviewRunner(
+        configuration(),
+        {
+          async pullOne() {
+            const next = pending;
+            pending = undefined;
+            return next;
+          },
+          async acknowledge(_leaseId, signal) {
+            signal?.throwIfAborted();
+          },
+          async retry() {},
+        },
+        reviewService,
+        silentFailureReporter,
+        failures,
+        undefined,
+        completions,
+      );
+    }
+
+    await assert.rejects(
+      runnerFor("cancelled-settlement", 1).consumeOne(controller.signal),
+      cancellation,
+    );
+    assert.equal(await runnerFor("redelivery", 2).consumeOne(), "settled");
+
+    assert.equal(reviews, 1);
+  });
+
+  it("retries a requested review after a pre-review reservation survives restart", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    failures.failures.set(job.deliveryId, {
+      committedFailures: 0,
+      reservation: {
+        slot: 1,
+        ownerToken: "stopped-runner:reservation",
+        transportAttempt: 1,
+      },
+    });
+    let reviews = 0;
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return delivery("redelivery", job, 2);
+        },
+        async acknowledge() {},
+        async retry() {},
+      },
+      {
+        async review() {
+          reviews += 1;
+          return {
+            status: "clean",
+            reviewedSha: "3".repeat(40),
+            currentSha: "3".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      failures,
+      undefined,
+      new MemoryReviewRequestCompletionStore(),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(reviews, 1);
+  });
+
+  it("bounds a stalled completion marker without repeating the successful review", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    let completed = false;
+    let markerAttempts = 0;
+    const completions: ReviewRequestCompletionStore = {
+      async has() {
+        return completed;
+      },
+      async mark() {
+        markerAttempts += 1;
+        if (markerAttempts === 1) {
+          return new Promise<void>(() => {});
+        }
+        completed = true;
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        return {
+          status: "clean",
+          reviewedSha: "3".repeat(40),
+          currentSha: "3".repeat(40),
+        };
+      },
+    };
+    function runnerFor(leaseId: string, attempt: number): QueueReviewRunner {
+      let pending: QueueDelivery | undefined = delivery(leaseId, job, attempt);
+      return new QueueReviewRunner(
+        configuration({ shellCommandMs: 5 }),
+        {
+          async pullOne() {
+            const next = pending;
+            pending = undefined;
+            return next;
+          },
+          async acknowledge() {},
+          async retry() {},
+        },
+        reviewService,
+        silentFailureReporter,
+        failures,
+        undefined,
+        completions,
+      );
+    }
+
+    await assert.rejects(
+      settleWithin(runnerFor("stalled-marker", 1).consumeOne(), "marker did not time out"),
+      /request completion timed out/u,
+    );
+    assert.equal(await runnerFor("redelivery", 2).consumeOne(), "settled");
+
+    assert.equal(reviews, 1);
+    assert.equal(markerAttempts, 2);
+  });
+
   it("acknowledges terminal jobs and retries only operational review failures", async () => {
     const deliveries = [
       delivery("malformed", { version: 2 }),
