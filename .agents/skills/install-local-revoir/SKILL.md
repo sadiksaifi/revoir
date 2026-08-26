@@ -14,7 +14,7 @@ Require explicit authorization to replace the executable and restart the live da
    mise exec -- pnpm --filter cli release:macos
    ```
 
-3. Verify `artifacts/revoir-macos-$(uname -m)/revoir.metadata.json` names the checkout's `git rev-parse HEAD`, then atomically replace the executable:
+3. Verify the metadata path printed by the release command names the checkout's `git rev-parse HEAD`, then atomically replace the executable:
 
    ```bash
    mise exec -- pnpm --filter cli release:macos:install
