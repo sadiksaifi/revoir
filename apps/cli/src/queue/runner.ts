@@ -346,7 +346,7 @@ export class QueueReviewRunner implements QueueRunService {
       if (this.#knownCompletedRequests.has(completedRequestKey)) {
         return this.#settleCompletedRequest(delivery, job, requestedReview, true, signal);
       }
-      if (await this.#requestCompletions.has(requestedReview, signal)) {
+      if (await this.#hasRequestCompletion(requestedReview, signal)) {
         return this.#settleCompletedRequest(delivery, job, requestedReview, false, signal);
       }
     }
@@ -540,6 +540,17 @@ export class QueueReviewRunner implements QueueRunService {
       this.#requestCompletions.mark(request, storeSignal),
     );
     await waitForStoreOperation(operation, "request completion", operationSignal);
+  }
+
+  async #hasRequestCompletion(
+    request: ReviewRequestIdentity,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const { operation, operationSignal } = this.#startStoreOperation(
+      (storeSignal) => this.#requestCompletions.has(request, storeSignal),
+      signal,
+    );
+    return waitForStoreOperation(operation, "request completion lookup", operationSignal, signal);
   }
 
   async #loadFailureState(

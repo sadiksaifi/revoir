@@ -267,6 +267,45 @@ describe("queue review runner", () => {
     assert.equal(acknowledgements, 2);
   });
 
+  it("bounds a stalled completion lookup before starting a requested review", async () => {
+    let reviews = 0;
+    const runner = new QueueReviewRunner(
+      configuration({ shellCommandMs: 5 }),
+      {
+        async pullOne() {
+          return delivery("stalled-lookup", requestedReviewJob());
+        },
+        async acknowledge() {},
+        async retry() {},
+      },
+      {
+        async review() {
+          reviews += 1;
+          return {
+            status: "clean",
+            reviewedSha: "3".repeat(40),
+            currentSha: "3".repeat(40),
+          };
+        },
+      },
+      silentFailureReporter,
+      new MemoryOperationalFailureStore(),
+      undefined,
+      {
+        async has() {
+          return new Promise<boolean>(() => {});
+        },
+        async mark() {},
+      },
+    );
+
+    await assert.rejects(
+      settleWithin(runner.consumeOne(), "completion lookup did not time out"),
+      /request completion lookup timed out/u,
+    );
+    assert.equal(reviews, 0);
+  });
+
   it("does not repeat a successful comment review after completion persistence rejects", async () => {
     const job = requestedReviewJob();
     const failures = new MemoryOperationalFailureStore();
