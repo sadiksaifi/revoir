@@ -1815,13 +1815,17 @@ class InstallationSession implements GitHubReviewSession {
   }
 
   async deleteReaction(
-    _reference: PullRequestReference,
+    reference: PullRequestReference,
     reactionId: number,
     signal: AbortSignal,
   ): Promise<void> {
-    const response = await this.#request(`/reactions/${reactionId}`, signal, {
-      method: "DELETE",
-    });
+    const response = await this.#request(
+      `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/reactions/${reactionId}`,
+      signal,
+      {
+        method: "DELETE",
+      },
+    );
     if (response.status !== 204 && response.status !== 404) {
       throw new Error(`GitHub reaction removal failed with HTTP ${response.status}.`);
     }

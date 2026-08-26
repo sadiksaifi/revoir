@@ -20,6 +20,8 @@ const configuration = createTestConfiguration({
   stateDir: "/tmp/state",
   dataDir: "/tmp/data",
 });
+const reactionDeleteUrl = (reactionId: number) =>
+  `https://api.test/repos/owner/repository/issues/17/reactions/${reactionId}`;
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -209,10 +211,10 @@ describe("GitHub App review gateway", () => {
         });
       }
       if (
-        url.endsWith("/reactions/31") ||
-        url.endsWith("/reactions/33") ||
-        url.endsWith("/reactions/34") ||
-        url.endsWith("/reactions/36")
+        url === reactionDeleteUrl(31) ||
+        url === reactionDeleteUrl(33) ||
+        url === reactionDeleteUrl(34) ||
+        url === reactionDeleteUrl(36)
       ) {
         return new Response(null, { status: 204 });
       }
@@ -260,12 +262,12 @@ describe("GitHub App review gateway", () => {
             "Bearer installation-secret",
       ),
     );
-    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/31")).length, 1);
-    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/32")).length, 0);
-    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/34")).length, 1);
-    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/35")).length, 0);
-    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/36")).length, 1);
-    assert.equal(requests.filter((request) => request.url.endsWith("/reactions/37")).length, 0);
+    assert.equal(requests.filter((request) => request.url === reactionDeleteUrl(31)).length, 1);
+    assert.equal(requests.filter((request) => request.url === reactionDeleteUrl(32)).length, 0);
+    assert.equal(requests.filter((request) => request.url === reactionDeleteUrl(34)).length, 1);
+    assert.equal(requests.filter((request) => request.url === reactionDeleteUrl(35)).length, 0);
+    assert.equal(requests.filter((request) => request.url === reactionDeleteUrl(36)).length, 1);
+    assert.equal(requests.filter((request) => request.url === reactionDeleteUrl(37)).length, 0);
     assert.ok(requests.every((request) => request.init?.signal === abortController.signal));
   });
 
