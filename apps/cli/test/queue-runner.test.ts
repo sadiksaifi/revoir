@@ -267,6 +267,114 @@ describe("queue review runner", () => {
     assert.equal(acknowledgements, 2);
   });
 
+  it("does not repeat a successful comment review after completion persistence rejects", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    let completed = false;
+    let markerAttempts = 0;
+    const completions: ReviewRequestCompletionStore = {
+      async has() {
+        return completed;
+      },
+      async mark() {
+        markerAttempts += 1;
+        if (markerAttempts === 1) {
+          throw new Error("completion marker failed");
+        }
+        completed = true;
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        return {
+          status: "clean",
+          reviewedSha: "3".repeat(40),
+          currentSha: "3".repeat(40),
+        };
+      },
+    };
+    function runnerFor(leaseId: string, attempt: number): QueueReviewRunner {
+      let pending: QueueDelivery | undefined = delivery(leaseId, job, attempt);
+      return new QueueReviewRunner(
+        configuration(),
+        {
+          async pullOne() {
+            const next = pending;
+            pending = undefined;
+            return next;
+          },
+          async acknowledge() {},
+          async retry() {},
+        },
+        reviewService,
+        silentFailureReporter,
+        failures,
+        undefined,
+        completions,
+      );
+    }
+
+    await assert.rejects(runnerFor("failed-marker", 1).consumeOne(), /completion marker failed/u);
+    assert.equal(await runnerFor("redelivery", 2).consumeOne(), "settled");
+
+    assert.equal(reviews, 1);
+    assert.equal(markerAttempts, 2);
+  });
+
+  it("persists a successful comment review before honoring cancellation", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    const completions = new MemoryReviewRequestCompletionStore();
+    const controller = new AbortController();
+    const cancellation = new Error("stop after review");
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        if (reviews === 1) {
+          controller.abort(cancellation);
+        }
+        return {
+          status: "clean",
+          reviewedSha: "3".repeat(40),
+          currentSha: "3".repeat(40),
+        };
+      },
+    };
+    function runnerFor(leaseId: string, attempt: number): QueueReviewRunner {
+      let pending: QueueDelivery | undefined = delivery(leaseId, job, attempt);
+      return new QueueReviewRunner(
+        configuration(),
+        {
+          async pullOne() {
+            const next = pending;
+            pending = undefined;
+            return next;
+          },
+          async acknowledge(_leaseId, signal) {
+            signal?.throwIfAborted();
+          },
+          async retry() {},
+        },
+        reviewService,
+        silentFailureReporter,
+        failures,
+        undefined,
+        completions,
+      );
+    }
+
+    await assert.rejects(
+      runnerFor("cancelled-settlement", 1).consumeOne(controller.signal),
+      cancellation,
+    );
+    assert.equal(await runnerFor("redelivery", 2).consumeOne(), "settled");
+
+    assert.equal(reviews, 1);
+  });
+
   it("acknowledges terminal jobs and retries only operational review failures", async () => {
     const deliveries = [
       delivery("malformed", { version: 2 }),

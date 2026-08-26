@@ -339,19 +339,25 @@ export class QueueReviewRunner implements QueueRunService {
     const requestedReview = requestIdentity(job);
     if (requestedReview !== undefined) {
       const completedRequestKey = requestKey(requestedReview);
-      const completed =
-        this.#knownCompletedRequests.has(completedRequestKey) ||
-        (await this.#requestCompletions.has(requestedReview, signal));
-      if (completed) {
-        this.#knownCompletedRequests.add(completedRequestKey);
-        await this.#queue.acknowledge(delivery.leaseId, signal);
-        await this.#clearFailureState(job.deliveryId);
-        await this.#logger.write("queue_review_skipped", {
-          deliveryId: job.deliveryId,
-          reason: "completed_request",
-          commentId: requestedReview.commentId,
-        });
-        return "settled";
+      if (this.#knownCompletedRequests.has(completedRequestKey)) {
+        return this.#settleCompletedRequest(delivery, job, requestedReview, true, signal);
+      }
+      if (await this.#requestCompletions.has(requestedReview, signal)) {
+        return this.#settleCompletedRequest(delivery, job, requestedReview, false, signal);
+      }
+    }
+
+    let loadedFailureState: OperationalFailureState | undefined;
+    if (requestedReview !== undefined) {
+      try {
+        loadedFailureState = await this.#loadPersistedFailureState(job.deliveryId, signal);
+        throwIfCancelled(signal);
+      } catch (error) {
+        throwIfCancelled(signal);
+        return this.#settleStoreFailure(delivery, job, error, signal);
+      }
+      if (loadedFailureState.reservation !== undefined) {
+        return this.#settleCompletedRequest(delivery, job, requestedReview, true, signal);
       }
     }
 
@@ -362,7 +368,7 @@ export class QueueReviewRunner implements QueueRunService {
 
     let operationalState: OperationalFailureState;
     try {
-      operationalState = await this.#loadFailureState(job.deliveryId, signal);
+      operationalState = await this.#loadFailureState(job.deliveryId, signal, loadedFailureState);
       throwIfCancelled(signal);
     } catch (error) {
       throwIfCancelled(signal);
@@ -477,10 +483,11 @@ export class QueueReviewRunner implements QueueRunService {
 
     // The review completed. From this point onward even caller cancellation cannot
     // safely prove that Pi did not run, so the reservation remains for redelivery.
-    throwIfCancelled(signal);
     if (requestedReview !== undefined) {
       this.#knownCompletedRequests.add(requestKey(requestedReview));
-      await this.#requestCompletions.mark(requestedReview, signal);
+      await this.#requestCompletions.mark(requestedReview);
+    } else {
+      throwIfCancelled(signal);
     }
     await this.#queue.acknowledge(delivery.leaseId, signal);
     await this.#clearFailureState(job.deliveryId);
@@ -492,7 +499,68 @@ export class QueueReviewRunner implements QueueRunService {
     return "settled";
   }
 
+  async #settleCompletedRequest(
+    delivery: QueueDelivery,
+    job: ReviewQueueJob,
+    request: ReviewRequestIdentity,
+    persistCompletion: boolean,
+    signal?: AbortSignal,
+  ): Promise<QueueConsumption> {
+    this.#knownCompletedRequests.add(requestKey(request));
+    if (persistCompletion) {
+      // A successful review has already crossed the point where caller cancellation
+      // can safely cause another attempt. Complete this durable write independently;
+      // the pre-review reservation remains as the restart fence until it succeeds.
+      await this.#requestCompletions.mark(request);
+    }
+    await this.#queue.acknowledge(delivery.leaseId, signal);
+    await this.#clearFailureState(job.deliveryId);
+    await this.#logger.write("queue_review_skipped", {
+      deliveryId: job.deliveryId,
+      reason: "completed_request",
+      commentId: request.commentId,
+    });
+    return "settled";
+  }
+
   async #loadFailureState(
+    deliveryId: string,
+    signal?: AbortSignal,
+    persistedState?: OperationalFailureState,
+  ): Promise<OperationalFailureState> {
+    const loaded = persistedState ?? (await this.#loadPersistedFailureState(deliveryId, signal));
+    const known = this.#knownStates.get(deliveryId);
+    const outageFloor = this.#outageFloors.get(deliveryId) ?? 0;
+    const loadedCommitted = consumeReservation(loaded);
+    const knownCommitted = known === undefined ? undefined : consumeReservation(known);
+    const reconciledFailures = Math.max(
+      outageFloor,
+      loadedCommitted.committedFailures,
+      knownCommitted?.committedFailures ?? 0,
+    ) as OperationalFailureCount;
+    const terminalCategory =
+      reconciledFailures === MAX_OPERATIONAL_ATTEMPTS
+        ? outageFloor === MAX_OPERATIONAL_ATTEMPTS
+          ? "filesystem"
+          : this.#strongestTerminalCategory(loadedCommitted, knownCommitted)
+        : undefined;
+    const conservative = committedState(reconciledFailures, terminalCategory ?? "unknown");
+    this.#rememberState(deliveryId, conservative);
+    if (outageFloor > 0 || !statesEqual(loaded, conservative)) {
+      await this.#saveFailureState(
+        deliveryId,
+        conservative,
+        this.#nextFailureSlot(deliveryId, reconciledFailures),
+        signal,
+      );
+    }
+    if (outageFloor > 0 && reconciledFailures >= outageFloor) {
+      this.#outageFloors.delete(deliveryId);
+    }
+    return conservative;
+  }
+
+  async #loadPersistedFailureState(
     deliveryId: string,
     signal?: AbortSignal,
   ): Promise<OperationalFailureState> {
@@ -539,35 +607,7 @@ export class QueueReviewRunner implements QueueRunService {
       }
       throw error;
     }
-    const known = this.#knownStates.get(deliveryId);
-    const outageFloor = this.#outageFloors.get(deliveryId) ?? 0;
-    const loadedCommitted = consumeReservation(loaded);
-    const knownCommitted = known === undefined ? undefined : consumeReservation(known);
-    const reconciledFailures = Math.max(
-      outageFloor,
-      loadedCommitted.committedFailures,
-      knownCommitted?.committedFailures ?? 0,
-    ) as OperationalFailureCount;
-    const terminalCategory =
-      reconciledFailures === MAX_OPERATIONAL_ATTEMPTS
-        ? outageFloor === MAX_OPERATIONAL_ATTEMPTS
-          ? "filesystem"
-          : this.#strongestTerminalCategory(loadedCommitted, knownCommitted)
-        : undefined;
-    const conservative = committedState(reconciledFailures, terminalCategory ?? "unknown");
-    this.#rememberState(deliveryId, conservative);
-    if (outageFloor > 0 || !statesEqual(loaded, conservative)) {
-      await this.#saveFailureState(
-        deliveryId,
-        conservative,
-        this.#nextFailureSlot(deliveryId, reconciledFailures),
-        signal,
-      );
-    }
-    if (outageFloor > 0 && reconciledFailures >= outageFloor) {
-      this.#outageFloors.delete(deliveryId);
-    }
-    return conservative;
+    return loaded;
   }
 
   async #saveFailureState(
