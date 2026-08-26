@@ -1593,6 +1593,7 @@ class InstallationSession implements GitHubReviewSession {
       reference.number,
       ...linkedArtifacts.map(({ evidence }) => evidence.number),
     ]);
+    let remainingLinkedArtifactLookups = MAX_LINKED_ARTIFACTS - linkedArtifacts.length;
     const rootReferences = linkedArtifactReferences(
       [
         pullRequestBody,
@@ -1605,13 +1606,14 @@ class InstallationSession implements GitHubReviewSession {
       reference,
     );
     for (const number of rootReferences) {
-      if (linkedArtifacts.length >= MAX_LINKED_ARTIFACTS) {
+      if (remainingLinkedArtifactLookups === 0) {
         break;
       }
       if (seenNumbers.has(number)) {
         continue;
       }
       seenNumbers.add(number);
+      remainingLinkedArtifactLookups -= 1;
       // eslint-disable-next-line no-await-in-loop
       const artifact = await this.#getLinkedArtifact(reference, number, 1, signal);
       if (artifact !== undefined) {
@@ -1627,13 +1629,14 @@ class InstallationSession implements GitHubReviewSession {
       reference,
     );
     for (const number of nestedReferences) {
-      if (linkedArtifacts.length >= MAX_LINKED_ARTIFACTS) {
+      if (remainingLinkedArtifactLookups === 0) {
         break;
       }
       if (seenNumbers.has(number)) {
         continue;
       }
       seenNumbers.add(number);
+      remainingLinkedArtifactLookups -= 1;
       // eslint-disable-next-line no-await-in-loop
       const artifact = await this.#getLinkedArtifact(reference, number, 2, signal);
       if (artifact !== undefined) {

@@ -948,6 +948,59 @@ describe("GitHub review evidence", () => {
     );
   });
 
+  it("caps linked artifact lookup attempts when references do not exist", async () => {
+    const textualNumbers = Array.from({ length: 25 }, (_, index) => 100 + index);
+    const lookedUpNumbers: number[] = [];
+    const fetchImplementation: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/app")) {
+        return json({ slug: "revoir-test" });
+      }
+      if (url.endsWith("/app/installations/8/access_tokens")) {
+        return json({ token: "installation-secret" });
+      }
+      if (url.includes("/check-runs?")) {
+        return json({ total_count: 0, check_runs: [] });
+      }
+      if (url.endsWith("/graphql")) {
+        const request = JSON.parse(String(init?.body)) as {
+          query: string;
+          variables: Record<string, unknown>;
+        };
+        if (request.query.includes("RevoirLinkedArtifact")) {
+          lookedUpNumbers.push(Number(request.variables.number));
+          return json({ data: { repository: { issueOrPullRequest: null } } });
+        }
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                body: textualNumbers.map((number) => `#${number}`).join(" "),
+                comments: graphQlConnection([]),
+                reviews: graphQlConnection([]),
+                reviewThreads: graphQlConnection([]),
+                closingIssuesReferences: graphQlConnection([]),
+              },
+            },
+          },
+        });
+      }
+      throw new Error(`Unexpected request ${url}`);
+    };
+    const session = await new GitHubAppReviewGateway(
+      fetchImplementation,
+      "https://api.test",
+      () => 1_000,
+    ).authenticate(configuration.github, reference, new AbortController().signal);
+
+    const artifacts = (
+      await session.getReviewEvidence(reference, "2".repeat(40), new AbortController().signal)
+    ).discussion?.linkedArtifacts;
+
+    assert.deepEqual(artifacts, []);
+    assert.deepEqual(lookedUpNumbers, textualNumbers.slice(0, 20));
+  });
+
   it("still fails when required completed-check context is unavailable", async () => {
     const fetchImplementation: FetchLike = async (input) => {
       const url = String(input);
