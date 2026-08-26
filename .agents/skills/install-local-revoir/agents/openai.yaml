@@ -1,0 +1,7 @@
+interface:
+  display_name: "Install Local Revoir"
+  short_description: "Replace and verify this Mac's Revoir daemon"
+  default_prompt: "Use $install-local-revoir to replace this Mac's running Revoir daemon with the current checkout."
+
+policy:
+  allow_implicit_invocation: false
