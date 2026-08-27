@@ -518,7 +518,7 @@ export class RepositoryManager {
     }
     const requiresIdentityReconciliation = repository === undefined;
     repository = discovered.repository;
-    installationId ??= discovered.installation?.id;
+    installationId = discovered.installation?.id;
     if (
       requiresIdentityReconciliation &&
       [...repositories(locallyRevoked), ...repositories(cloud)].some(
@@ -557,7 +557,7 @@ export class RepositoryManager {
       await this.#pending.remove("remove", discovered.repository.id);
       return { status: "removed", repository: discovered.repository };
     }
-    installationId ??= discovered.installation.id;
+    installationId = discovered.installation.id;
     const pendingOperation: PendingRepositoryOperation = {
       version: 1,
       kind: "remove",

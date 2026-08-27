@@ -801,6 +801,39 @@ describe("repository authorization", () => {
     assert.equal(pending.values[0]?.kind, "remove");
   });
 
+  it("removes access through the currently discovered replacement installation", async () => {
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+    policies.cloud = policies.local;
+    const pending = pendingStore();
+    const github = fakeGitHub();
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      installation: {
+        id: 9,
+        hasRepositoryAccess: true,
+        settingsUrl: "https://github.com/settings/installations/9",
+      },
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+    const polledInstallationIds: number[] = [];
+    github.waitForRepositoryAccess = async (installationId) => {
+      polledInstallationIds.push(installationId);
+      return "confirmed";
+    };
+
+    assert.deepEqual(
+      await new RepositoryManager({ github, policies, pending }).remove({
+        owner: "Owner",
+        name: "repository",
+      }),
+      { status: "removed", repository: REPOSITORY },
+    );
+    assert.deepEqual(polledInstallationIds, [9]);
+    assert.deepEqual(github.events, ["open:https://github.com/settings/installations/9"]);
+    assert.deepEqual(pending.values, []);
+  });
+
   it("removes a renamed repository by immutable identity before GitHub cleanup", async () => {
     const previousIdentity = { ...REPOSITORY, name: "previous-name" };
     const events: string[] = [];
