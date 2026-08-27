@@ -15,6 +15,7 @@ export interface GitHubManifestResult {
   appId: number;
   appSlug: string;
   privateKey: string;
+  webhookSecret: string;
 }
 
 export interface GitHubManifestBrowser {
@@ -78,6 +79,7 @@ function parseConversion(value: unknown): GitHubManifestResult {
   const appId = conversion.id;
   const appSlug = conversion.slug;
   const privateKey = conversion.pem;
+  const webhookSecret = conversion.webhook_secret;
   if (!Number.isSafeInteger(appId) || (appId as number) <= 0) {
     throw new Error("GitHub App Manifest conversion omitted the immutable App id.");
   }
@@ -92,7 +94,10 @@ function parseConversion(value: unknown): GitHubManifestResult {
   ) {
     throw new Error("GitHub App Manifest conversion omitted its one-time private key.");
   }
-  return { appId: appId as number, appSlug, privateKey };
+  if (typeof webhookSecret !== "string" || webhookSecret === "") {
+    throw new Error("GitHub App Manifest conversion omitted its webhook secret.");
+  }
+  return { appId: appId as number, appSlug, privateKey, webhookSecret };
 }
 
 export class GitHubManifestFlow {
@@ -114,7 +119,6 @@ export class GitHubManifestFlow {
     appName: string;
     relayUrl: string;
     state: string;
-    webhookSecret: string;
     persist?: (result: GitHubManifestResult) => Promise<void>;
   }): Promise<GitHubManifestResult> {
     const callback = pendingCallback();
@@ -175,7 +179,6 @@ export class GitHubManifestFlow {
         hook_attributes: {
           active: true,
           url: input.relayUrl,
-          webhook_secret: input.webhookSecret,
         },
       });
       await this.#browser.open(`http://127.0.0.1:${port}/start`);

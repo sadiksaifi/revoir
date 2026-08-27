@@ -391,8 +391,14 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
     async deployRelay() {
       return "https://revoir-relay.example.workers.dev/github/webhook";
     },
+    async configureRelaySecret() {},
     async createGitHubApp(created) {
-      const app = { appId: 2, appSlug: "package-smoke", privateKey };
+      const app = {
+        appId: 2,
+        appSlug: "package-smoke",
+        privateKey,
+        webhookSecret: "package-smoke-webhook-secret",
+      };
       await created.persist(app);
       return app;
     },

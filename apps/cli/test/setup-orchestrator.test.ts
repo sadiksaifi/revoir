@@ -68,9 +68,6 @@ function platform(
   return {
     calls,
     async ensureGitHubAuthentication() {
-      if (state.checkpoint !== undefined) {
-        assert.match(state.checkpoint.secrets.githubWebhookSecret ?? "", /^[0-9a-f]{64}$/u);
-      }
       return stage("prerequisites", { userId: 42, login: "test-user" });
     },
     async ensureWranglerAuthentication() {
@@ -91,11 +88,13 @@ function platform(
     async deployRelay() {
       return stage("relay-deployed", "https://revoir-relay.example.workers.dev/github/webhook");
     },
+    async configureRelaySecret() {},
     async createGitHubApp(input) {
       const app = await stage("github-app", {
         appId: 7,
         appSlug: "revoir-test",
         privateKey: TEST_PRIVATE_KEY,
+        webhookSecret: "github-generated-secret",
       });
       await input.persist(app);
       return app;
@@ -148,7 +147,7 @@ describe("greenfield end-to-end setup", () => {
       installations: [],
     });
     assert.equal(state.finalConfiguration?.github.privateKey, TEST_PRIVATE_KEY);
-    assert.equal(state.finalConfiguration?.github.webhookSecret.length, 64);
+    assert.equal(state.finalConfiguration?.github.webhookSecret, "github-generated-secret");
     assert.equal(state.finalConfiguration?.cloudflare.apiToken, "queue-token-secret");
     assert.equal(state.checkpoint, undefined);
     assert.deepEqual(setupPlatform.calls, [
@@ -177,13 +176,11 @@ describe("greenfield end-to-end setup", () => {
       "cloudflare-resources",
       "relay-deployed",
     ]);
-    const webhookSecret = state.checkpoint?.secrets.githubWebhookSecret;
-
     const resumedPlatform = platform(state);
     const result = await setup(state, resumedPlatform).run();
 
     assert.equal(result.resumed, true);
-    assert.equal(result.configuration.github.webhookSecret, webhookSecret);
+    assert.equal(result.configuration.github.webhookSecret, "github-generated-secret");
     assert.deepEqual(resumedPlatform.calls, [
       "prerequisites",
       "github-app",
@@ -230,7 +227,12 @@ describe("greenfield end-to-end setup", () => {
     let appCreations = 0;
     setupPlatform.createGitHubApp = async (input) => {
       appCreations += 1;
-      const app = { appId: 7, appSlug: "revoir-test", privateKey: TEST_PRIVATE_KEY };
+      const app = {
+        appId: 7,
+        appSlug: "revoir-test",
+        privateKey: TEST_PRIVATE_KEY,
+        webhookSecret: "github-generated-secret",
+      };
       state.writeFailures = 1;
       await input.persist(app);
       return app;
@@ -240,6 +242,54 @@ describe("greenfield end-to-end setup", () => {
 
     assert.equal(appCreations, 1);
     assert.equal(state.finalConfiguration?.github.privateKey, TEST_PRIVATE_KEY);
+  });
+
+  it("resumes secret installation from the checkpointed GitHub-generated credentials", async () => {
+    const state = new MemorySetupState();
+    const firstPlatform = platform(state);
+    let appCreations = 0;
+    firstPlatform.createGitHubApp = async (input) => {
+      appCreations += 1;
+      const app = {
+        appId: 7,
+        appSlug: "revoir-test",
+        privateKey: TEST_PRIVATE_KEY,
+        webhookSecret: "github-generated-secret",
+      };
+      await input.persist(app);
+      return app;
+    };
+    Object.assign(firstPlatform, {
+      async configureRelaySecret() {
+        throw new Error("interrupted secret installation");
+      },
+    });
+
+    await assert.rejects(setup(state, firstPlatform).run(), (error) => {
+      assert.ok(error instanceof SetupStageError);
+      assert.equal(error.stage, "github-app");
+      return true;
+    });
+    assert.equal(state.checkpoint?.secrets.githubWebhookSecret, "github-generated-secret");
+    assert.equal(state.checkpoint?.secrets.githubPrivateKey, TEST_PRIVATE_KEY);
+    assert.equal(state.checkpoint?.completedStages.includes("github-app"), false);
+
+    const resumedPlatform = platform(state);
+    resumedPlatform.createGitHubApp = async () => {
+      throw new Error("manifest conversion must not be repeated");
+    };
+    const installedSecrets: string[] = [];
+    Object.assign(resumedPlatform, {
+      async configureRelaySecret(_resources: unknown, secret: string) {
+        installedSecrets.push(secret);
+      },
+    });
+
+    const result = await setup(state, resumedPlatform).run();
+
+    assert.equal(appCreations, 1);
+    assert.deepEqual(installedSecrets, ["github-generated-secret"]);
+    assert.equal(result.configuration.github.webhookSecret, "github-generated-secret");
   });
 
   it("reconciles its completed installation without creating another App or cloud resources", async () => {

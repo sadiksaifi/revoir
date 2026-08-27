@@ -19,6 +19,7 @@ export interface SetupGitHubApp {
   appId: number;
   appSlug: string;
   privateKey: string;
+  webhookSecret: string;
 }
 
 export interface SetupPlatform {
@@ -31,11 +32,11 @@ export interface SetupPlatform {
     existing: SetupCloudflareCheckpoint | undefined,
     persist: (resources: SetupCloudflareCheckpoint) => Promise<void>,
   ): Promise<SetupCloudflareResources>;
-  deployRelay(resources: SetupCloudflareResources, webhookSecret: string): Promise<string>;
+  deployRelay(resources: SetupCloudflareResources): Promise<string>;
+  configureRelaySecret(resources: SetupCloudflareResources, webhookSecret: string): Promise<void>;
   createGitHubApp(input: {
     relayUrl: string;
     state: string;
-    webhookSecret: string;
     persist: (app: SetupGitHubApp) => Promise<void>;
   }): Promise<SetupGitHubApp>;
   reconcileGitHubApp(configuration: RevoirConfiguration, policy: RevoirPolicy): Promise<void>;
@@ -101,9 +102,7 @@ function initialCheckpoint(): SetupCheckpoint {
     version: 1,
     completedStages: [],
     resources: { setupId: randomBytes(8).toString("hex") },
-    secrets: {
-      githubWebhookSecret: randomBytes(32).toString("hex"),
-    },
+    secrets: {},
   };
 }
 
@@ -204,9 +203,14 @@ export class EndToEndSetup {
           cause: new Error("Authenticated GitHub or Cloudflare identity differs from this setup."),
         });
       }
-      const relayUrl = await reconcile("relay-deployed", () =>
-        this.#platform.deployRelay(resources, finalState.configuration.github.webhookSecret),
-      );
+      const relayUrl = await reconcile("relay-deployed", async () => {
+        const deployedUrl = await this.#platform.deployRelay(resources);
+        await this.#platform.configureRelaySecret(
+          resources,
+          finalState.configuration.github.webhookSecret,
+        );
+        return deployedUrl;
+      });
       const configuration = {
         ...finalState.configuration,
         cloudflare: { ...resources, relayUrl },
@@ -232,7 +236,7 @@ export class EndToEndSetup {
     const resumed = loaded !== undefined;
     let checkpoint = loaded ?? initialCheckpoint();
     if (loaded === undefined) {
-      // Persist generated webhook material before the first external effect.
+      // Persist the setup identity before the first external effect.
       await writeCheckpoint(checkpoint);
     }
 
@@ -336,13 +340,8 @@ export class EndToEndSetup {
       "cloudflare-resources",
     );
 
-    const webhookSecret = assertCheckpointValue(
-      checkpoint.secrets.githubWebhookSecret,
-      "the generated webhook secret",
-      "relay-deployed",
-    );
     await execute("relay-deployed", async () => {
-      const relayUrl = await this.#platform.deployRelay(cloudflare!, webhookSecret);
+      const relayUrl = await this.#platform.deployRelay(cloudflare!);
       cloudflare = { ...cloudflare!, relayUrl };
       checkpoint = {
         ...checkpoint,
@@ -361,26 +360,47 @@ export class EndToEndSetup {
     await execute("github-app", async () => {
       const persistedGitHub = checkpoint.resources.github;
       const persistedPrivateKey = checkpoint.secrets.githubPrivateKey;
-      if (persistedGitHub !== undefined && persistedPrivateKey !== undefined) {
-        github = { ...persistedGitHub, privateKey: persistedPrivateKey };
-        return;
+      const persistedWebhookSecret = checkpoint.secrets.githubWebhookSecret;
+      if (
+        persistedGitHub !== undefined ||
+        persistedPrivateKey !== undefined ||
+        persistedWebhookSecret !== undefined
+      ) {
+        github = {
+          ...assertCheckpointValue(persistedGitHub, "GitHub App identifiers", "github-app"),
+          privateKey: assertCheckpointValue(
+            persistedPrivateKey,
+            "the GitHub App private key",
+            "github-app",
+          ),
+          webhookSecret: assertCheckpointValue(
+            persistedWebhookSecret,
+            "the GitHub-generated webhook secret",
+            "github-app",
+          ),
+        };
+      } else {
+        github = await this.#platform.createGitHubApp({
+          relayUrl,
+          state: randomBytes(32).toString("base64url"),
+          persist: async (created) => {
+            checkpoint = {
+              ...checkpoint,
+              resources: {
+                ...checkpoint.resources,
+                github: { appId: created.appId, appSlug: created.appSlug },
+              },
+              secrets: {
+                ...checkpoint.secrets,
+                githubPrivateKey: created.privateKey,
+                githubWebhookSecret: created.webhookSecret,
+              },
+            };
+            await writeCheckpoint(checkpoint);
+          },
+        });
       }
-      github = await this.#platform.createGitHubApp({
-        relayUrl,
-        state: randomBytes(32).toString("base64url"),
-        webhookSecret,
-        persist: async (created) => {
-          checkpoint = {
-            ...checkpoint,
-            resources: {
-              ...checkpoint.resources,
-              github: { appId: created.appId, appSlug: created.appSlug },
-            },
-            secrets: { ...checkpoint.secrets, githubPrivateKey: created.privateKey },
-          };
-          await writeCheckpoint(checkpoint);
-        },
-      });
+      await this.#platform.configureRelaySecret(cloudflare!, github.webhookSecret);
     });
     const githubResource = assertCheckpointValue(
       checkpoint.resources.github,
@@ -390,6 +410,11 @@ export class EndToEndSetup {
     const githubPrivateKey = assertCheckpointValue(
       github?.privateKey ?? checkpoint.secrets.githubPrivateKey,
       "the GitHub App private key",
+      "github-app",
+    );
+    const webhookSecret = assertCheckpointValue(
+      github?.webhookSecret ?? checkpoint.secrets.githubWebhookSecret,
+      "the GitHub-generated webhook secret",
       "github-app",
     );
 

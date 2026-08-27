@@ -43,7 +43,14 @@ describe("GitHub App Manifest flow", () => {
       async (url, init) => {
         assert.equal(String(url), "https://api.github.com/app-manifests/one-time-code/conversions");
         assert.equal(init?.method, "POST");
-        return new Response(JSON.stringify({ id: 7, slug: "revoir-test", pem: PRIVATE_KEY }));
+        return new Response(
+          JSON.stringify({
+            id: 7,
+            slug: "revoir-test",
+            pem: PRIVATE_KEY,
+            webhook_secret: "github-generated-secret",
+          }),
+        );
       },
     );
 
@@ -51,10 +58,14 @@ describe("GitHub App Manifest flow", () => {
       appName: "Revoir Test",
       relayUrl: "https://relay.example.workers.dev/github/webhook",
       state: "expected-state",
-      webhookSecret: "setup-secret",
     });
 
-    assert.deepEqual(result, { appId: 7, appSlug: "revoir-test", privateKey: PRIVATE_KEY });
+    assert.deepEqual(result, {
+      appId: 7,
+      appSlug: "revoir-test",
+      privateKey: PRIVATE_KEY,
+      webhookSecret: "github-generated-secret",
+    });
     assert.match(opened[0] ?? "", /^http:\/\/127\.0\.0\.1:\d+\/start$/u);
     assert.equal(manifest?.public, true);
     assert.deepEqual(manifest?.default_permissions, REQUIRED_GITHUB_APP_PERMISSIONS);
@@ -62,7 +73,6 @@ describe("GitHub App Manifest flow", () => {
     assert.deepEqual(manifest?.hook_attributes, {
       active: true,
       url: "https://relay.example.workers.dev/github/webhook",
-      webhook_secret: "setup-secret",
     });
     assert.match(String(manifest?.redirect_url), /^http:\/\/127\.0\.0\.1:\d+\/callback$/u);
   });
@@ -90,7 +100,6 @@ describe("GitHub App Manifest flow", () => {
         appName: "Revoir Test",
         relayUrl: "https://relay.example.workers.dev/github/webhook",
         state: "expected-state",
-        webhookSecret: "setup-secret",
       }),
       /state did not match/u,
     );
@@ -113,7 +122,6 @@ describe("GitHub App Manifest flow", () => {
         appName: "Revoir Test",
         relayUrl: "https://relay.example.workers.dev/github/webhook",
         state: "expected-state",
-        webhookSecret: "setup-secret",
       }),
       /browser approval expired/u,
     );

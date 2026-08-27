@@ -161,7 +161,7 @@ describe("default greenfield setup platform", () => {
     assert.equal(kvCreates, 1);
   });
 
-  it("deploys the embedded relay with only KV, Queue, and webhook-secret bindings", async () => {
+  it("deploys the embedded relay and installs its GitHub-generated webhook secret", async () => {
     let generatedConfiguration: Record<string, unknown> | undefined;
     const process = new FakeProcess(async (_command, arguments_) => {
       const configIndex = arguments_.indexOf("--config");
@@ -177,9 +177,10 @@ describe("default greenfield setup platform", () => {
     const setup = platform({ process });
 
     assert.equal(
-      await setup.deployRelay(RESOURCES, "webhook-secret"),
+      await setup.deployRelay(RESOURCES),
       "https://revoir-relay.example.workers.dev/github/webhook",
     );
+    await setup.configureRelaySecret(RESOURCES, "webhook-secret");
     assert.deepEqual(generatedConfiguration?.kv_namespaces, [
       { binding: "POLICY_KV", id: "kv-immutable-id" },
     ]);

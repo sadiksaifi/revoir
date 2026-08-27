@@ -339,7 +339,10 @@ export class DefaultSetupPlatform implements SetupPlatform {
     return { ...resources, kvNamespaceId, queueId };
   }
 
-  async deployRelay(resources: SetupCloudflareResources, webhookSecret: string): Promise<string> {
+  async #withRelayConfiguration<T>(
+    resources: SetupCloudflareResources,
+    operation: (configFile: string) => Promise<T>,
+  ): Promise<T> {
     const root = await mkdtemp(join(tmpdir(), "revoir-relay-"));
     try {
       const workerFile = join(root, "worker.mjs");
@@ -365,12 +368,14 @@ export class DefaultSetupPlatform implements SetupPlatform {
           { encoding: "utf8", mode: 0o600 },
         ),
       ]);
-      await this.#process.run("wrangler", ["deploy", "--config", configFile]);
-      await this.#process.run(
-        "wrangler",
-        ["secret", "put", "GITHUB_WEBHOOK_SECRET", "--config", configFile],
-        { input: `${webhookSecret}\n` },
-      );
+      return await operation(configFile);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  async deployRelay(resources: SetupCloudflareResources): Promise<string> {
+    return this.#withRelayConfiguration(resources, async (configFile) => {
       const deployment = await this.#process.run("wrangler", ["deploy", "--config", configFile]);
       const baseUrl = /https:\/\/[A-Za-z0-9.-]+\.workers\.dev\/?/u.exec(
         `${deployment.stdout}\n${deployment.stderr}`,
@@ -379,15 +384,26 @@ export class DefaultSetupPlatform implements SetupPlatform {
         throw new Error("Wrangler deployment did not report the relay workers.dev URL.");
       }
       return `${baseUrl.replace(/\/$/u, "")}${REVOIR_WEBHOOK_PATH}`;
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
+  }
+
+  async configureRelaySecret(
+    resources: SetupCloudflareResources,
+    webhookSecret: string,
+  ): Promise<void> {
+    await this.#withRelayConfiguration(resources, async (configFile) => {
+      await this.#process.run(
+        "wrangler",
+        ["secret", "put", "GITHUB_WEBHOOK_SECRET", "--config", configFile],
+        { input: `${webhookSecret}\n` },
+      );
+      await this.#process.run("wrangler", ["deploy", "--config", configFile]);
+    });
   }
 
   createGitHubApp(input: {
     relayUrl: string;
     state: string;
-    webhookSecret: string;
     persist: (app: SetupGitHubApp) => Promise<void>;
   }): Promise<SetupGitHubApp> {
     const machine =
