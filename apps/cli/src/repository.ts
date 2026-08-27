@@ -424,6 +424,11 @@ export class RepositoryManager {
     }
     repository = discovered.repository;
     installationId ??= discovered.installation?.id;
+    if (options.keepGitHubAccess === true) {
+      await this.#pending.remove("add", discovered.repository.id);
+      await this.#pending.remove("remove", discovered.repository.id);
+      return { status: "removed", repository: discovered.repository };
+    }
     if (discovered.installation === undefined || !discovered.installation.hasRepositoryAccess) {
       await this.#pending.remove("remove", discovered.repository.id);
       return { status: "removed", repository: discovered.repository };

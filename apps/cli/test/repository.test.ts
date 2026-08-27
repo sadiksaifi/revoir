@@ -419,6 +419,23 @@ describe("repository authorization", () => {
     assert.equal(pending.values[0]?.kind, "remove");
   });
 
+  it("keeps GitHub-only repository access without opening settings or polling", async () => {
+    const policies = new MemoryPolicies();
+    const github = fakeGitHub();
+    const pending = pendingStore();
+    const manager = new RepositoryManager({ github, policies, pending });
+
+    assert.deepEqual(
+      await manager.remove(
+        { owner: "Owner", name: "repository" },
+        { keepGitHubAccess: true },
+      ),
+      { status: "removed", repository: REPOSITORY },
+    );
+    assert.deepEqual(github.events, []);
+    assert.deepEqual(pending.values, []);
+  });
+
   it("keeps authorization revoked and saves GitHub cleanup when polling fails", async () => {
     const policies = new MemoryPolicies();
     const seedManager = new RepositoryManager({
