@@ -11,9 +11,24 @@ import { Miniflare } from "miniflare";
 
 const WEBHOOK_SECRET = "local-runtime-webhook-secret";
 
-async function waitForQueuedJobs(namespace: {
+interface LocalKvNamespace {
   get(key: string, type: "json"): Promise<unknown>;
-}): Promise<unknown[]> {
+  put(key: string, value: string): Promise<void>;
+}
+
+function localKvNamespace(value: unknown): LocalKvNamespace {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    typeof Reflect.get(value, "get") !== "function" ||
+    typeof Reflect.get(value, "put") !== "function"
+  ) {
+    throw new Error("Miniflare did not return a KV namespace.");
+  }
+  return value as LocalKvNamespace;
+}
+
+async function waitForQueuedJobs(namespace: LocalKvNamespace): Promise<unknown[]> {
   const expiresAt = Date.now() + 2_000;
   for (;;) {
     // Poll only the test-owned local Queue sink.
@@ -88,9 +103,7 @@ describe("Cloudflare local runtime", () => {
       });
 
       try {
-        const policy = (await miniflare.getKVNamespace("POLICY_KV", "relay")) as unknown as {
-          put(key: string, value: string): Promise<void>;
-        };
+        const policy = localKvNamespace(await miniflare.getKVNamespace("POLICY_KV", "relay"));
         await policy.put(
           "policy",
           JSON.stringify({
@@ -143,9 +156,9 @@ describe("Cloudflare local runtime", () => {
         });
         assert.equal(response.status, 202);
 
-        const namespace = (await miniflare.getKVNamespace("MESSAGES", "queue-sink")) as unknown as {
-          get(key: string, type: "json"): Promise<unknown>;
-        };
+        const namespace = localKvNamespace(
+          await miniflare.getKVNamespace("MESSAGES", "queue-sink"),
+        );
         const jobs = await waitForQueuedJobs(namespace);
         assert.equal(jobs.length, 1);
         const job = parseReviewQueueJob(jobs[0]);
