@@ -224,6 +224,34 @@ describe("CLI", () => {
     assert.doesNotMatch(stdout.output + stderr.output, /cli-cloudflare-secret/u);
   });
 
+  it("scopes standalone diagnose policy reads to the configured Cloudflare account", async () => {
+    const { root, io } = await createIo();
+    await writeCredentials(root);
+    const paths = resolveApplicationPaths(io.environment, root);
+    const configuration = createTestConfiguration(paths, {
+      apiToken: "cli-cloudflare-secret",
+    });
+    let environment: Readonly<Record<string, string>> | undefined;
+    const policyGateway = createDefaultDiagnosticGateway(
+      async () => {
+        throw new Error("unexpected network request");
+      },
+      async (_executable, _arguments, options) => {
+        environment = options.environment;
+        return { stdout: JSON.stringify(configuration.policy), stderr: "" };
+      },
+    );
+
+    assert.equal(
+      await runCli(["diagnose"], {
+        io,
+        gateway: { ...passingGateway(), checkPolicy: policyGateway.checkPolicy },
+      }),
+      0,
+    );
+    assert.equal(environment?.CLOUDFLARE_ACCOUNT_ID, configuration.cloudflare.accountId);
+  });
+
   it("returns actionable errors for invalid input and missing configuration", async () => {
     const { io, stderr } = await createIo();
     assert.equal(

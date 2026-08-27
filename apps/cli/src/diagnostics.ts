@@ -19,16 +19,33 @@ const REQUIRED_GITHUB_PERMISSIONS = {
 } as const;
 const REQUIRED_GITHUB_EVENTS = ["pull_request", "issue_comment"] as const;
 
-function execFile(
+export interface DiagnosticProcessOptions {
+  environment?: Readonly<Record<string, string>>;
+  maxBuffer: number;
+  timeout: number;
+}
+
+export type DiagnosticProcess = (
   executable: string,
   arguments_: readonly string[],
-  options: { timeout: number; maxBuffer: number },
-): Promise<{ stdout: string; stderr: string }> {
+  options: DiagnosticProcessOptions,
+) => Promise<{ stdout: string; stderr: string }>;
+
+const execFile: DiagnosticProcess = (
+  executable: string,
+  arguments_: readonly string[],
+  options: DiagnosticProcessOptions,
+): Promise<{ stdout: string; stderr: string }> => {
   return new Promise((resolve, reject) => {
     execFileCallback(
       executable,
       [...arguments_],
-      { ...options, encoding: "utf8" },
+      {
+        timeout: options.timeout,
+        maxBuffer: options.maxBuffer,
+        encoding: "utf8",
+        env: { ...process.env, ...options.environment },
+      },
       (error, stdout, stderr) => {
         if (error !== null) {
           reject(error);
@@ -38,7 +55,7 @@ function execFile(
       },
     );
   });
-}
+};
 
 export type DiagnosticStatus = "passed" | "failed";
 
@@ -192,6 +209,7 @@ function validateGitHubEvents(value: unknown): void {
 
 export function createDefaultDiagnosticGateway(
   fetchImplementation: FetchFunction = fetch,
+  processRunner: DiagnosticProcess = execFile,
 ): DiagnosticGateway {
   return {
     async checkRuntime() {
@@ -200,7 +218,7 @@ export function createDefaultDiagnosticGateway(
 
     async checkGit(timeoutMs) {
       try {
-        const { stdout } = await execFile("git", ["--version"], {
+        const { stdout } = await processRunner("git", ["--version"], {
           timeout: timeoutMs,
           maxBuffer: 64 * 1024,
         });
@@ -430,7 +448,7 @@ export function createDefaultDiagnosticGateway(
     },
 
     async checkPolicy(configuration, policy) {
-      const { stdout } = await execFile(
+      const { stdout } = await processRunner(
         "wrangler",
         [
           "kv",
@@ -441,7 +459,11 @@ export function createDefaultDiagnosticGateway(
           "--remote",
           "--text",
         ],
-        { timeout: 30_000, maxBuffer: 1024 * 1024 },
+        {
+          environment: { CLOUDFLARE_ACCOUNT_ID: configuration.accountId },
+          timeout: 30_000,
+          maxBuffer: 1024 * 1024,
+        },
       );
       let cloud: RevoirPolicy;
       try {

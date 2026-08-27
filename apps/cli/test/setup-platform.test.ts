@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 
 import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import type { RevoirConfiguration } from "../src/config/schema.js";
+import { createDefaultDiagnosticGateway } from "../src/diagnostics.js";
 import {
   ChildProcessSetupRunner,
   DefaultSetupPlatform,
@@ -49,6 +50,7 @@ class FakeProcess implements SetupProcessRunner {
 }
 
 function platform(input: {
+  diagnostics?: DefaultSetupPlatform["runDiagnostics"];
   process: SetupProcessRunner;
   fetch?: typeof fetch;
   now?: () => number;
@@ -69,7 +71,7 @@ function platform(input: {
         input.opened?.push(url);
       },
     },
-    async diagnostics() {},
+    diagnostics: input.diagnostics ?? (async () => {}),
     async installService() {},
     async secretPrompt() {
       return "queue-token";
@@ -267,6 +269,33 @@ describe("default greenfield setup platform", () => {
       ),
       true,
     );
+  });
+
+  it("scopes final setup diagnostics policy reads to the selected Cloudflare account", async () => {
+    const configuration = createTestConfiguration({
+      cacheDir: "/tmp/revoir-test-cache",
+      stateDir: "/tmp/revoir-test-state",
+      dataDir: "/tmp/revoir-test-data",
+    });
+    let environment: Readonly<Record<string, string>> | undefined;
+    const gateway = createDefaultDiagnosticGateway(
+      async () => {
+        throw new Error("unexpected network request");
+      },
+      async (_executable, _arguments, options) => {
+        environment = options.environment;
+        return { stdout: JSON.stringify(configuration.policy), stderr: "" };
+      },
+    );
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      async diagnostics(current, policy) {
+        await gateway.checkPolicy(current.cloudflare, policy);
+      },
+    });
+
+    await setup.runDiagnostics(configuration, configuration.policy);
+    assert.equal(environment?.CLOUDFLARE_ACCOUNT_ID, configuration.cloudflare.accountId);
   });
 
   it("validates the Queue token and reconciles the existing App without creating resources", async () => {
