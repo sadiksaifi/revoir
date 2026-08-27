@@ -184,9 +184,7 @@ describe("repository authorization", () => {
       },
     });
 
-    const loading = (loader as (signal?: AbortSignal) => Promise<RevoirPolicy>)(
-      controller.signal,
-    );
+    const loading = (loader as (signal?: AbortSignal) => Promise<RevoirPolicy>)(controller.signal);
     controller.abort(cancellation);
     await assert.rejects(
       Promise.race([
@@ -458,10 +456,7 @@ describe("repository authorization", () => {
     const manager = new RepositoryManager({ github, policies, pending });
 
     assert.deepEqual(
-      await manager.remove(
-        { owner: "Owner", name: "repository" },
-        { keepGitHubAccess: true },
-      ),
+      await manager.remove({ owner: "Owner", name: "repository" }, { keepGitHubAccess: true }),
       { status: "removed", repository: REPOSITORY },
     );
     assert.deepEqual(github.events, []);

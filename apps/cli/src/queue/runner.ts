@@ -956,7 +956,12 @@ export class QueueReviewRunner implements QueueRunService {
 
     const failure = classifyReviewFailure(error);
     try {
-      await this.#saveFailureState(job.deliveryId, committedState(slot, failure.category), slot, signal);
+      await this.#saveFailureState(
+        job.deliveryId,
+        committedState(slot, failure.category),
+        slot,
+        signal,
+      );
     } catch (stateError) {
       if (signal?.aborted === true) {
         throw signal.reason instanceof Error ? signal.reason : stateError;
@@ -970,11 +975,7 @@ export class QueueReviewRunner implements QueueRunService {
 
     await this.#reportFailure(referenceFor(job), failure, slot, signal);
     throwIfCancelled(signal);
-    await this.#queue.retry(
-      delivery.leaseId,
-      OPERATIONAL_RETRY_DELAYS_SECONDS[slot - 1]!,
-      signal,
-    );
+    await this.#queue.retry(delivery.leaseId, OPERATIONAL_RETRY_DELAYS_SECONDS[slot - 1]!, signal);
     await this.#logger.write("queue_review_retried", {
       deliveryId: job.deliveryId,
       reason: "local_policy_unavailable",

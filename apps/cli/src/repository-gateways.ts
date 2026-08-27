@@ -378,10 +378,7 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
       try {
         // eslint-disable-next-line no-await-in-loop
         const cloud = await this.loadCloud();
-        if (
-          JSON.stringify(cloud) === JSON.stringify(policy) &&
-          this.#now() >= activationAt
-        ) {
+        if (JSON.stringify(cloud) === JSON.stringify(policy) && this.#now() >= activationAt) {
           return;
         }
       } catch {

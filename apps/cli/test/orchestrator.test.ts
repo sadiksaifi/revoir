@@ -449,8 +449,7 @@ function harness(
           return { async release() {} };
         },
       },
-      loadPolicy:
-        options.loadPolicy ?? (async () => configuration(options.reviewMs).policy),
+      loadPolicy: options.loadPolicy ?? (async () => configuration(options.reviewMs).policy),
       workspaces,
       reviewEngine,
     }),
