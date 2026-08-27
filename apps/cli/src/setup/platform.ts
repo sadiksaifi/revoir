@@ -1,0 +1,439 @@
+import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY } from "@revoir/contracts";
+
+import type { RevoirPolicy } from "../config/policy.js";
+import type { RevoirConfiguration } from "../config/schema.js";
+import { EMBEDDED_RELAY_SHA256, EMBEDDED_RELAY_SOURCE } from "../generated/relay-artifact.js";
+import { createGitHubAppJwt } from "../review/github.js";
+import {
+  GitHubManifestFlow,
+  REQUIRED_GITHUB_APP_EVENTS,
+  REQUIRED_GITHUB_APP_PERMISSIONS,
+  type GitHubManifestBrowser,
+} from "./github-manifest.js";
+import type { SetupCloudflareResources, SetupGitHubApp, SetupPlatform } from "./orchestrator.js";
+
+const KV_NAMESPACE_NAME = "revoir-policy";
+const QUEUE_NAME = "revoir-review-jobs";
+const WORKER_NAME = "revoir-relay";
+
+export interface ProcessResult {
+  stdout: string;
+  stderr: string;
+}
+
+export interface SetupProcessRunner {
+  run(
+    command: string,
+    arguments_: readonly string[],
+    options?: { input?: string; interactive?: boolean },
+  ): Promise<ProcessResult>;
+}
+
+export class ChildProcessSetupRunner implements SetupProcessRunner {
+  run(
+    command: string,
+    arguments_: readonly string[],
+    options: { input?: string; interactive?: boolean } = {},
+  ): Promise<ProcessResult> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, [...arguments_], {
+        stdio: options.interactive ? "inherit" : ["pipe", "pipe", "pipe"],
+      });
+      if (!options.interactive) {
+        child.stdin?.end(options.input);
+      }
+      let stdout = "";
+      let stderr = "";
+      child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      child.once("error", reject);
+      child.once("exit", (code, signal) => {
+        if (code === 0) {
+          resolve({ stdout, stderr });
+          return;
+        }
+        reject(
+          new Error(
+            `${command} failed with ${signal === null ? `status ${String(code)}` : `signal ${signal}`}.`,
+          ),
+        );
+      });
+    });
+  }
+}
+
+function parseJsonRecord(value: string, label: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch (error) {
+    throw new Error(`${label} returned invalid JSON.`, { cause: error });
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${label} returned an invalid object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function positiveInteger(value: unknown, label: string): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(numeric) || numeric <= 0) {
+    throw new Error(`${label} did not return a positive immutable id.`);
+  }
+  return numeric;
+}
+
+function resourceId(output: string, label: string): string {
+  const trimmed = output.trim();
+  const wholeJson = (() => {
+    try {
+      return parseJsonRecord(trimmed, label);
+    } catch {
+      return undefined;
+    }
+  })();
+  const wholeId = wholeJson?.id ?? wholeJson?.queue_id ?? wholeJson?.namespace_id;
+  if (typeof wholeId === "string" && wholeId !== "") return wholeId;
+  const jsonCandidate = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("{") && line.endsWith("}"));
+  if (jsonCandidate !== undefined) {
+    const parsed = parseJsonRecord(jsonCandidate, label);
+    const id = parsed.id ?? parsed.queue_id ?? parsed.namespace_id;
+    if (typeof id === "string" && id !== "") {
+      return id;
+    }
+  }
+  const quoted = /(?:id|queue[ _]id|namespace[ _]id)\s*[=:]\s*["']?([A-Za-z0-9_-]{8,})["']?/iu.exec(
+    output,
+  )?.[1];
+  if (quoted === undefined) {
+    throw new Error(`${label} did not report the created resource id.`);
+  }
+  return quoted;
+}
+
+function samePolicy(left: RevoirPolicy, right: RevoirPolicy): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export class DefaultSetupPlatform implements SetupPlatform {
+  readonly #browser: GitHubManifestBrowser;
+  readonly #diagnostics: (
+    configuration: RevoirConfiguration,
+    policy: RevoirPolicy,
+  ) => Promise<void>;
+  readonly #installService: (configuration: RevoirConfiguration) => Promise<void>;
+  readonly #manifest: GitHubManifestFlow;
+  readonly #process: SetupProcessRunner;
+  readonly #secretPrompt: (message: string) => Promise<string>;
+  readonly #fetch: typeof fetch;
+
+  constructor(input: {
+    browser: GitHubManifestBrowser;
+    diagnostics: (configuration: RevoirConfiguration, policy: RevoirPolicy) => Promise<void>;
+    installService(configuration: RevoirConfiguration): Promise<void>;
+    secretPrompt(message: string): Promise<string>;
+    process?: SetupProcessRunner;
+    manifest?: GitHubManifestFlow;
+    fetch?: typeof fetch;
+  }) {
+    this.#browser = input.browser;
+    this.#diagnostics = input.diagnostics;
+    this.#installService = input.installService;
+    this.#process = input.process ?? new ChildProcessSetupRunner();
+    this.#manifest = input.manifest ?? new GitHubManifestFlow(input.browser);
+    this.#secretPrompt = input.secretPrompt;
+    this.#fetch = input.fetch ?? fetch;
+  }
+
+  async ensureGitHubAuthentication(): Promise<{ userId: number; login: string }> {
+    try {
+      await this.#process.run("gh", ["auth", "status"]);
+    } catch {
+      await this.#process.run("gh", ["auth", "login", "--web"], { interactive: true });
+    }
+    const response = parseJsonRecord(
+      (await this.#process.run("gh", ["api", "user"])).stdout,
+      "GitHub CLI",
+    );
+    if (typeof response.login !== "string" || response.login === "") {
+      throw new Error("GitHub CLI did not return the authenticated login.");
+    }
+    return { userId: positiveInteger(response.id, "GitHub CLI"), login: response.login };
+  }
+
+  async ensureWranglerAuthentication(): Promise<{ accountId: string }> {
+    let output: string;
+    try {
+      output = (await this.#process.run("wrangler", ["whoami"])).stdout;
+    } catch {
+      await this.#process.run("wrangler", ["login"], { interactive: true });
+      output = (await this.#process.run("wrangler", ["whoami"])).stdout;
+    }
+    const accountIds = [...new Set(output.match(/\b[0-9a-f]{32}\b/giu) ?? [])];
+    if (accountIds.length !== 1 || accountIds[0] === undefined) {
+      throw new Error(
+        "Wrangler authentication did not report exactly one usable Cloudflare account id.",
+      );
+    }
+    return { accountId: accountIds[0] };
+  }
+
+  async ensurePiAuthentication(modelId: string, reasoning: string): Promise<void> {
+    const authenticated = async (): Promise<boolean> => {
+      const separator = modelId.indexOf("/");
+      const provider = modelId.slice(0, separator);
+      const modelName = modelId.slice(separator + 1);
+      const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+      const runtime = await ModelRuntime.create({ allowModelNetwork: false });
+      const model = runtime.getModel(provider, modelName);
+      if (model === undefined || (reasoning !== "minimal" && !model.reasoning)) {
+        throw new Error(`Pi does not support ${modelId} with ${reasoning} reasoning.`);
+      }
+      return (await runtime.checkAuth(provider))?.type === "oauth";
+    };
+    if (await authenticated()) {
+      return;
+    }
+    await this.#process.run("pi", [], { interactive: true });
+    if (!(await authenticated())) {
+      throw new Error(
+        'Pi OpenAI Codex authentication is still unavailable. Use "/login" and select OpenAI Codex before exiting Pi.',
+      );
+    }
+  }
+
+  async ensureCloudflareResources(
+    accountId: string,
+    existing: SetupCloudflareResources | undefined,
+  ): Promise<SetupCloudflareResources> {
+    if (existing !== undefined) {
+      return existing;
+    }
+    const kv = await this.#process.run("wrangler", [
+      "kv",
+      "namespace",
+      "create",
+      KV_NAMESPACE_NAME,
+    ]);
+    const queue = await this.#process.run("wrangler", ["queues", "create", QUEUE_NAME]);
+    await this.#process.run("wrangler", ["queues", "consumer", "http", "add", QUEUE_NAME]);
+    const queueInfo = await this.#process.run("wrangler", ["queues", "info", QUEUE_NAME]);
+    return {
+      accountId,
+      kvNamespaceId: resourceId(`${kv.stdout}\n${kv.stderr}`, "Wrangler KV creation"),
+      queueId: resourceId(
+        `${queueInfo.stdout}\n${queueInfo.stderr}\n${queue.stdout}\n${queue.stderr}`,
+        "Wrangler Queue creation",
+      ),
+      queueName: QUEUE_NAME,
+      workerName: WORKER_NAME,
+    };
+  }
+
+  async deployRelay(resources: SetupCloudflareResources, webhookSecret: string): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "revoir-relay-"));
+    try {
+      const workerFile = join(root, "worker.mjs");
+      const configFile = join(root, "wrangler.json");
+      await Promise.all([
+        writeFile(workerFile, EMBEDDED_RELAY_SOURCE, { encoding: "utf8", mode: 0o600 }),
+        writeFile(
+          configFile,
+          `${JSON.stringify(
+            {
+              name: resources.workerName,
+              main: workerFile,
+              compatibility_date: "2026-07-22",
+              kv_namespaces: [{ binding: "POLICY_KV", id: resources.kvNamespaceId }],
+              queues: {
+                producers: [{ binding: "REVIEW_QUEUE", queue: resources.queueName }],
+              },
+              vars: { REVOIR_RELAY_VERSION: EMBEDDED_RELAY_SHA256 },
+            },
+            undefined,
+            2,
+          )}\n`,
+          { encoding: "utf8", mode: 0o600 },
+        ),
+      ]);
+      await this.#process.run("wrangler", ["deploy", "--config", configFile]);
+      await this.#process.run(
+        "wrangler",
+        ["secret", "put", "GITHUB_WEBHOOK_SECRET", "--config", configFile],
+        { input: `${webhookSecret}\n` },
+      );
+      const deployment = await this.#process.run("wrangler", ["deploy", "--config", configFile]);
+      const baseUrl = /https:\/\/[A-Za-z0-9.-]+\.workers\.dev\/?/u.exec(
+        `${deployment.stdout}\n${deployment.stderr}`,
+      )?.[0];
+      if (baseUrl === undefined) {
+        throw new Error("Wrangler deployment did not report the relay workers.dev URL.");
+      }
+      return `${baseUrl.replace(/\/$/u, "")}/webhook`;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  createGitHubApp(input: {
+    relayUrl: string;
+    state: string;
+    webhookSecret: string;
+  }): Promise<SetupGitHubApp> {
+    const machine =
+      hostname()
+        .replaceAll(/[^A-Za-z0-9-]/gu, "-")
+        .slice(0, 24) || "mac";
+    return this.#manifest.create({
+      ...input,
+      appName: `Revoir ${machine} ${input.state.slice(0, 8)}`,
+    });
+  }
+
+  async reconcileGitHubApp(
+    configuration: RevoirConfiguration,
+    _policy: RevoirPolicy,
+  ): Promise<void> {
+    const jwt = createGitHubAppJwt(configuration.github.appId, configuration.github.privateKey);
+    const headers = {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${jwt}`,
+      "Content-Type": "application/json",
+      "User-Agent": "revoir",
+      "X-GitHub-Api-Version": "2022-11-28",
+    };
+    const response = await this.#fetch("https://api.github.com/app", { headers });
+    if (!response.ok) {
+      throw new Error(`GitHub App reconciliation failed with HTTP ${response.status}.`);
+    }
+    const app = parseJsonRecord(JSON.stringify(await response.json()), "GitHub App");
+    if (app.id !== configuration.github.appId || app.slug !== configuration.github.appSlug) {
+      throw new Error("GitHub App reconciliation returned a different immutable App identity.");
+    }
+    const events = Array.isArray(app.events) ? app.events : [];
+    const permissions =
+      typeof app.permissions === "object" && app.permissions !== null
+        ? (app.permissions as Record<string, unknown>)
+        : {};
+    const drifted =
+      REQUIRED_GITHUB_APP_EVENTS.some((event) => !events.includes(event)) ||
+      Object.entries(REQUIRED_GITHUB_APP_PERMISSIONS).some(
+        ([permission, access]) => permissions[permission] !== access,
+      );
+    if (drifted) {
+      const url = `https://github.com/settings/apps/${configuration.github.appSlug}/permissions`;
+      await this.#browser.open(url);
+      throw new Error(
+        `GitHub App permissions or events require approval. Complete the change at ${url}, then rerun setup.`,
+      );
+    }
+    const hook = await this.#fetch("https://api.github.com/app/hook/config", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        url: configuration.cloudflare.relayUrl,
+        content_type: "json",
+        insecure_ssl: "0",
+        secret: configuration.github.webhookSecret,
+      }),
+    });
+    if (!hook.ok) {
+      throw new Error(`GitHub webhook reconciliation failed with HTTP ${hook.status}.`);
+    }
+  }
+
+  async requestQueueApiToken(_resources: SetupCloudflareResources): Promise<string> {
+    await this.#browser.open("https://dash.cloudflare.com/profile/api-tokens/create/custom");
+    const token = (await this.#secretPrompt("Cloudflare Queue read/write API token: ")).trim();
+    if (token === "") {
+      throw new Error("Cloudflare Queue API token cannot be empty.");
+    }
+    return token;
+  }
+
+  async validateQueueApiToken(resources: SetupCloudflareResources, token: string): Promise<void> {
+    const response = await this.#fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(resources.accountId)}/queues/${encodeURIComponent(resources.queueId)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!response.ok) {
+      throw new Error(
+        "Cloudflare rejected the Queue token. Grant only Account > Queues > Edit and retry.",
+      );
+    }
+  }
+
+  async putCloudPolicy(resources: SetupCloudflareResources, policy: RevoirPolicy): Promise<void> {
+    await this.#process.run("wrangler", [
+      "kv",
+      "key",
+      "put",
+      `--namespace-id=${resources.kvNamespaceId}`,
+      REVOIR_POLICY_KV_KEY,
+      JSON.stringify(parseRevoirPolicy(policy)),
+      "--remote",
+    ]);
+  }
+
+  async verifyCloudPolicy(
+    resources: SetupCloudflareResources,
+    expected: RevoirPolicy,
+  ): Promise<void> {
+    const deadline = Date.now() + 65_000;
+    do {
+      // eslint-disable-next-line no-await-in-loop
+      const result = await this.#process.run("wrangler", [
+        "kv",
+        "key",
+        "get",
+        `--namespace-id=${resources.kvNamespaceId}`,
+        REVOIR_POLICY_KV_KEY,
+        "--remote",
+        "--text",
+      ]);
+      try {
+        if (samePolicy(parseRevoirPolicy(JSON.parse(result.stdout) as unknown), expected)) {
+          return;
+        }
+      } catch {
+        // A stale or unavailable KV read remains unauthorized while propagation continues.
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    } while (Date.now() < deadline);
+    throw new Error("Cloudflare KV policy did not become visible before the activation deadline.");
+  }
+
+  async getCloudPolicy(resources: SetupCloudflareResources): Promise<RevoirPolicy> {
+    const result = await this.#process.run("wrangler", [
+      "kv",
+      "key",
+      "get",
+      `--namespace-id=${resources.kvNamespaceId}`,
+      REVOIR_POLICY_KV_KEY,
+      "--remote",
+      "--text",
+    ]);
+    return parseRevoirPolicy(JSON.parse(result.stdout) as unknown);
+  }
+
+  installService(configuration: RevoirConfiguration): Promise<void> {
+    return this.#installService(configuration);
+  }
+
+  runDiagnostics(configuration: RevoirConfiguration, policy: RevoirPolicy): Promise<void> {
+    return this.#diagnostics(configuration, policy);
+  }
+}

@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 
-import { installationForRepository, type RevoirConfiguration } from "../config/schema.js";
+import { installationForRepository, type RevoirPolicy } from "../config/policy.js";
+import type { RevoirConfiguration } from "../config/schema.js";
 import { SecretRedactor } from "../redaction.js";
 import type {
   CompletedCheckEvidence,
@@ -115,6 +116,7 @@ export interface GitHubReviewSession {
 export interface GitHubReviewGateway {
   authenticate(
     configuration: RevoirConfiguration["github"],
+    policy: RevoirPolicy,
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<GitHubReviewSession>;
@@ -2225,11 +2227,12 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
 
   async authenticate(
     configuration: RevoirConfiguration["github"],
+    policy: RevoirPolicy,
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<GitHubReviewSession> {
     const configuredInstallation = installationForRepository(
-      configuration,
+      policy,
       reference.owner,
       reference.repository,
     );

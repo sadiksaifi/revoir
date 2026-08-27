@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { withRepository } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
 import type { GitHubReviewEvidence } from "../src/review/evidence.js";
 import type { ReviewFindingV2 } from "../src/review/findings.js";
@@ -87,21 +88,20 @@ async function fileIsMissing(path: string): Promise<boolean> {
 }
 
 function configuration(reviewMs = 60_000) {
-  return createConfiguration({
+  const value = createConfiguration({
     github: {
-      userId: 42,
       appId: 7,
+      appSlug: "revoir-test",
       privateKey: TEST_PRIVATE_KEY,
-      installations: [
-        {
-          id: 8,
-          repositories: [{ id: 99, owner: "owner", name: "repository" }],
-        },
-      ],
+      webhookSecret: "test-webhook-secret",
     },
     cloudflare: {
       accountId: "account",
       queueId: "queue",
+      queueName: "revoir-review-jobs",
+      kvNamespaceId: "kv-namespace",
+      workerName: "revoir-relay",
+      relayUrl: "https://revoir-relay.example.workers.dev/webhook",
       apiToken: "cloudflare-token",
     },
     paths: {
@@ -110,6 +110,13 @@ function configuration(reviewMs = 60_000) {
       dataDir: "/tmp/data",
     },
     timeouts: { reviewMs },
+  });
+  return Object.assign(value, {
+    policy: withRepository({ version: 1, revision: 0, userId: 42, installations: [] }, 8, {
+      id: 99,
+      owner: "owner",
+      name: "repository",
+    }),
   });
 }
 
@@ -442,6 +449,7 @@ function harness(
           return { async release() {} };
         },
       },
+      loadPolicy: async () => configuration(options.reviewMs).policy,
       workspaces,
       reviewEngine,
     }),

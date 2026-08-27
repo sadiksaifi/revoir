@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { parseReviewQueueJob, ReviewJobSchemaError, type ReviewQueueJob } from "@revoir/contracts";
 
 import { isCallerCancellation } from "../cancellation.js";
+import type { RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import {
   GitHubReviewFailureReporter,
@@ -68,11 +69,8 @@ type LocalEligibility =
         | "author_or_sender_not_allowed";
     };
 
-function localEligibility(
-  job: ReviewQueueJob,
-  configuration: RevoirConfiguration["github"],
-): LocalEligibility {
-  const installation = configuration.installations.find(
+function localEligibility(job: ReviewQueueJob, policy: RevoirPolicy): LocalEligibility {
+  const installation = policy.installations.find(
     (candidate) => candidate.id === job.installationId,
   );
   if (installation === undefined) {
@@ -87,10 +85,10 @@ function localEligibility(
   if (!repositoryAllowed) {
     return { eligible: false, reason: "repository_not_allowed_for_installation" };
   }
-  const senderId = job.version === 1 ? job.pullRequest.senderId : job.request.senderId;
+  const senderId = job.trigger.senderId;
   if (
-    senderId !== configuration.userId ||
-    (job.version === 1 && job.pullRequest.authorId !== configuration.userId)
+    senderId !== policy.userId ||
+    (job.trigger.kind === "automatic" && job.trigger.authorId !== policy.userId)
   ) {
     return { eligible: false, reason: "author_or_sender_not_allowed" };
   }
@@ -109,8 +107,8 @@ function referenceFor(job: ReviewQueueJob): PullRequestReference {
 }
 
 function requestIdentity(job: ReviewQueueJob): ReviewRequestIdentity | undefined {
-  return job.version === 2
-    ? { repositoryId: job.repository.id, commentId: job.request.commentId }
+  return job.trigger.kind === "requested"
+    ? { repositoryId: job.repository.id, commentId: job.trigger.commentId }
     : undefined;
 }
 
@@ -278,13 +276,14 @@ export class QueueReviewRunner implements QueueRunService {
   readonly #queue: QueueClient;
   readonly #reviews: ManualReviewService;
   readonly #logger: QueueRunLogger;
+  readonly #loadPolicy: () => Promise<RevoirPolicy>;
   #serializedConsumption: Promise<void> = Promise.resolve();
 
   constructor(
     configuration: RevoirConfiguration,
     queue: QueueClient,
     reviews: ManualReviewService,
-    failures: ReviewFailureReporter = new GitHubReviewFailureReporter(configuration.github),
+    failures?: ReviewFailureReporter,
     operationalFailures: OperationalFailureStore = new FileOperationalFailureStore(
       configuration.paths.stateDir,
     ),
@@ -292,14 +291,26 @@ export class QueueReviewRunner implements QueueRunService {
     requestCompletions: ReviewRequestCompletionStore = new FileReviewRequestCompletionStore(
       configuration.paths.stateDir,
     ),
+    loadPolicy?: () => Promise<RevoirPolicy>,
   ) {
     this.#configuration = configuration;
     this.#queue = queue;
     this.#reviews = reviews;
-    this.#failures = failures;
     this.#operationalFailures = operationalFailures;
     this.#logger = logger;
     this.#requestCompletions = requestCompletions;
+    this.#loadPolicy =
+      loadPolicy ??
+      (async () => {
+        const testPolicy = (configuration as RevoirConfiguration & { policy?: RevoirPolicy })
+          .policy;
+        if (testPolicy === undefined) {
+          throw new Error("Local repository policy is unavailable.");
+        }
+        return testPolicy;
+      });
+    this.#failures =
+      failures ?? new GitHubReviewFailureReporter(configuration.github, this.#loadPolicy);
   }
 
   consumeOne(signal?: AbortSignal): Promise<QueueConsumption> {
@@ -329,7 +340,19 @@ export class QueueReviewRunner implements QueueRunService {
       return "settled";
     }
 
-    const eligibility = localEligibility(job, this.#configuration.github);
+    let policy: RevoirPolicy;
+    try {
+      policy = await this.#loadPolicy();
+    } catch (error) {
+      await this.#queue.retry(delivery.leaseId, OPERATIONAL_RETRY_DELAYS_SECONDS[0], signal);
+      await this.#logger.write("queue_review_rejected", {
+        deliveryId: job.deliveryId,
+        reason: "local_policy_unavailable",
+        error,
+      });
+      return "settled";
+    }
+    const eligibility = localEligibility(job, policy);
     if (!eligibility.eligible) {
       await this.#queue.acknowledge(delivery.leaseId, signal);
       await this.#clearFailureState(job.deliveryId);
@@ -417,10 +440,10 @@ export class QueueReviewRunner implements QueueRunService {
       deliveryId: job.deliveryId,
       repository: `${job.repository.owner}/${job.repository.name}`,
       pullRequest: job.pullRequest.number,
-      trigger: job.version === 1 ? job.action : job.request.kind,
-      ...(job.version === 1
-        ? { headSha: job.pullRequest.headSha }
-        : { commentId: job.request.commentId }),
+      trigger: job.trigger.kind === "automatic" ? job.trigger.action : job.trigger.source,
+      ...(job.trigger.kind === "automatic"
+        ? { headSha: job.trigger.headSha, action: job.trigger.action }
+        : { commentId: job.trigger.commentId }),
     };
     const startedAt = Date.now();
     await this.#logger.write("queue_review_started", metadata);
@@ -428,7 +451,7 @@ export class QueueReviewRunner implements QueueRunService {
     let result: Awaited<ReturnType<ManualReviewService["review"]>>;
     try {
       result = await this.#reviews.review(referenceFor(job), {
-        ...(job.version === 1 ? { expectedHeadSha: job.pullRequest.headSha } : {}),
+        ...(job.trigger.kind === "automatic" ? { expectedHeadSha: job.trigger.headSha } : {}),
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
@@ -1015,14 +1038,17 @@ export class QueueReviewRunner implements QueueRunService {
 
 export function createDefaultQueueRunService(
   configuration: RevoirConfiguration,
+  loadPolicy: () => Promise<RevoirPolicy>,
   logger: QueueRunLogger = NOOP_LOGGER,
 ): QueueRunService {
   return new QueueReviewRunner(
     configuration,
     new CloudflareQueueClient(configuration.cloudflare, configuration.timeouts.reviewMs),
-    createDefaultManualReviewService(configuration),
-    new GitHubReviewFailureReporter(configuration.github),
+    createDefaultManualReviewService(configuration, loadPolicy),
+    new GitHubReviewFailureReporter(configuration.github, loadPolicy),
     new FileOperationalFailureStore(configuration.paths.stateDir),
     logger,
+    new FileReviewRequestCompletionStore(configuration.paths.stateDir),
+    loadPolicy,
   );
 }

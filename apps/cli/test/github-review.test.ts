@@ -135,10 +135,11 @@ describe("GitHub App review gateway", () => {
     const requestedUrls: string[] = [];
     let tokenRequestBody: unknown;
     const secondReference = parsePullRequestUrl("https://github.com/other/second/pull/18");
-    const github = {
-      ...configuration.github,
+    const github = configuration.github;
+    const policy = {
+      ...configuration.policy,
       installations: [
-        ...configuration.github.installations,
+        ...configuration.policy.installations,
         {
           id: 9,
           repositories: [
@@ -161,7 +162,7 @@ describe("GitHub App review gateway", () => {
       },
       "https://api.test",
       () => 1_000,
-    ).authenticate(github, secondReference, new AbortController().signal);
+    ).authenticate(github, policy, secondReference, new AbortController().signal);
 
     assert.equal(session.installationToken, "installation-9-secret");
     assert.equal(
@@ -229,6 +230,7 @@ describe("GitHub App review gateway", () => {
     );
     const session = await gateway.authenticate(
       configuration.github,
+      configuration.policy,
       reference,
       abortController.signal,
     );
@@ -328,7 +330,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     const check = await session.startReviewCheck(reference, headSha, new AbortController().signal);
     assert.equal(check.id, 80);
@@ -435,7 +442,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const first = "<!-- revoir:failure:v1 --> first failure";
     const second = "<!-- revoir:failure:v1 --> second failure";
 
@@ -505,7 +517,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const candidate: ReviewFindingV2 = {
       version: 2,
       fingerprint: "a".repeat(64),
@@ -578,7 +595,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnPendingReview(reference, new AbortController().signal);
     assert.deepEqual(deleted, [71]);
@@ -719,7 +741,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     assert.deepEqual(await session.getPriorReviewState(reference, new AbortController().signal), {
       activeFingerprints: [ownBodyFingerprint, ownThreadFingerprint],
@@ -813,7 +840,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const signal = new AbortController().signal;
     await session.getPriorReviewState(reference, signal);
 
@@ -926,7 +958,12 @@ describe("GitHub App review gateway", () => {
         fetchImplementation,
         "https://api.test",
         () => 1_000,
-      ).authenticate(configuration.github, reference, new AbortController().signal);
+      ).authenticate(
+        configuration.github,
+        configuration.policy,
+        reference,
+        new AbortController().signal,
+      );
       // eslint-disable-next-line no-await-in-loop
       const prior = await session.getPriorReviewState(reference, new AbortController().signal);
 
@@ -1099,7 +1136,12 @@ describe("GitHub App review gateway", () => {
           fetchImplementation,
           "https://api.test",
           () => 1_000,
-        ).authenticate(configuration.github, reference, new AbortController().signal);
+        ).authenticate(
+          configuration.github,
+          configuration.policy,
+          reference,
+          new AbortController().signal,
+        );
         const prior = await session.getPriorReviewState(reference, new AbortController().signal);
         const plan = planFindingReconciliation([scenario.candidate], prior);
 
@@ -1191,7 +1233,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const prior = await session.getPriorReviewState(reference, new AbortController().signal);
     const plan = planFindingReconciliation([retiredFinding, threadFinding], prior);
 
@@ -1323,7 +1370,12 @@ describe("GitHub App review gateway", () => {
             fetchImplementation,
             "https://api.test",
             () => 1_000,
-          ).authenticate(configuration.github, reference, new AbortController().signal);
+          ).authenticate(
+            configuration.github,
+            configuration.policy,
+            reference,
+            new AbortController().signal,
+          );
 
           await session.removeOwnCompletionReaction(reference, new AbortController().signal);
           const prior = await session.getPriorReviewState(reference, new AbortController().signal);
@@ -1376,7 +1428,12 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
       5,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnPendingReview(reference, new AbortController().signal);
     assert.deepEqual(events, ["DELETE 1", "GET PENDING", "DELETE 2"]);
@@ -1407,7 +1464,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: {
         commit_id: "2".repeat(40),
@@ -1464,7 +1526,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1518,7 +1585,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1569,7 +1641,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1623,7 +1700,12 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
       5,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1684,7 +1766,12 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
       5,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1724,7 +1811,12 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
       2,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1772,7 +1864,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     for (const status of statuses) {
       // Every unexpected status, including otherwise-successful 2xx responses, is a failure.
@@ -1813,7 +1910,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.deleteReaction(reference, 91, new AbortController().signal);
     await assert.rejects(
@@ -1845,7 +1947,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnReaction(reference, "eyes", new AbortController().signal);
   });
@@ -1894,7 +2001,12 @@ describe("GitHub App review gateway", () => {
           fetchImplementation,
           "https://api.test",
           () => 1_000,
-        ).authenticate(configuration.github, reference, new AbortController().signal);
+        ).authenticate(
+          configuration.github,
+          configuration.policy,
+          reference,
+          new AbortController().signal,
+        );
 
         await assert.rejects(() =>
           session.addReaction(reference, reaction, new AbortController().signal),
@@ -1945,7 +2057,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnCompletionReaction(reference, new AbortController().signal);
 
@@ -1992,7 +2109,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnReaction(reference, "eyes", new AbortController().signal);
 
@@ -2031,7 +2153,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await assert.rejects(() =>
       session.removeOwnCompletionReaction(reference, new AbortController().signal),
@@ -2067,7 +2194,7 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, abortController.signal);
+    ).authenticate(configuration.github, configuration.policy, reference, abortController.signal);
     const reconciliation = session.removeOwnReaction(reference, "eyes", abortController.signal);
     setTimeout(() => {
       abortController.abort(new Error("stop pagination"));
@@ -2099,6 +2226,7 @@ describe("GitHub App review gateway", () => {
     const cancellation = new Error("cancel HTTP");
     const authentication = gateway.authenticate(
       configuration.github,
+      configuration.policy,
       reference,
       abortController.signal,
     );
@@ -2153,7 +2281,7 @@ describe("GitHub App review gateway", () => {
     const cancellation = new Error("cancel response body");
     let settled = false;
     const authentication = gateway
-      .authenticate(configuration.github, reference, abortController.signal)
+      .authenticate(configuration.github, configuration.policy, reference, abortController.signal)
       .finally(() => {
         settled = true;
       });
@@ -2197,7 +2325,7 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, abortController.signal);
+    ).authenticate(configuration.github, configuration.policy, reference, abortController.signal);
     let settled = false;
     const reconciliation = session
       .removeOwnReaction(reference, "eyes", abortController.signal)
@@ -2241,6 +2369,7 @@ describe("GitHub App review gateway", () => {
       () =>
         gateway.authenticate(
           configuration.github,
+          configuration.policy,
           parsePullRequestUrl("https://github.com/owner/other/pull/17"),
           new AbortController().signal,
         ),
@@ -2257,7 +2386,13 @@ describe("GitHub App review gateway", () => {
       return json({ token: "server-secret" }, 403);
     });
     await assert.rejects(
-      () => gateway.authenticate(configuration.github, reference, new AbortController().signal),
+      () =>
+        gateway.authenticate(
+          configuration.github,
+          configuration.policy,
+          reference,
+          new AbortController().signal,
+        ),
       (error: unknown) => {
         assert.match(String(error), /HTTP 403/u);
         assert.doesNotMatch(String(error), /server-secret|PRIVATE KEY/u);

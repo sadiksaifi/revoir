@@ -40,6 +40,9 @@ describe("launchd service definition", () => {
       paths: {
         configDir: "/Users/test & tools/.config/revoir",
         configFile: "/Users/test & tools/.config/revoir/config.json",
+        policyFile: "/Users/test & tools/.config/revoir/policy.json",
+        setupCheckpointFile: "/Users/test & tools/.config/revoir/setup-checkpoint.json",
+        commandLockFile: "/Users/test & tools/.config/revoir/command.lock",
         cacheDir: "/Users/test & tools/.cache/revoir",
         stateDir: "/Users/test & tools/.local/state/revoir",
         dataDir: "/Users/test & tools/.local/share/revoir",

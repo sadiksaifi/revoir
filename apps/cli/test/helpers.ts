@@ -1,11 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
 
 import type { ApplicationPaths } from "../src/config/paths.js";
-import {
-  configuredRepositories,
-  createConfiguration,
-  type RevoirConfiguration,
-} from "../src/config/schema.js";
+import { configuredRepositories, withRepository, type RevoirPolicy } from "../src/config/policy.js";
+import { createConfiguration, type RevoirConfiguration } from "../src/config/schema.js";
 import type { DiagnosticGateway } from "../src/diagnostics.js";
 
 export const TEST_PRIVATE_KEY = generateKeyPairSync("rsa", {
@@ -20,22 +17,21 @@ export function createTestConfiguration(
     privateKey?: string;
     apiToken?: string;
   } = {},
-): RevoirConfiguration {
-  return createConfiguration({
+): RevoirConfiguration & { policy: RevoirPolicy } {
+  const configuration = createConfiguration({
     github: {
-      userId: 42,
       appId: 7,
+      appSlug: "test-app",
       privateKey: overrides.privateKey ?? TEST_PRIVATE_KEY,
-      installations: [
-        {
-          id: 8,
-          repositories: [{ id: 99, owner: "owner", name: "repository" }],
-        },
-      ],
+      webhookSecret: "test-webhook-secret",
     },
     cloudflare: {
       accountId: "account",
       queueId: "queue",
+      queueName: "revoir-review-jobs",
+      kvNamespaceId: "kv-namespace",
+      workerName: "revoir-relay",
+      relayUrl: "https://revoir-relay.example.workers.dev/webhook",
       apiToken: overrides.apiToken ?? "cloudflare-secret-token",
     },
     paths: {
@@ -43,6 +39,13 @@ export function createTestConfiguration(
       stateDir: paths.stateDir,
       dataDir: paths.dataDir,
     },
+  });
+  return Object.assign(configuration, {
+    policy: withRepository({ version: 1, revision: 0, userId: 42, installations: [] }, 8, {
+      id: 99,
+      owner: "owner",
+      name: "repository",
+    }),
   });
 }
 
@@ -57,16 +60,19 @@ export function passingGateway(): DiagnosticGateway {
     async checkPi(model, reasoning) {
       return `${model} (${reasoning}), OpenAI Codex OAuth`;
     },
-    async checkGitHub(configuration) {
+    async checkGitHub(_configuration, policy) {
       return {
-        app: `test-app, author test-user (${configuration.userId})`,
-        repositories: configuredRepositories(configuration)
+        app: `test-app, author test-user (${policy.userId})`,
+        repositories: configuredRepositories(policy)
           .map((repository) => `${repository.owner}/${repository.name}`)
           .join(", "),
       };
     },
     async checkCloudflare() {
       return "queue test-queue";
+    },
+    async checkPolicy() {
+      return "policy revision 1";
     },
   };
 }

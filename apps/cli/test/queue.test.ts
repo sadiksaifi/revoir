@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { parseReviewJob } from "@revoir/contracts";
+import { parseReviewQueueJob } from "@revoir/contracts";
 
 import { CloudflareQueueClient } from "../src/queue/client.js";
 
@@ -11,8 +11,10 @@ function reviewJob() {
     deliveryId: "2f5f7475-33ee-4f91-9b68-0f8af72f6640",
     installationId: 8,
     repository: { id: 99, owner: "owner", name: "repository" },
-    pullRequest: {
-      number: 17,
+    pullRequest: { number: 17 },
+    trigger: {
+      kind: "automatic",
+      action: "synchronize",
       authorId: 42,
       senderId: 42,
       baseRepositoryId: 99,
@@ -20,7 +22,6 @@ function reviewJob() {
       baseSha: "1".repeat(40),
       headSha: "2".repeat(40),
     },
-    action: "synchronize",
     enqueuedAt: "2026-07-29T00:00:00.000Z",
   };
 }
@@ -84,7 +85,7 @@ describe("Cloudflare Queue pull client", () => {
     assert.ok(delivery !== undefined);
     assert.equal(delivery.leaseId, "lease-1");
     assert.equal(delivery.attempt, 1);
-    assert.deepEqual(parseReviewJob(delivery.body), reviewJob());
+    assert.deepEqual(parseReviewQueueJob(delivery.body), reviewJob());
     await client.acknowledge(delivery.leaseId);
 
     assert.deepEqual(

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { withRepository } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
 import type { QueueDelivery } from "../src/queue/client.js";
 import type {
@@ -20,25 +21,20 @@ import { WorkspacePreparationError } from "../src/review/workspace.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
 
 function configuration(timeouts?: { reviewMs?: number; shellCommandMs?: number }) {
-  return createConfiguration({
+  const value = createConfiguration({
     github: {
-      userId: 42,
       appId: 7,
+      appSlug: "revoir-test",
       privateKey: TEST_PRIVATE_KEY,
-      installations: [
-        {
-          id: 8,
-          repositories: [{ id: 99, owner: "owner", name: "repository" }],
-        },
-        {
-          id: 9,
-          repositories: [{ id: 100, owner: "other", name: "second" }],
-        },
-      ],
+      webhookSecret: "test-webhook-secret",
     },
     cloudflare: {
       accountId: "account-id",
       queueId: "queue-id",
+      queueName: "revoir-review-jobs",
+      kvNamespaceId: "kv-namespace",
+      workerName: "revoir-relay",
+      relayUrl: "https://revoir-relay.example.workers.dev/webhook",
       apiToken: "queue-token",
     },
     paths: {
@@ -48,6 +44,14 @@ function configuration(timeouts?: { reviewMs?: number; shellCommandMs?: number }
     },
     ...(timeouts === undefined ? {} : { timeouts }),
   });
+  const first = withRepository({ version: 1, revision: 0, userId: 42, installations: [] }, 8, {
+    id: 99,
+    owner: "owner",
+    name: "repository",
+  });
+  return Object.assign(value, {
+    policy: withRepository(first, 9, { id: 100, owner: "other", name: "second" }),
+  });
 }
 
 function reviewJob(overrides: Record<string, unknown> = {}) {
@@ -56,8 +60,10 @@ function reviewJob(overrides: Record<string, unknown> = {}) {
     deliveryId: "2f5f7475-33ee-4f91-9b68-0f8af72f6640",
     installationId: 8,
     repository: { id: 99, owner: "owner", name: "repository" },
-    pullRequest: {
-      number: 17,
+    pullRequest: { number: 17 },
+    trigger: {
+      kind: "automatic",
+      action: "synchronize",
       authorId: 42,
       senderId: 42,
       baseRepositoryId: 99,
@@ -65,7 +71,6 @@ function reviewJob(overrides: Record<string, unknown> = {}) {
       baseSha: "1".repeat(40),
       headSha: "2".repeat(40),
     },
-    action: "synchronize",
     enqueuedAt: "2026-07-29T00:00:00.000Z",
     ...overrides,
   };
@@ -73,13 +78,14 @@ function reviewJob(overrides: Record<string, unknown> = {}) {
 
 function requestedReviewJob(overrides: Record<string, unknown> = {}) {
   return {
-    version: 2,
+    version: 1,
     deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
     installationId: 8,
     repository: { id: 99, owner: "owner", name: "repository" },
     pullRequest: { number: 17 },
-    request: {
-      kind: "issue_comment",
+    trigger: {
+      kind: "requested",
+      source: "issue_comment",
       commentId: 123456789,
       senderId: 42,
     },
@@ -157,8 +163,8 @@ describe("queue review runner", () => {
         "unauthorized",
         requestedReviewJob({
           deliveryId: "5c8efc84-c42f-47e1-91c2-bd64a36ec817",
-          request: {
-            ...requestedReviewJob().request,
+          trigger: {
+            ...requestedReviewJob().trigger,
             senderId: 43,
           },
         }),
@@ -651,8 +657,8 @@ describe("queue review runner", () => {
           deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
           installationId: 9,
           repository: { id: 100, owner: "other", name: "second" },
-          pullRequest: {
-            ...reviewJob().pullRequest,
+          trigger: {
+            ...reviewJob().trigger,
             baseRepositoryId: 100,
             headRepositoryId: 100,
           },

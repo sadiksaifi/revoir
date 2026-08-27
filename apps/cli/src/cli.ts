@@ -1,9 +1,23 @@
+import { lstat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 
+import { withCommandLock } from "./config/command-lock.js";
 import { resolveApplicationPaths, type PathEnvironment } from "./config/paths.js";
+import { loadPolicy, writePolicy } from "./config/policy.js";
+import {
+  DEFAULT_MODEL,
+  DEFAULT_REASONING,
+  DEFAULT_REVIEW_TIMEOUT_MS,
+  DEFAULT_SHELL_COMMAND_TIMEOUT_MS,
+} from "./config/schema.js";
+import {
+  loadSetupCheckpoint,
+  removeSetupCheckpoint,
+  writeSetupCheckpoint,
+} from "./config/setup-checkpoint.js";
 import { loadConfiguration, writeConfiguration } from "./config/store.js";
 import {
   createDefaultDiagnosticGateway,
@@ -14,6 +28,13 @@ import {
 } from "./diagnostics.js";
 import { createDefaultQueueRunService, type QueueRunService } from "./queue/runner.js";
 import { SecretRedactor } from "./redaction.js";
+import { GitHubRepositoryGateway, LocalAndWranglerPolicyStore } from "./repository-gateways.js";
+import {
+  FilePendingRepositoryStore,
+  inferCurrentRepository,
+  parseRepositoryReference,
+  RepositoryManager,
+} from "./repository.js";
 import { FindingContractError } from "./review/findings.js";
 import {
   createDefaultManualReviewService,
@@ -35,14 +56,18 @@ import {
   type ServiceManager,
   type ServiceStatus,
 } from "./service/manager.js";
-import { collectSetupConfiguration, parseSetupOptions, type PromptFunction } from "./setup.js";
+import { EndToEndSetup, type SetupResult } from "./setup/orchestrator.js";
+import { ChildProcessSetupRunner, DefaultSetupPlatform } from "./setup/platform.js";
 
 export const CLI_VERSION = "0.0.0";
 
 const HELP = `Revoir ${CLI_VERSION}
 
 Usage:
-  revoir setup [options]
+  revoir setup
+  revoir repository add [OWNER/REPOSITORY]
+  revoir repository remove [OWNER/REPOSITORY] [--keep-github-access]
+  revoir repository list
   revoir diagnose [--config <path>] [--json] [--verbose]
   revoir review <GitHub PR URL> [--config <path>] [--verbose]
   revoir run [--config <path>] [--verbose]
@@ -56,7 +81,8 @@ Usage:
   revoir --version
 
 Commands:
-  setup       Create the protected local configuration and validate all installations.
+  setup       Provision and reconcile the complete personal Revoir installation.
+  repository  Explicitly authorize, revoke, or inspect repositories across both policy gates.
   diagnose    Non-interactively validate the configured installations.
   review      Review one eligible pull request and publish validated findings or a clean result.
   run         Pull and settle eligible webhook review jobs one at a time.
@@ -66,22 +92,6 @@ Commands:
   status      Inspect installation, launchd, process, and configuration health.
   logs        Print structured redacted service logs from XDG state.
   uninstall   Stop the service and remove only its generated plist.
-
-Setup options:
-  --non-interactive
-  --model <openai-codex/model>
-  --reasoning <minimal|low|medium|high|xhigh>
-  --github-user-id <id>
-  --github-app-id <id>
-  --github-installation-id <id>      Repeat for each GitHub App installation.
-  --github-private-key-file <path>
-  --repository <installation-id:id:owner/name>
-                                      Repeat for each allowed repository.
-  --cloudflare-account-id <id>
-  --cloudflare-queue-id <id>
-  --cloudflare-api-token-file <path>
-  --review-timeout-ms <milliseconds>
-  --shell-command-timeout-ms <milliseconds>
 
 Common options:
   --config <path>  Override the configuration file path.
@@ -106,7 +116,8 @@ export interface CliDependencies {
   serviceManager?: ServiceManager;
   serviceLogger?: ServiceLogger;
   shutdownSignal?: AbortSignal;
-  prompt?: PromptFunction;
+  setupService?: { run(): Promise<SetupResult> };
+  repositoryManager?: Pick<RepositoryManager, "add" | "remove" | "list">;
 }
 
 interface CommonOptions {
@@ -183,15 +194,56 @@ function renderDiagnostics(
   return `${checks}\n${diagnosticsPassed(results) ? "Diagnostics passed" : "Diagnostics failed"} (${passed}/${results.length}).\n`;
 }
 
-function createPrompt(io: CliIo): { prompt: PromptFunction; close(): void } {
-  const readlineInterface = createInterface({
-    input: io.stdin,
-    output: io.stdout,
-    terminal: Boolean((io.stdout as Writable & { isTTY?: boolean }).isTTY),
-  });
+function createHiddenPrompt(io: CliIo): (message: string) => Promise<string> {
+  return async (message) => {
+    const input = io.stdin as Readable & {
+      isTTY?: boolean;
+      setRawMode?(enabled: boolean): void;
+    };
+    if (input.isTTY !== true || input.setRawMode === undefined) {
+      const readlineInterface = createInterface({ input: io.stdin, output: io.stdout });
+      try {
+        return await readlineInterface.question(message);
+      } finally {
+        readlineInterface.close();
+      }
+    }
+    write(io.stdout, message);
+    input.setRawMode(true);
+    input.resume();
+    return new Promise<string>((resolvePrompt, reject) => {
+      let value = "";
+      const onData = (chunk: Buffer | string): void => {
+        for (const character of chunk.toString()) {
+          if (character === "\r" || character === "\n") {
+            cleanup();
+            write(io.stdout, "\n");
+            resolvePrompt(value);
+          } else if (character === "\u0003") {
+            cleanup();
+            reject(new Error("Credential entry cancelled."));
+          } else if (character === "\u007f") {
+            value = value.slice(0, -1);
+          } else {
+            value += character;
+          }
+        }
+      };
+      const cleanup = (): void => {
+        input.off("data", onData);
+        input.setRawMode?.(false);
+        input.pause();
+      };
+      input.on("data", onData);
+    });
+  };
+}
+
+function createBrowserOpener(processRunner: ChildProcessSetupRunner) {
   return {
-    prompt: (message) => readlineInterface.question(message),
-    close: () => readlineInterface.close(),
+    async open(url: string): Promise<void> {
+      await processRunner.run("/usr/bin/open", [url]);
+    },
   };
 }
 
@@ -225,6 +277,7 @@ export async function runCli(
   }
   if (
     (arguments_[0] === "setup" ||
+      arguments_[0] === "repository" ||
       arguments_[0] === "diagnose" ||
       arguments_[0] === "review" ||
       arguments_[0] === "run" ||
@@ -317,7 +370,7 @@ export async function runCli(
       configuration === undefined
         ? paths
         : {
-            configDir: paths.configDir,
+            ...paths,
             configFile,
             cacheDir: configuration.paths.cacheDir,
             stateDir: configuration.paths.stateDir,
@@ -376,31 +429,215 @@ export async function runCli(
   }
 
   if (command === "setup") {
-    let promptHandle: ReturnType<typeof createPrompt> | undefined;
     try {
-      const setupOptions = parseSetupOptions(common.arguments);
-      if (!setupOptions.nonInteractive && dependencies.prompt === undefined) {
-        promptHandle = createPrompt(io);
+      if (common.arguments.length > 0) {
+        throw new Error(`Unknown setup option "${common.arguments[0]}". Setup is interactive.`);
       }
-      const configuration = await collectSetupConfiguration(
-        setupOptions,
-        paths,
-        dependencies.prompt ?? promptHandle?.prompt,
+      const result = await withCommandLock(paths.commandLockFile, async () => {
+        if (dependencies.setupService !== undefined) {
+          return dependencies.setupService.run();
+        }
+        const processRunner = new ChildProcessSetupRunner();
+        const browser = createBrowserOpener(processRunner);
+        const platform = new DefaultSetupPlatform({
+          browser,
+          process: processRunner,
+          secretPrompt: createHiddenPrompt(io),
+          async installService(configuration) {
+            const manager =
+              dependencies.serviceManager ??
+              createDefaultServiceManager({
+                configFile,
+                homeDir: io.userHome ?? homedir(),
+                paths: {
+                  ...paths,
+                  cacheDir: configuration.paths.cacheDir,
+                  stateDir: configuration.paths.stateDir,
+                  dataDir: configuration.paths.dataDir,
+                },
+              });
+            await manager.install();
+          },
+          async diagnostics(configuration, policy) {
+            const repositoryManager =
+              dependencies.repositoryManager ??
+              new RepositoryManager({
+                github: new GitHubRepositoryGateway({
+                  browser,
+                  configuration: configuration.github,
+                  process: processRunner,
+                }),
+                policies: new LocalAndWranglerPolicyStore({
+                  cloudflare: configuration.cloudflare,
+                  policyFile: paths.policyFile,
+                  process: processRunner,
+                }),
+                pending: new FilePendingRepositoryStore(configuration.paths.stateDir),
+              });
+            const results = await runDiagnostics(
+              configuration,
+              policy,
+              dependencies.gateway ?? createDefaultDiagnosticGateway(),
+              await repositoryManager.list({ authenticate: false }),
+            );
+            if (!diagnosticsPassed(results)) {
+              throw new Error("End-to-end diagnostics did not pass.");
+            }
+          },
+        });
+        return new EndToEndSetup({
+          platform,
+          state: {
+            load: () => loadSetupCheckpoint(paths.setupCheckpointFile),
+            async loadFinal() {
+              const existing = await Promise.all([
+                lstat(configFile).then(
+                  () => true,
+                  (error: unknown) => {
+                    if (
+                      error instanceof Error &&
+                      "code" in error &&
+                      (error as NodeJS.ErrnoException).code === "ENOENT"
+                    ) {
+                      return false;
+                    }
+                    throw error;
+                  },
+                ),
+                lstat(paths.policyFile).then(
+                  () => true,
+                  (error: unknown) => {
+                    if (
+                      error instanceof Error &&
+                      "code" in error &&
+                      (error as NodeJS.ErrnoException).code === "ENOENT"
+                    ) {
+                      return false;
+                    }
+                    throw error;
+                  },
+                ),
+              ]);
+              if (!existing[0] && !existing[1]) return undefined;
+              return {
+                configuration: await loadConfiguration(configFile),
+                policy: await loadPolicy(paths.policyFile),
+              };
+            },
+            write: (checkpoint) => writeSetupCheckpoint(paths.setupCheckpointFile, checkpoint),
+            remove: () => removeSetupCheckpoint(paths.setupCheckpointFile),
+            async writeFinal(configuration, policy) {
+              await Promise.all([
+                writeConfiguration(configFile, configuration),
+                writePolicy(paths.policyFile, policy),
+              ]);
+            },
+          },
+          defaults: {
+            model: { id: DEFAULT_MODEL, reasoning: DEFAULT_REASONING },
+            timeouts: {
+              reviewMs: DEFAULT_REVIEW_TIMEOUT_MS,
+              shellCommandMs: DEFAULT_SHELL_COMMAND_TIMEOUT_MS,
+            },
+            paths: {
+              cacheDir: paths.cacheDir,
+              stateDir: paths.stateDir,
+              dataDir: paths.dataDir,
+            },
+          },
+        }).run();
+      });
+      write(
+        io.stdout,
+        `${result.resumed ? "Setup resumed and completed" : "Setup completed"}. Revoir is ready with ${result.policy.installations.length === 0 ? "an empty repository policy" : "its repository policy"}.\n`,
       );
-      const redactor = new SecretRedactor(configuration);
-      await writeConfiguration(configFile, configuration);
-      write(io.stdout, `Configuration written to ${configFile}.\n`);
-      const results = await runDiagnostics(
-        configuration,
-        dependencies.gateway ?? createDefaultDiagnosticGateway(),
-      );
-      write(io.stdout, renderDiagnostics(results, common.json, common.verbose, redactor));
-      return diagnosticsPassed(results) ? 0 : 1;
+      return 0;
     } catch (error) {
       write(io.stderr, `Error: ${new SecretRedactor().error(error, common.verbose)}\n`);
       return 2;
-    } finally {
-      promptHandle?.close();
+    }
+  }
+
+  if (command === "repository") {
+    if (common.json) {
+      write(io.stderr, "Error: --json is not supported by the repository command.\n");
+      return 2;
+    }
+    const operation = common.arguments[0];
+    const operationArguments = common.arguments.slice(1);
+    if (!(["add", "remove", "list"] as const).includes(operation as "add" | "remove" | "list")) {
+      write(io.stderr, "Error: repository requires add, remove, or list.\n");
+      return 2;
+    }
+    try {
+      return await withCommandLock(paths.commandLockFile, async () => {
+        const configuration = await loadConfiguration(configFile);
+        const manager =
+          dependencies.repositoryManager ??
+          new RepositoryManager({
+            github: new GitHubRepositoryGateway({
+              browser: createBrowserOpener(new ChildProcessSetupRunner()),
+              configuration: configuration.github,
+            }),
+            policies: new LocalAndWranglerPolicyStore({
+              cloudflare: configuration.cloudflare,
+              policyFile: paths.policyFile,
+            }),
+            pending: new FilePendingRepositoryStore(configuration.paths.stateDir),
+          });
+        if (operation === "list") {
+          if (operationArguments.length > 0) {
+            throw new Error("repository list does not accept arguments.");
+          }
+          const entries = await manager.list();
+          if (entries.length === 0) {
+            write(io.stdout, "No repositories are authorized.\n");
+          } else {
+            for (const entry of entries) {
+              write(
+                io.stdout,
+                `${entry.repository.owner}/${entry.repository.name}\t${entry.status}\tlocal=${String(entry.local)} cloud=${String(entry.cloud)} github=${String(entry.github)}\n`,
+              );
+            }
+          }
+          return 0;
+        }
+        const keepGitHubAccess = operationArguments.includes("--keep-github-access");
+        const positional = operationArguments.filter(
+          (argument) => argument !== "--keep-github-access",
+        );
+        if (operation === "add" && keepGitHubAccess) {
+          throw new Error("--keep-github-access is supported only by repository remove.");
+        }
+        if (positional.length > 1) {
+          throw new Error(`repository ${operation} accepts at most one OWNER/REPOSITORY.`);
+        }
+        const reference =
+          positional[0] === undefined
+            ? await inferCurrentRepository(io.cwd)
+            : parseRepositoryReference(positional[0]);
+        if (operation === "add") {
+          const result = await manager.add(reference);
+          write(
+            io.stdout,
+            result.status === "authorized"
+              ? `${result.repository.owner}/${result.repository.name} is authorized.\n`
+              : `${result.repository.owner}/${result.repository.name} is pending GitHub approval; rerun the same command to resume.\n`,
+          );
+          return 0;
+        }
+        const result = await manager.remove(reference, { keepGitHubAccess });
+        write(
+          io.stdout,
+          result.status === "removed"
+            ? `${result.repository.owner}/${result.repository.name} is no longer authorized.\n`
+            : `${result.repository.owner}/${result.repository.name} is revoked in Revoir; GitHub App access removal is still pending.\n`,
+        );
+        return 0;
+      });
+    } catch (error) {
+      write(io.stderr, `Error: ${new SecretRedactor().error(error, common.verbose)}\n`);
+      return 1;
     }
   }
 
@@ -418,9 +655,29 @@ export async function runCli(
     }
     const redactor = new SecretRedactor(configuration);
     try {
+      const policy = await loadPolicy(paths.policyFile);
+      const authorizationEntries =
+        dependencies.repositoryManager === undefined && dependencies.gateway !== undefined
+          ? undefined
+          : await (
+              dependencies.repositoryManager ??
+              new RepositoryManager({
+                github: new GitHubRepositoryGateway({
+                  browser: createBrowserOpener(new ChildProcessSetupRunner()),
+                  configuration: configuration.github,
+                }),
+                policies: new LocalAndWranglerPolicyStore({
+                  cloudflare: configuration.cloudflare,
+                  policyFile: paths.policyFile,
+                }),
+                pending: new FilePendingRepositoryStore(configuration.paths.stateDir),
+              })
+            ).list({ authenticate: false });
       const results = await runDiagnostics(
         configuration,
+        policy,
         dependencies.gateway ?? createDefaultDiagnosticGateway(),
+        authorizationEntries,
       );
       write(io.stdout, renderDiagnostics(results, common.json, common.verbose, redactor));
       return diagnosticsPassed(results) ? 0 : 1;
@@ -458,7 +715,8 @@ export async function runCli(
     const redactor = new SecretRedactor(configuration);
     try {
       const result = await (
-        dependencies.reviewService ?? createDefaultManualReviewService(configuration)
+        dependencies.reviewService ??
+        createDefaultManualReviewService(configuration, () => loadPolicy(paths.policyFile))
       ).review(reference);
       if (result.status === "clean") {
         write(io.stdout, `Clean review completed for ${reference.url} at ${result.reviewedSha}.\n`);
@@ -541,9 +799,10 @@ export async function runCli(
         model: configuration.model.id,
         reasoning: configuration.model.reasoning,
       });
-      await (dependencies.runService ?? createDefaultQueueRunService(configuration, logger)).run(
-        dependencies.shutdownSignal,
-      );
+      await (
+        dependencies.runService ??
+        createDefaultQueueRunService(configuration, () => loadPolicy(paths.policyFile), logger)
+      ).run(dependencies.shutdownSignal);
       await logger.write("daemon_stopped", {
         pid: process.pid,
         reason: dependencies.shutdownSignal?.aborted === true ? "shutdown" : "completed",

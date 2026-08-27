@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   createDefaultDiagnosticGateway,
+  repositoryAuthorizationDiagnostic,
   diagnosticsPassed,
   runDiagnostics,
   type DiagnosticGateway,
@@ -24,13 +25,44 @@ describe("diagnostic contracts", () => {
   });
 
   it("reports every required installation check", async () => {
-    const results = await runDiagnostics(configuration, passingGateway());
+    const results = await runDiagnostics(configuration, configuration.policy, passingGateway());
 
     assert.equal(diagnosticsPassed(results), true);
     assert.deepEqual(
       results.map((result) => result.id),
-      ["runtime", "git", "pi-auth", "github", "repositories", "cloudflare"],
+      ["runtime", "git", "pi-auth", "github", "repositories", "cloudflare", "policy"],
     );
+  });
+
+  it("distinguishes every repository authorization state", () => {
+    const entries = ["authorized", "pending", "drifted", "inaccessible", "github-access-only"].map(
+      (status, index) => ({
+        repository: { id: index + 1, owner: "owner", name: `repository-${status}` },
+        installationId: 8,
+        status: status as
+          | "authorized"
+          | "pending"
+          | "drifted"
+          | "inaccessible"
+          | "github-access-only",
+        local: status === "authorized",
+        cloud: status === "authorized",
+        github: status === "authorized" || status === "github-access-only",
+      }),
+    );
+
+    const result = repositoryAuthorizationDiagnostic(entries);
+
+    assert.equal(result.status, "failed");
+    for (const status of [
+      "authorized",
+      "pending",
+      "drifted",
+      "inaccessible",
+      "github-access-only",
+    ]) {
+      assert.match(result.detail, new RegExp(`${status}:`, "u"));
+    }
   });
 
   it("captures missing prerequisites without stopping other checks", async () => {
@@ -50,7 +82,7 @@ describe("diagnostic contracts", () => {
       },
     };
 
-    const results = await runDiagnostics(configuration, gateway);
+    const results = await runDiagnostics(configuration, configuration.policy, gateway);
 
     assert.equal(diagnosticsPassed(results), false);
     assert.equal(results.filter((result) => result.status === "failed").length, 5);
@@ -146,7 +178,7 @@ describe("diagnostic contracts", () => {
       };
     });
 
-    assert.deepEqual(await gateway.checkGitHub(configuration.github), {
+    assert.deepEqual(await gateway.checkGitHub(configuration.github, configuration.policy), {
       app: "revoir-test, author test-user (42)",
       repositories: "owner/repository (installation 8)",
     });
@@ -169,10 +201,11 @@ describe("diagnostic contracts", () => {
   it("validates every installation with its own token and repository allowlist", async () => {
     const repositoryAuthorizations = new Map<string, string>();
     const requestedInstallations: string[] = [];
-    const github = {
-      ...configuration.github,
+    const github = configuration.github;
+    const policy = {
+      ...configuration.policy,
       installations: [
-        ...configuration.github.installations,
+        ...configuration.policy.installations,
         {
           id: 9,
           repositories: [{ id: 100, owner: "other", name: "second" }],
@@ -219,7 +252,7 @@ describe("diagnostic contracts", () => {
       };
     });
 
-    assert.deepEqual(await gateway.checkGitHub(github), {
+    assert.deepEqual(await gateway.checkGitHub(github, policy), {
       app: "revoir-test, author test-user (42)",
       repositories: "owner/repository (installation 8), other/second (installation 9)",
     });
@@ -257,7 +290,7 @@ describe("diagnostic contracts", () => {
     });
 
     await assert.rejects(
-      gateway.checkGitHub(configuration.github),
+      gateway.checkGitHub(configuration.github, configuration.policy),
       /missing issue_comment.*Issue comment events/u,
     );
   });
@@ -294,7 +327,7 @@ describe("diagnostic contracts", () => {
         });
 
         await assert.rejects(
-          gateway.checkGitHub(configuration.github),
+          gateway.checkGitHub(configuration.github, configuration.policy),
           (error: unknown) =>
             error instanceof Error &&
             error.message.includes(missingPermission) &&
@@ -334,7 +367,7 @@ describe("diagnostic contracts", () => {
     });
 
     await assert.rejects(
-      gateway.checkGitHub(configuration.github),
+      gateway.checkGitHub(configuration.github, configuration.policy),
       /checks must be "write" \(found "read"\)/u,
     );
   });
@@ -368,7 +401,7 @@ describe("diagnostic contracts", () => {
     });
 
     await assert.rejects(
-      gateway.checkGitHub(configuration.github),
+      gateway.checkGitHub(configuration.github, configuration.policy),
       /issues must be "write" \(found "read"\)/u,
     );
   });
@@ -402,7 +435,7 @@ describe("diagnostic contracts", () => {
     });
 
     await assert.rejects(
-      gateway.checkGitHub(configuration.github),
+      gateway.checkGitHub(configuration.github, configuration.policy),
       /does not match configured repository/u,
     );
   });

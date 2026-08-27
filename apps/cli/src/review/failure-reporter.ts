@@ -1,3 +1,4 @@
+import type { RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import { classifyReviewFailure, renderReviewFailureComment } from "./failure.js";
 import { GitHubAppReviewGateway, type ReviewReaction } from "./github.js";
@@ -25,6 +26,7 @@ export interface ReviewFailureSession {
 export interface ReviewFailureGateway {
   authenticate(
     configuration: RevoirConfiguration["github"],
+    policy: RevoirPolicy,
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<ReviewFailureSession>;
@@ -51,12 +53,15 @@ function failures(results: readonly PromiseSettledResult<unknown>[]): Error[] {
 export class GitHubReviewFailureReporter implements ReviewFailureReporter {
   readonly #configuration: RevoirConfiguration["github"];
   readonly #gateway: ReviewFailureGateway;
+  readonly #loadPolicy: () => Promise<RevoirPolicy>;
 
   constructor(
     configuration: RevoirConfiguration["github"],
+    loadPolicy: () => Promise<RevoirPolicy>,
     gateway: ReviewFailureGateway = new GitHubAppReviewGateway(),
   ) {
     this.#configuration = configuration;
+    this.#loadPolicy = loadPolicy;
     this.#gateway = gateway;
   }
 
@@ -67,7 +72,12 @@ export class GitHubReviewFailureReporter implements ReviewFailureReporter {
     totalAttempts: number,
     signal: AbortSignal,
   ): Promise<void> {
-    const session = await this.#gateway.authenticate(this.#configuration, reference, signal);
+    const session = await this.#gateway.authenticate(
+      this.#configuration,
+      await this.#loadPolicy(),
+      reference,
+      signal,
+    );
     const cleanupFailures = failures(
       await Promise.allSettled([
         session.removeOwnReaction(reference, "eyes", signal),

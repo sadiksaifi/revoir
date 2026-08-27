@@ -82,16 +82,17 @@ describe("review failure classification", () => {
     };
     const reporter = new GitHubReviewFailureReporter(
       {
-        userId: 42,
         appId: 7,
+        appSlug: "revoir-test",
         privateKey: "private",
-        installations: [
-          {
-            id: 8,
-            repositories: [{ id: 99, owner: "owner", name: "repository" }],
-          },
-        ],
+        webhookSecret: "webhook-secret",
       },
+      async () => ({
+        version: 1,
+        revision: 1,
+        userId: 42,
+        installations: [{ id: 8, repositories: [{ id: 99, owner: "owner", name: "repository" }] }],
+      }),
       gateway,
     );
 

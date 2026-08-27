@@ -1,8 +1,8 @@
 import {
   configuredRepositories,
   type RepositoryIdentity,
-  type RevoirConfiguration,
-} from "../config/schema.js";
+  type RevoirPolicy,
+} from "../config/policy.js";
 
 const GITHUB_OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
 const GITHUB_REPOSITORY = /^[A-Za-z0-9._-]+$/u;
@@ -115,9 +115,9 @@ function configuredRepository(
 export function assertPullRequestEligible(
   reference: PullRequestReference,
   snapshot: PullRequestSnapshot,
-  configuration: RevoirConfiguration["github"],
+  policy: RevoirPolicy,
 ): RepositoryIdentity {
-  const repository = configuredRepository(reference, configuredRepositories(configuration));
+  const repository = configuredRepository(reference, configuredRepositories(policy));
   if (repository === undefined) {
     throw new PullRequestEligibilityError(
       `${reference.owner}/${reference.repository} is not in the configured repository allowlist.`,
@@ -139,7 +139,7 @@ export function assertPullRequestEligible(
       "The pull request repository name does not match the configured allowlist.",
     );
   }
-  if (snapshot.authorId !== configuration.userId) {
+  if (snapshot.authorId !== policy.userId) {
     throw new PullRequestEligibilityError(
       "The pull request author does not match the configured immutable GitHub user.",
     );

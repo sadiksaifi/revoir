@@ -75,6 +75,9 @@ async function createFixture(): Promise<{
       paths: {
         configDir: join(homeDir, ".config", "revoir"),
         configFile,
+        policyFile: join(homeDir, ".config", "revoir", "policy.json"),
+        setupCheckpointFile: join(homeDir, ".config", "revoir", "setup-checkpoint.json"),
+        commandLockFile: join(homeDir, ".config", "revoir", "command.lock"),
         cacheDir: join(homeDir, ".cache", "revoir"),
         stateDir: join(homeDir, ".local", "state", "revoir"),
         dataDir: join(homeDir, ".local", "share", "revoir"),

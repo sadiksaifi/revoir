@@ -1,21 +1,22 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import { Readable, Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
-import { runCli } from "./cli.js";
 import { resolveApplicationPaths, type PathEnvironment } from "./config/paths.js";
-import { loadConfiguration } from "./config/store.js";
+import { loadPolicy, withRepository, writePolicy } from "./config/policy.js";
+import { createConfiguration } from "./config/schema.js";
+import { loadConfiguration, writeConfiguration } from "./config/store.js";
 import {
   createDefaultDiagnosticGateway,
   diagnosticsPassed,
   runDiagnostics,
 } from "./diagnostics.js";
+import { EMBEDDED_RELAY_SHA256, EMBEDDED_RELAY_SOURCE } from "./generated/relay-artifact.js";
 import {
   createDefaultQueueRunService,
   QueueReviewRunner,
@@ -351,17 +352,43 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
   if (homeDir === undefined) {
     throw new Error("Packaged setup smoke requires HOME.");
   }
-  const credentials = join(input.cwd, "credentials");
-  const privateKeyFile = join(credentials, "github.pem");
-  const apiTokenFile = join(credentials, "cloudflare-token");
-  await mkdir(credentials, { mode: 0o700 });
   const { privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
     publicKeyEncoding: { type: "spki", format: "pem" },
   });
-  await writeFile(privateKeyFile, privateKey, { mode: 0o600 });
-  await writeFile(apiTokenFile, "package-smoke-cloudflare-token\n", { mode: 0o600 });
+  const paths = resolveApplicationPaths(input.environment, homeDir);
+  const configuration = createConfiguration({
+    github: {
+      appId: 2,
+      appSlug: "package-smoke",
+      privateKey,
+      webhookSecret: "package-smoke-webhook-secret",
+    },
+    cloudflare: {
+      accountId: "package-smoke-account",
+      queueId: "package-smoke-queue-id",
+      queueName: "revoir-review-jobs",
+      kvNamespaceId: "package-smoke-kv-id",
+      workerName: "revoir-relay",
+      apiToken: "package-smoke-cloudflare-token",
+      relayUrl: "https://revoir-relay.example.workers.dev/webhook",
+    },
+    paths: {
+      cacheDir: paths.cacheDir,
+      stateDir: paths.stateDir,
+      dataDir: paths.dataDir,
+    },
+  });
+  const policy = withRepository({ version: 1, revision: 0, userId: 1, installations: [] }, 3, {
+    id: 1,
+    owner: "package-smoke",
+    name: "repository",
+  });
+  await Promise.all([
+    writeConfiguration(paths.configFile, configuration),
+    writePolicy(paths.policyFile, policy),
+  ]);
   const defaultGateway = createDefaultDiagnosticGateway();
   const gateway = {
     checkRuntime: defaultGateway.checkRuntime,
@@ -381,70 +408,23 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
     async checkCloudflare() {
       return "package-smoke queue";
     },
-  };
-  let stdout = "";
-  let stderr = "";
-  const code = await runCli(
-    [
-      "setup",
-      "--non-interactive",
-      "--model",
-      "openai-codex/gpt-5.6-sol",
-      "--reasoning",
-      "high",
-      "--github-user-id",
-      "1",
-      "--github-app-id",
-      "2",
-      "--github-installation-id",
-      "3",
-      "--github-private-key-file",
-      privateKeyFile,
-      "--repository",
-      "3:1:package-smoke/repository",
-      "--cloudflare-account-id",
-      "package-smoke",
-      "--cloudflare-queue-id",
-      "package-smoke",
-      "--cloudflare-api-token-file",
-      apiTokenFile,
-    ],
-    {
-      io: {
-        stdin: Readable.from([]),
-        stdout: new Writable({
-          write(chunk, _encoding, callback) {
-            stdout += String(chunk);
-            callback();
-          },
-        }),
-        stderr: new Writable({
-          write(chunk, _encoding, callback) {
-            stderr += String(chunk);
-            callback();
-          },
-        }),
-        environment: input.environment,
-        userHome: homeDir,
-        cwd: input.cwd,
-      },
-      gateway,
+    async checkPolicy() {
+      return "package-smoke policy";
     },
-  );
-  if (code !== 0 || !stdout.includes("Diagnostics passed") || stderr !== "") {
-    throw new Error(
-      `Packaged non-interactive setup diagnostics failed (status ${code}, stdout ${JSON.stringify(
-        stdout,
-      )}, stderr ${JSON.stringify(stderr)}).`,
-    );
-  }
-  const paths = resolveApplicationPaths(input.environment, homeDir);
-  const configuration = await loadConfiguration(paths.configFile);
-  if (!diagnosticsPassed(await runDiagnostics(configuration, gateway))) {
+  };
+  const loadedConfiguration = await loadConfiguration(paths.configFile);
+  const loadPackagePolicy = () => loadPolicy(paths.policyFile);
+  if (!diagnosticsPassed(await runDiagnostics(loadedConfiguration, policy, gateway))) {
     throw new Error("Packaged diagnostic initialization failed.");
   }
-  createDefaultManualReviewService(configuration);
-  createDefaultQueueRunService(configuration);
+  createDefaultManualReviewService(loadedConfiguration, loadPackagePolicy);
+  createDefaultQueueRunService(loadedConfiguration, loadPackagePolicy);
+  if (createHash("sha256").update(EMBEDDED_RELAY_SOURCE).digest("hex") !== EMBEDDED_RELAY_SHA256) {
+    throw new Error("Packaged relay artifact checksum does not match its embedded metadata.");
+  }
+  await writeFile(join(input.cwd, "embedded-relay-smoke.mjs"), EMBEDDED_RELAY_SOURCE, {
+    mode: 0o600,
+  });
 
   let acknowledged = false;
   const queue: QueueClient = {
@@ -466,7 +446,7 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
     async clear() {},
   };
   const runner = new QueueReviewRunner(
-    configuration,
+    loadedConfiguration,
     queue,
     {
       async review() {
@@ -483,7 +463,7 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
   cancelled.abort(new Error("package smoke cancellation"));
   let pulledAfterCancellation = false;
   await new QueueReviewRunner(
-    configuration,
+    loadedConfiguration,
     {
       async pullOne() {
         pulledAfterCancellation = true;

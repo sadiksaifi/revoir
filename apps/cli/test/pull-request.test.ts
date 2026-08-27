@@ -64,7 +64,7 @@ describe("pull request URL and eligibility", () => {
 
   it("accepts the configured same-repository open non-draft pull request", () => {
     assert.equal(
-      assertPullRequestEligible(reference, eligiblePullRequest(), configuration.github).id,
+      assertPullRequestEligible(reference, eligiblePullRequest(), configuration.policy).id,
       99,
     );
   });
@@ -109,7 +109,7 @@ describe("pull request URL and eligibility", () => {
 
     for (const [name, pullRequest] of cases) {
       assert.throws(
-        () => assertPullRequestEligible(reference, pullRequest, configuration.github),
+        () => assertPullRequestEligible(reference, pullRequest, configuration.policy),
         PullRequestEligibilityError,
         name,
       );
@@ -120,7 +120,7 @@ describe("pull request URL and eligibility", () => {
         assertPullRequestEligible(
           parsePullRequestUrl("https://github.com/owner/other/pull/17"),
           eligiblePullRequest(),
-          configuration.github,
+          configuration.policy,
         ),
       PullRequestEligibilityError,
     );

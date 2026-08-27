@@ -73,12 +73,15 @@ function decodeBody(message: Record<string, unknown>): unknown {
 }
 
 export class CloudflareQueueClient {
-  readonly #configuration: RevoirConfiguration["cloudflare"];
+  readonly #configuration: Pick<
+    RevoirConfiguration["cloudflare"],
+    "accountId" | "queueId" | "apiToken"
+  >;
   readonly #fetch: Fetch;
   readonly #visibilityTimeoutMs: number;
 
   constructor(
-    configuration: RevoirConfiguration["cloudflare"],
+    configuration: Pick<RevoirConfiguration["cloudflare"], "accountId" | "queueId" | "apiToken">,
     reviewTimeoutMs: number,
     fetchImplementation: Fetch = fetch,
   ) {

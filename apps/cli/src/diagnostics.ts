@@ -1,7 +1,9 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { sign } from "node:crypto";
 
+import { configuredRepositories, type RevoirPolicy } from "./config/policy.js";
 import type { RevoirConfiguration } from "./config/schema.js";
+import type { RepositoryListEntry } from "./repository.js";
 
 const GITHUB_API = "https://api.github.com";
 const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
@@ -41,7 +43,15 @@ function execFile(
 export type DiagnosticStatus = "passed" | "failed";
 
 export interface DiagnosticResult {
-  id: "runtime" | "git" | "pi-auth" | "github" | "repositories" | "cloudflare";
+  id:
+    | "runtime"
+    | "git"
+    | "pi-auth"
+    | "github"
+    | "repositories"
+    | "cloudflare"
+    | "policy"
+    | "authorization";
   label: string;
   status: DiagnosticStatus;
   detail: string;
@@ -54,8 +64,13 @@ export interface DiagnosticGateway {
   checkPi(modelId: string, reasoning: string): Promise<string>;
   checkGitHub(
     configuration: RevoirConfiguration["github"],
+    policy: RevoirPolicy,
   ): Promise<{ app: string; repositories: string }>;
   checkCloudflare(configuration: RevoirConfiguration["cloudflare"]): Promise<string>;
+  checkPolicy(
+    configuration: RevoirConfiguration["cloudflare"],
+    policy: RevoirPolicy,
+  ): Promise<string>;
 }
 
 export function validateNodeRuntime(version: string, runtimeName: string): string {
@@ -209,7 +224,7 @@ export function createDefaultDiagnosticGateway(
       return `${modelId} (${reasoning} reasoning), OpenAI Codex OAuth`;
     },
 
-    async checkGitHub(configuration) {
+    async checkGitHub(configuration, policy) {
       const appJwt = createGitHubAppJwt(configuration.appId, configuration.privateKey);
       const app = await requestJson(fetchImplementation, "GitHub App", `${GITHUB_API}/app`, {
         headers: githubHeaders(appJwt),
@@ -222,7 +237,7 @@ export function createDefaultDiagnosticGateway(
       validateGitHubEvents(app.events);
 
       const installationResults = await Promise.all(
-        configuration.installations.map(async (installation) => {
+        policy.installations.map(async (installation) => {
           const tokenResponse = await requestJson(
             fetchImplementation,
             `GitHub installation ${installation.id}`,
@@ -240,12 +255,12 @@ export function createDefaultDiagnosticGateway(
           const user = await requestJson(
             fetchImplementation,
             "GitHub user identity",
-            `${GITHUB_API}/user/${configuration.userId}`,
+            `${GITHUB_API}/user/${policy.userId}`,
             { headers: githubHeaders(installationToken) },
           );
-          if (user.id !== configuration.userId) {
+          if (user.id !== policy.userId) {
             throw new Error(
-              `GitHub user id ${String(user.id)} does not match configured user id ${configuration.userId}.`,
+              `GitHub user id ${String(user.id)} does not match configured user id ${policy.userId}.`,
             );
           }
 
@@ -274,7 +289,7 @@ export function createDefaultDiagnosticGateway(
             login:
               typeof user.login === "string" && user.login !== ""
                 ? user.login
-                : `user ${configuration.userId}`,
+                : `user ${policy.userId}`,
             repositories: installation.repositories.map(
               (repository) =>
                 `${repository.owner}/${repository.name} (installation ${installation.id})`,
@@ -285,9 +300,9 @@ export function createDefaultDiagnosticGateway(
 
       const appName =
         typeof app.slug === "string" && app.slug !== "" ? app.slug : `app ${configuration.appId}`;
-      const login = installationResults[0]?.login ?? `user ${configuration.userId}`;
+      const login = installationResults[0]?.login ?? `user ${policy.userId}`;
       return {
-        app: `${appName}, author ${login} (${configuration.userId})`,
+        app: `${appName}, author ${login} (${policy.userId})`,
         repositories: installationResults.flatMap((result) => result.repositories).join(", "),
       };
     },
@@ -375,6 +390,35 @@ export function createDefaultDiagnosticGateway(
           : "configured";
       return `queue ${queueName}, HTTP pull consumer ${consumerId}; token and pull acknowledgement access verified without leasing messages.`;
     },
+
+    async checkPolicy(configuration, policy) {
+      const { stdout } = await execFile(
+        "wrangler",
+        [
+          "kv",
+          "key",
+          "get",
+          `--namespace-id=${configuration.kvNamespaceId}`,
+          "policy",
+          "--remote",
+          "--text",
+        ],
+        { timeout: 30_000, maxBuffer: 1024 * 1024 },
+      );
+      let cloud: RevoirPolicy;
+      try {
+        const { parseRevoirPolicy } = await import("@revoir/contracts");
+        cloud = parseRevoirPolicy(JSON.parse(stdout) as unknown);
+      } catch (error) {
+        throw new Error("Cloudflare KV policy is missing or invalid.", { cause: error });
+      }
+      if (JSON.stringify(cloud) !== JSON.stringify(policy)) {
+        throw new Error(
+          "Local and Cloudflare KV policies have drifted. Revocations may be repaired safely, but additions require an explicit repository add command.",
+        );
+      }
+      return `policy revision ${policy.revision}, ${configuredRepositories(policy).length} authorized repositories`;
+    },
   };
 }
 
@@ -398,9 +442,11 @@ async function capture(
 
 export async function runDiagnostics(
   configuration: RevoirConfiguration,
+  policy: RevoirPolicy,
   gateway: DiagnosticGateway = createDefaultDiagnosticGateway(),
+  authorizationEntries?: readonly RepositoryListEntry[],
 ): Promise<DiagnosticResult[]> {
-  const [runtime, git, pi, github, cloudflare] = await Promise.all([
+  const [runtime, git, pi, github, cloudflare, cloudPolicy] = await Promise.all([
     capture("runtime", "Node runtime", () => gateway.checkRuntime()),
     capture("git", "System Git", () => gateway.checkGit(configuration.timeouts.shellCommandMs)),
     capture("pi-auth", "Pi Codex authentication", () =>
@@ -408,7 +454,7 @@ export async function runDiagnostics(
     ),
     (async () => {
       try {
-        const result = await gateway.checkGitHub(configuration.github);
+        const result = await gateway.checkGitHub(configuration.github, policy);
         return [
           {
             id: "github",
@@ -445,9 +491,45 @@ export async function runDiagnostics(
     capture("cloudflare", "Cloudflare Queue", () =>
       gateway.checkCloudflare(configuration.cloudflare),
     ),
+    capture("policy", "Repository policy", () =>
+      gateway.checkPolicy(configuration.cloudflare, policy),
+    ),
   ]);
 
-  return [runtime, git, pi, ...github, cloudflare];
+  const results = [runtime, git, pi, ...github, cloudflare, cloudPolicy];
+  if (authorizationEntries !== undefined) {
+    results.push(repositoryAuthorizationDiagnostic(authorizationEntries));
+  }
+  return results;
+}
+
+export function repositoryAuthorizationDiagnostic(
+  entries: readonly RepositoryListEntry[],
+): DiagnosticResult {
+  if (entries.length === 0) {
+    return {
+      id: "authorization",
+      label: "Repository authorization",
+      status: "passed",
+      detail: "No repositories are authorized; the service is healthy and inert.",
+    };
+  }
+  const groups = new Map<string, string[]>();
+  for (const entry of entries) {
+    const names = groups.get(entry.status) ?? [];
+    names.push(`${entry.repository.owner}/${entry.repository.name}`);
+    groups.set(entry.status, names);
+  }
+  const detail = [...groups.entries()]
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(([status, names]) => `${status}: ${names.toSorted().join(", ")}`)
+    .join("; ");
+  return {
+    id: "authorization",
+    label: "Repository authorization",
+    status: entries.every(({ status }) => status === "authorized") ? "passed" : "failed",
+    detail,
+  };
 }
 
 export function diagnosticsPassed(results: readonly DiagnosticResult[]): boolean {
