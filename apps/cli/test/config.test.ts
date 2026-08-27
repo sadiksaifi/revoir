@@ -227,6 +227,7 @@ describe("protected configuration file", () => {
     const root = await temporaryDirectory();
     const configDir = join(root, "config");
     await mkdir(configDir, { mode: 0o755 });
+    await chmod(configDir, 0o755);
     const configuration = testConfiguration({
       cacheDir: join(root, "cache"),
       stateDir: join(root, "state"),
