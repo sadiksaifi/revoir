@@ -16,7 +16,7 @@ function formatMode(mode: number): string {
   return `0${(mode & 0o777).toString(8).padStart(3, "0")}`;
 }
 
-function assertAbsoluteNormalizedPath(path: string, kind: string): void {
+export function assertProtectedPath(path: string, kind: string): void {
   if (!isAbsolute(path) || resolve(path) !== path) {
     throw new ProtectedFileError(`${kind} "${path}" must be an absolute normalized path.`);
   }
@@ -33,7 +33,7 @@ async function assertOwnedByCurrentUser(
 }
 
 export async function assertPrivateDirectory(path: string, kind: string): Promise<void> {
-  assertAbsoluteNormalizedPath(path, kind);
+  assertProtectedPath(path, kind);
   let stats;
   try {
     stats = await lstat(path);
@@ -54,7 +54,7 @@ export async function assertPrivateDirectory(path: string, kind: string): Promis
 }
 
 export async function ensurePrivateDirectory(path: string, kind: string): Promise<void> {
-  assertAbsoluteNormalizedPath(path, kind);
+  assertProtectedPath(path, kind);
   const created = await mkdir(path, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   const stats = await lstat(path);
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
@@ -75,7 +75,7 @@ export async function ensurePrivateDirectory(path: string, kind: string): Promis
 }
 
 export async function assertProtectedFile(path: string, kind: string): Promise<void> {
-  assertAbsoluteNormalizedPath(path, kind);
+  assertProtectedPath(path, kind);
   await assertPrivateDirectory(dirname(path), `${kind} directory`);
   let stats;
   try {
@@ -108,7 +108,7 @@ export async function writeProtectedJson(
   kind: string,
   value: unknown,
 ): Promise<void> {
-  assertAbsoluteNormalizedPath(path, kind);
+  assertProtectedPath(path, kind);
   const directory = dirname(path);
   await ensurePrivateDirectory(directory, `${kind} directory`);
 

@@ -78,6 +78,13 @@ describe("setup checkpoint", () => {
     assert.equal(await loadSetupCheckpoint(checkpointFile), undefined);
     await removeSetupCheckpoint(checkpointFile);
   });
+
+  it("rejects an unsafe path even when no checkpoint exists", async () => {
+    await assert.rejects(
+      loadSetupCheckpoint("relative/setup-checkpoint.json"),
+      /absolute normalized path/u,
+    );
+  });
 });
 
 describe("command lock", () => {

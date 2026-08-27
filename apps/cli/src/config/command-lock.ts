@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 
 import {
   assertProtectedFile,
+  assertProtectedPath,
   ensurePrivateDirectory,
   loadProtectedJson,
   PRIVATE_FILE_MODE,
@@ -64,6 +65,7 @@ function processIsRunning(pid: number): boolean {
 }
 
 async function readExistingLock(path: string): Promise<CommandLockRecord | undefined> {
+  assertProtectedPath(path, "Command lock");
   try {
     await lstat(path);
   } catch (error) {

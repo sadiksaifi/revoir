@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 
 import {
   assertPrivateDirectory,
+  assertProtectedPath,
   loadProtectedJson,
   ProtectedFileError,
   writeProtectedJson,
@@ -187,6 +188,7 @@ function translate(error: unknown): never {
 }
 
 export async function loadSetupCheckpoint(path: string): Promise<SetupCheckpoint | undefined> {
+  assertProtectedPath(path, "Setup checkpoint");
   try {
     await lstat(path);
   } catch (error) {
