@@ -168,6 +168,38 @@ describe("repository authorization", () => {
     await assert.rejects(createEffectivePolicyLoader(policies)(), /KV unavailable/u);
   });
 
+  it("propagates cancellation into effective cloud-policy loading", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("review cancelled");
+    let cloudSignal: AbortSignal | undefined;
+    const loader = createEffectivePolicyLoader({
+      async loadLocal() {
+        return createEmptyPolicy(42);
+      },
+      async loadCloud(signal?: AbortSignal) {
+        cloudSignal = signal;
+        return new Promise<RevoirPolicy>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    });
+
+    const loading = (loader as (signal?: AbortSignal) => Promise<RevoirPolicy>)(
+      controller.signal,
+    );
+    controller.abort(cancellation);
+    await assert.rejects(
+      Promise.race([
+        loading,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("policy loading ignored cancellation")), 100);
+        }),
+      ]),
+      cancellation,
+    );
+    assert.equal(cloudSignal, controller.signal);
+  });
+
   it("adds local then cloud policy before reporting GitHub-confirmed authorization", async () => {
     const policies = new MemoryPolicies();
     const github = fakeGitHub({ access: false });

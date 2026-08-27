@@ -53,11 +53,11 @@ function failures(results: readonly PromiseSettledResult<unknown>[]): Error[] {
 export class GitHubReviewFailureReporter implements ReviewFailureReporter {
   readonly #configuration: RevoirConfiguration["github"];
   readonly #gateway: ReviewFailureGateway;
-  readonly #loadPolicy: () => Promise<RevoirPolicy>;
+  readonly #loadPolicy: (signal?: AbortSignal) => Promise<RevoirPolicy>;
 
   constructor(
     configuration: RevoirConfiguration["github"],
-    loadPolicy: () => Promise<RevoirPolicy>,
+    loadPolicy: (signal?: AbortSignal) => Promise<RevoirPolicy>,
     gateway: ReviewFailureGateway = new GitHubAppReviewGateway(),
   ) {
     this.#configuration = configuration;
@@ -74,7 +74,7 @@ export class GitHubReviewFailureReporter implements ReviewFailureReporter {
   ): Promise<void> {
     const session = await this.#gateway.authenticate(
       this.#configuration,
-      await this.#loadPolicy(),
+      await this.#loadPolicy(signal),
       reference,
       signal,
     );

@@ -114,6 +114,27 @@ describe("GitHub repository gateway", () => {
 });
 
 describe("Wrangler policy propagation", () => {
+  it("passes cancellation and the shell timeout to Wrangler policy reads", async () => {
+    const expected = createEmptyPolicy(42);
+    const controller = new AbortController();
+    let options: { signal?: AbortSignal; timeoutMs?: number } | undefined;
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      process: {
+        async run(_command, _arguments, receivedOptions) {
+          options = receivedOptions as typeof options;
+          return { stdout: JSON.stringify(expected), stderr: "" };
+        },
+      },
+      shellCommandMs: 123,
+    });
+
+    await (store.loadCloud as (signal?: AbortSignal) => Promise<unknown>)(controller.signal);
+    assert.equal(options?.signal, controller.signal);
+    assert.equal(options?.timeoutMs, 123);
+  });
+
   it("revalidates a current policy after the KV propagation window", async () => {
     const expected = createEmptyPolicy(42);
     let now = 0;
@@ -122,6 +143,7 @@ describe("Wrangler policy propagation", () => {
     const store = new LocalAndWranglerPolicyStore({
       cloudflare: configuration.cloudflare,
       policyFile: "/unused/policy.json",
+      shellCommandMs: configuration.timeouts.shellCommandMs,
       process: {
         async run() {
           reads += 1;
@@ -154,6 +176,7 @@ describe("Wrangler policy propagation", () => {
     const store = new LocalAndWranglerPolicyStore({
       cloudflare: configuration.cloudflare,
       policyFile: "/unused/policy.json",
+      shellCommandMs: configuration.timeouts.shellCommandMs,
       process: {
         async run() {
           return { stdout: reads.shift() ?? JSON.stringify(expected), stderr: "" };
@@ -177,6 +200,7 @@ describe("Wrangler policy propagation", () => {
     const store = new LocalAndWranglerPolicyStore({
       cloudflare: configuration.cloudflare,
       policyFile: "/unused/policy.json",
+      shellCommandMs: configuration.timeouts.shellCommandMs,
       process: {
         async run() {
           reads += 1;

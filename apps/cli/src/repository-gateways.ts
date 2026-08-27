@@ -301,6 +301,7 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
   readonly #now: () => number;
   readonly #policyFile: string;
   readonly #process: SetupProcessRunner;
+  readonly #shellCommandMs: number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
 
   constructor(input: {
@@ -308,12 +309,14 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
     now?: () => number;
     policyFile: string;
     process?: SetupProcessRunner;
+    shellCommandMs: number;
     sleep?: (milliseconds: number) => Promise<void>;
   }) {
     this.#configuration = input.cloudflare;
     this.#now = input.now ?? Date.now;
     this.#policyFile = input.policyFile;
     this.#process = input.process ?? new ChildProcessSetupRunner();
+    this.#shellCommandMs = input.shellCommandMs;
     this.#sleep =
       input.sleep ??
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -335,16 +338,23 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
     }
   }
 
-  async loadCloud(): Promise<RevoirPolicy> {
-    const result = await this.#process.run("wrangler", [
-      "kv",
-      "key",
-      "get",
-      `--namespace-id=${this.#configuration.kvNamespaceId}`,
-      REVOIR_POLICY_KV_KEY,
-      "--remote",
-      "--text",
-    ]);
+  async loadCloud(signal?: AbortSignal): Promise<RevoirPolicy> {
+    const result = await this.#process.run(
+      "wrangler",
+      [
+        "kv",
+        "key",
+        "get",
+        `--namespace-id=${this.#configuration.kvNamespaceId}`,
+        REVOIR_POLICY_KV_KEY,
+        "--remote",
+        "--text",
+      ],
+      {
+        ...(signal === undefined ? {} : { signal }),
+        timeoutMs: this.#shellCommandMs,
+      },
+    );
     return parseRevoirPolicy(JSON.parse(result.stdout) as unknown);
   }
 
@@ -386,9 +396,12 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
 
 export function createEffectivePolicyLoader(
   policies: Pick<RepositoryPolicyStore, "loadLocal" | "loadCloud">,
-): () => Promise<RevoirPolicy> {
-  return async () => {
-    const [local, cloud] = await Promise.all([policies.loadLocal(), policies.loadCloud()]);
+): (signal?: AbortSignal) => Promise<RevoirPolicy> {
+  return async (signal) => {
+    const [local, cloud] = await Promise.all([
+      policies.loadLocal(signal),
+      policies.loadCloud(signal),
+    ]);
     return intersectPolicies(local, cloud);
   };
 }

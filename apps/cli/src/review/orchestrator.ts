@@ -267,7 +267,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
   readonly #finalizations = new Set<Promise<unknown>>();
   readonly #github: GitHubReviewGateway;
   readonly #lock: ReviewLock;
-  readonly #loadPolicy: () => Promise<RevoirPolicy>;
+  readonly #loadPolicy: (signal?: AbortSignal) => Promise<RevoirPolicy>;
   readonly #reviewEngine: ReviewEngine;
   readonly #workspaces: WorkspacePreparer;
 
@@ -276,7 +276,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     dependencies: {
       github: GitHubReviewGateway;
       lock: ReviewLock;
-      loadPolicy: () => Promise<RevoirPolicy>;
+      loadPolicy: (signal?: AbortSignal) => Promise<RevoirPolicy>;
       reviewEngine: ReviewEngine;
       workspaces: WorkspacePreparer;
     },
@@ -383,7 +383,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
 
     try {
       throwIfAborted(signal);
-      const policy = await this.#loadPolicy();
+      const policy = await this.#loadPolicy(signal);
       const github = await this.#github.authenticate(
         this.#configuration.github,
         policy,
@@ -685,7 +685,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
 
 export function createDefaultManualReviewService(
   configuration: RevoirConfiguration,
-  loadPolicy: () => Promise<RevoirPolicy>,
+  loadPolicy: (signal?: AbortSignal) => Promise<RevoirPolicy>,
 ): ManualReviewService {
   return new CleanReviewOrchestrator(configuration, {
     github: new GitHubAppReviewGateway(),

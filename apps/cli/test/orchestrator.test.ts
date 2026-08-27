@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { withRepository } from "../src/config/policy.js";
+import { withRepository, type RevoirPolicy } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
 import type { GitHubReviewEvidence } from "../src/review/evidence.js";
 import type { ReviewFindingV2 } from "../src/review/findings.js";
@@ -185,6 +185,7 @@ function harness(
     workspaceCleanupError?: Error;
     workspaceCleanupErrorAttempts?: number;
     lock?: ReviewLock;
+    loadPolicy?: (signal?: AbortSignal) => Promise<RevoirPolicy>;
     workspaces?: WorkspacePreparer;
     reviewMs?: number;
   } = {},
@@ -448,7 +449,8 @@ function harness(
           return { async release() {} };
         },
       },
-      loadPolicy: async () => configuration(options.reviewMs).policy,
+      loadPolicy:
+        options.loadPolicy ?? (async () => configuration(options.reviewMs).policy),
       workspaces,
       reviewEngine,
     }),
@@ -1325,6 +1327,33 @@ describe("clean review orchestrator", () => {
     );
     assert.equal(timedOut.checkCompletions[0]?.conclusion, "timed_out");
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
+  });
+
+  it("cancels policy loading at the review deadline and releases the lock", async () => {
+    let policySignal: AbortSignal | undefined;
+    let releases = 0;
+    const timedOut = harness({
+      reviewMs: 5,
+      loadPolicy: async (signal) => {
+        policySignal = signal;
+        return new Promise<RevoirPolicy>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+      lock: {
+        async acquire() {
+          return {
+            async release() {
+              releases += 1;
+            },
+          };
+        },
+      },
+    });
+
+    await assert.rejects(timedOut.orchestrator.review(reference), ReviewTimeoutError);
+    assert.equal(policySignal?.aborted, true);
+    await waitFor(() => releases === 1, "timed-out policy loading retained the process lock");
   });
 
   it("propagates caller cancellation before releasing the worker slot", async () => {

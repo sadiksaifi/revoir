@@ -1039,6 +1039,61 @@ describe("queue review runner", () => {
     await assert.rejects(consumption, cancellation);
   });
 
+  it("propagates daemon cancellation while effective policy is loading", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("daemon stopped during policy loading");
+    let markPolicyStarted: (() => void) | undefined;
+    const policyStarted = new Promise<void>((resolve) => {
+      markPolicyStarted = resolve;
+    });
+    let policySignal: AbortSignal | undefined;
+    const queue: QueueClient = {
+      async pullOne() {
+        return delivery("lease-policy-cancelled", reviewJob());
+      },
+      async acknowledge() {
+        assert.fail("Cancellation must leave policy loading unsettled for redelivery.");
+      },
+      async retry() {
+        assert.fail("Cancellation must not consume a policy-load retry.");
+      },
+    };
+    const reviews: ManualReviewService = {
+      async review() {
+        assert.fail("A cancelled policy load must not begin a review.");
+      },
+    };
+    const reporter: ReviewFailureReporter = {
+      async report() {
+        assert.fail("Daemon cancellation is not a policy-load failure.");
+      },
+    };
+    const consumption = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviews,
+      reporter,
+      new MemoryOperationalFailureStore(),
+      undefined,
+      undefined,
+      async (signal?: AbortSignal) => {
+        policySignal = signal;
+        markPolicyStarted?.();
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    ).consumeOne(controller.signal);
+    await policyStarted;
+    controller.abort(cancellation);
+
+    await assert.rejects(
+      settleWithin(consumption, "daemon cancellation did not stop policy loading"),
+      cancellation,
+    );
+    assert.equal(policySignal, controller.signal);
+  });
+
   it("does not let transport redeliveries consume the operational failure budget", async () => {
     const controller = new AbortController();
     const cancellation = new Error("daemon stopped");

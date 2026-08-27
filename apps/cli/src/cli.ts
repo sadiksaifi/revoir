@@ -494,6 +494,7 @@ export async function runCli(
                   cloudflare: configuration.cloudflare,
                   policyFile: paths.policyFile,
                   process: processRunner,
+                  shellCommandMs: configuration.timeouts.shellCommandMs,
                 }),
                 pending: new FilePendingRepositoryStore(configuration.paths.stateDir),
               });
@@ -606,6 +607,7 @@ export async function runCli(
             policies: new LocalAndWranglerPolicyStore({
               cloudflare: configuration.cloudflare,
               policyFile: paths.policyFile,
+              shellCommandMs: configuration.timeouts.shellCommandMs,
             }),
             pending: new FilePendingRepositoryStore(configuration.paths.stateDir),
           });
@@ -693,6 +695,7 @@ export async function runCli(
                 policies: new LocalAndWranglerPolicyStore({
                   cloudflare: configuration.cloudflare,
                   policyFile: paths.policyFile,
+                  shellCommandMs: configuration.timeouts.shellCommandMs,
                 }),
                 pending: new FilePendingRepositoryStore(configuration.paths.stateDir),
               })
@@ -767,6 +770,7 @@ export async function runCli(
             new LocalAndWranglerPolicyStore({
               cloudflare: configuration.cloudflare,
               policyFile: paths.policyFile,
+              shellCommandMs: configuration.timeouts.shellCommandMs,
             }),
           ),
         )
@@ -860,6 +864,7 @@ export async function runCli(
             new LocalAndWranglerPolicyStore({
               cloudflare: configuration.cloudflare,
               policyFile: paths.policyFile,
+              shellCommandMs: configuration.timeouts.shellCommandMs,
             }),
           ),
           logger,

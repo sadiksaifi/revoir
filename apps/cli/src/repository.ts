@@ -55,9 +55,9 @@ export interface RepositoryGitHubGateway {
 
 export interface RepositoryPolicyStore {
   ensureAuthenticated?(): Promise<void>;
-  loadLocal(): Promise<RevoirPolicy>;
+  loadLocal(signal?: AbortSignal): Promise<RevoirPolicy>;
   writeLocal(policy: RevoirPolicy): Promise<void>;
-  loadCloud(): Promise<RevoirPolicy>;
+  loadCloud(signal?: AbortSignal): Promise<RevoirPolicy>;
   writeCloud(policy: RevoirPolicy): Promise<void>;
   verifyCloud(policy: RevoirPolicy): Promise<void>;
 }

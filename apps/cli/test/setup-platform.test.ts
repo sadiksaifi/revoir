@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import type { RevoirConfiguration } from "../src/config/schema.js";
 import {
+  ChildProcessSetupRunner,
   DefaultSetupPlatform,
   type ProcessResult,
   type SetupProcessRunner,
@@ -76,6 +77,28 @@ const RESOURCES = {
 const SETUP_ID = "0123456789abcdef";
 
 describe("default greenfield setup platform", () => {
+  it("terminates a child process at its configured timeout", async () => {
+    const runner = new ChildProcessSetupRunner() as SetupProcessRunner & {
+      run(
+        command: string,
+        arguments_: readonly string[],
+        options: { timeoutMs: number },
+      ): Promise<ProcessResult>;
+    };
+
+    await assert.rejects(
+      Promise.race([
+        runner.run(process.execPath, ["-e", "setTimeout(() => {}, 200)"], {
+          timeoutMs: 20,
+        }),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("child process ignored its timeout")), 100);
+        }),
+      ]),
+      (error) => error instanceof Error && !/ignored its timeout/u.test(error.message),
+    );
+  });
+
   it("authenticates Wrangler and creates KV, Queue, and its HTTP pull consumer", async () => {
     const accountId = "a".repeat(32);
     const process = new FakeProcess((_command, arguments_) => {

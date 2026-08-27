@@ -276,7 +276,7 @@ export class QueueReviewRunner implements QueueRunService {
   readonly #queue: QueueClient;
   readonly #reviews: ManualReviewService;
   readonly #logger: QueueRunLogger;
-  readonly #loadPolicy: () => Promise<RevoirPolicy>;
+  readonly #loadPolicy: (signal?: AbortSignal) => Promise<RevoirPolicy>;
   #serializedConsumption: Promise<void> = Promise.resolve();
 
   constructor(
@@ -291,7 +291,7 @@ export class QueueReviewRunner implements QueueRunService {
     requestCompletions: ReviewRequestCompletionStore = new FileReviewRequestCompletionStore(
       configuration.paths.stateDir,
     ),
-    loadPolicy?: () => Promise<RevoirPolicy>,
+    loadPolicy?: (signal?: AbortSignal) => Promise<RevoirPolicy>,
   ) {
     this.#configuration = configuration;
     this.#queue = queue;
@@ -342,8 +342,9 @@ export class QueueReviewRunner implements QueueRunService {
 
     let policy: RevoirPolicy;
     try {
-      policy = await this.#loadPolicy();
+      policy = await this.#loadPolicy(signal);
     } catch (error) {
+      throwIfCancelled(signal);
       await this.#queue.retry(delivery.leaseId, OPERATIONAL_RETRY_DELAYS_SECONDS[0], signal);
       await this.#logger.write("queue_review_rejected", {
         deliveryId: job.deliveryId,
@@ -1038,7 +1039,7 @@ export class QueueReviewRunner implements QueueRunService {
 
 export function createDefaultQueueRunService(
   configuration: RevoirConfiguration,
-  loadPolicy: () => Promise<RevoirPolicy>,
+  loadPolicy: (signal?: AbortSignal) => Promise<RevoirPolicy>,
   logger: QueueRunLogger = NOOP_LOGGER,
 ): QueueRunService {
   return new QueueReviewRunner(

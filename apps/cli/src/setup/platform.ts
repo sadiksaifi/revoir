@@ -29,11 +29,18 @@ export interface ProcessResult {
   stderr: string;
 }
 
+export interface SetupProcessOptions {
+  input?: string;
+  interactive?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 export interface SetupProcessRunner {
   run(
     command: string,
     arguments_: readonly string[],
-    options?: { input?: string; interactive?: boolean },
+    options?: SetupProcessOptions,
   ): Promise<ProcessResult>;
 }
 
@@ -41,11 +48,20 @@ export class ChildProcessSetupRunner implements SetupProcessRunner {
   run(
     command: string,
     arguments_: readonly string[],
-    options: { input?: string; interactive?: boolean } = {},
+    options: SetupProcessOptions = {},
   ): Promise<ProcessResult> {
     return new Promise((resolve, reject) => {
+      const timeoutSignal =
+        options.timeoutMs === undefined ? undefined : AbortSignal.timeout(options.timeoutMs);
+      const operationSignal =
+        options.signal === undefined
+          ? timeoutSignal
+          : timeoutSignal === undefined
+            ? options.signal
+            : AbortSignal.any([options.signal, timeoutSignal]);
       const child = spawn(command, [...arguments_], {
         stdio: options.interactive ? "inherit" : ["pipe", "pipe", "pipe"],
+        ...(operationSignal === undefined ? {} : { signal: operationSignal }),
       });
       if (!options.interactive) {
         child.stdin?.end(options.input);
