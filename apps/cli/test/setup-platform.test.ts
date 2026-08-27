@@ -434,7 +434,7 @@ describe("default greenfield setup platform", () => {
     const setup = platform({
       process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
       opened,
-      fetch: async (input) => {
+      fetch: async (input, init) => {
         const url = input.toString();
         if (url === "https://api.github.com/app") {
           return Response.json({
@@ -451,7 +451,10 @@ describe("default greenfield setup platform", () => {
             },
           });
         }
-        return Response.json({ permissions: { metadata: "read" } });
+        if (init?.method === "POST") {
+          return Response.json({ permissions: { metadata: "read" } });
+        }
+        return Response.json({ id: 8, account: { login: "owner" }, target_type: "User" });
       },
     });
     const policy = withRepository(createEmptyPolicy(42), 8, {
@@ -465,5 +468,57 @@ describe("default greenfield setup platform", () => {
       /installation 8 requires permission approval/u,
     );
     assert.deepEqual(opened, ["https://github.com/settings/installations/8"]);
+  });
+
+  it("opens the organization installation approval page from validated installation metadata", async () => {
+    const opened: string[] = [];
+    const configuration = createTestConfiguration({
+      cacheDir: "/tmp/revoir-test-cache",
+      stateDir: "/tmp/revoir-test-state",
+      dataDir: "/tmp/revoir-test-data",
+    });
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      opened,
+      fetch: async (input, init) => {
+        const url = input.toString();
+        if (url === "https://api.github.com/app") {
+          return Response.json({
+            id: configuration.github.appId,
+            slug: configuration.github.appSlug,
+            events: ["issue_comment", "pull_request"],
+            permissions: {
+              actions: "read",
+              checks: "write",
+              contents: "read",
+              issues: "write",
+              metadata: "read",
+              pull_requests: "write",
+            },
+          });
+        }
+        if (init?.method !== "POST") {
+          return Response.json({
+            id: 8,
+            account: { login: "revoir-org" },
+            target_type: "Organization",
+          });
+        }
+        return Response.json({ permissions: { metadata: "read" } });
+      },
+    });
+    const policy = withRepository(createEmptyPolicy(42), 8, {
+      id: 99,
+      owner: "revoir-org",
+      name: "repository",
+    });
+
+    await assert.rejects(
+      setup.reconcileGitHubApp(configuration, policy),
+      /installation 8 requires permission approval/u,
+    );
+    assert.deepEqual(opened, [
+      "https://github.com/organizations/revoir-org/settings/installations/8",
+    ]);
   });
 });

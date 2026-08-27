@@ -8,6 +8,10 @@ import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY, REVOIR_WEBHOOK_PATH } from "@r
 import type { RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import { EMBEDDED_RELAY_SHA256, EMBEDDED_RELAY_SOURCE } from "../generated/relay-artifact.js";
+import {
+  githubInstallationSettingsUrl,
+  parseGitHubInstallation,
+} from "../github-installation.js";
 import { createGitHubAppJwt } from "../review/github.js";
 import {
   GitHubManifestFlow,
@@ -501,7 +505,25 @@ export class DefaultSetupPlatform implements SetupPlatform {
           ([permission, access]) => installationPermissions[permission] !== access,
         );
       if (installationDrifted) {
-        const url = `https://github.com/settings/installations/${installation.id}`;
+        // GitHub routes personal and organization installation settings differently.
+        // eslint-disable-next-line no-await-in-loop
+        const metadataResponse = await this.#fetch(
+          `https://api.github.com/app/installations/${installation.id}`,
+          { headers },
+        );
+        if (!metadataResponse.ok) {
+          throw new Error(
+            `GitHub installation ${installation.id} metadata failed with HTTP ${metadataResponse.status}.`,
+          );
+        }
+        // eslint-disable-next-line no-await-in-loop
+        const metadata = parseGitHubInstallation(await metadataResponse.json());
+        if (metadata.id !== installation.id) {
+          throw new Error(
+            `GitHub installation ${installation.id} metadata returned a different immutable identity.`,
+          );
+        }
+        const url = githubInstallationSettingsUrl(metadata);
         // eslint-disable-next-line no-await-in-loop
         await this.#browser.open(url);
         throw new Error(

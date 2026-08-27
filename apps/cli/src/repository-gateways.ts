@@ -3,6 +3,11 @@ import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY } from "@revoir/contracts";
 import { intersectPolicies, loadPolicy, writePolicy, type RevoirPolicy } from "./config/policy.js";
 import type { RevoirConfiguration } from "./config/schema.js";
 import {
+  githubInstallationSettingsUrl,
+  parseGitHubInstallation,
+  type GitHubInstallationIdentity,
+} from "./github-installation.js";
+import {
   type RepositoryApproval,
   type RepositoryDiscovery,
   type RepositoryGitHubGateway,
@@ -17,12 +22,6 @@ const GITHUB_PAGE_SIZE = 100;
 const MAX_GITHUB_PAGES = 100;
 const KV_PROPAGATION_WINDOW_MS = 60_000;
 const KV_ACTIVATION_DEADLINE_MS = 65_000;
-
-interface GitHubInstallationRecord {
-  id: number;
-  accountLogin: string;
-  targetType: string;
-}
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -60,29 +59,6 @@ async function responseJson(response: Response, label: string): Promise<unknown>
   return response.json();
 }
 
-function installation(value: unknown): GitHubInstallationRecord {
-  const parsed = record(value, "GitHub installation");
-  const account = record(parsed.account, "GitHub installation account");
-  if (
-    !Number.isSafeInteger(parsed.id) ||
-    typeof account.login !== "string" ||
-    typeof parsed.target_type !== "string"
-  ) {
-    throw new Error("GitHub installation response omitted its immutable identity.");
-  }
-  return {
-    id: parsed.id as number,
-    accountLogin: account.login,
-    targetType: parsed.target_type,
-  };
-}
-
-function settingsUrl(candidate: GitHubInstallationRecord): string {
-  return candidate.targetType.toLowerCase() === "organization"
-    ? `https://github.com/organizations/${encodeURIComponent(candidate.accountLogin)}/settings/installations/${candidate.id}`
-    : `https://github.com/settings/installations/${candidate.id}`;
-}
-
 export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
   readonly #browser: GitHubManifestBrowser;
   readonly #configuration: RevoirConfiguration["github"];
@@ -109,8 +85,8 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
-  async #appInstallations(): Promise<GitHubInstallationRecord[]> {
-    const entries: GitHubInstallationRecord[] = [];
+  async #appInstallations(): Promise<GitHubInstallationIdentity[]> {
+    const entries: GitHubInstallationIdentity[] = [];
     for (let page = 1; page <= MAX_GITHUB_PAGES; page += 1) {
       const jwt = createGitHubAppJwt(this.#configuration.appId, this.#configuration.privateKey);
       // eslint-disable-next-line no-await-in-loop
@@ -123,7 +99,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
       if (!Array.isArray(value)) {
         throw new Error("GitHub App installation discovery returned an invalid response.");
       }
-      entries.push(...value.map(installation));
+      entries.push(...value.map(parseGitHubInstallation));
       if (value.length < GITHUB_PAGE_SIZE) {
         return entries;
       }
@@ -194,7 +170,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
             installation: {
               id: candidate.id,
               hasRepositoryAccess: await this.#hasAccess(candidate.id, resolvedRepository.id),
-              settingsUrl: settingsUrl(candidate),
+              settingsUrl: githubInstallationSettingsUrl(candidate),
             },
           }),
       newInstallationUrl: `https://github.com/apps/${this.#configuration.appSlug}/installations/new`,
@@ -207,7 +183,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
 
   async waitForInstallation(reference: RepositoryReference): Promise<RepositoryApproval> {
     const resolvedRepository = await this.#publicRepository(reference);
-    let discoveredInstallation: GitHubInstallationRecord | undefined;
+    let discoveredInstallation: GitHubInstallationIdentity | undefined;
     for (let attempt = 0; attempt < this.#pollAttempts; attempt += 1) {
       // The short bounded poll makes organization-owner approval resumable.
       // eslint-disable-next-line no-await-in-loop
@@ -224,7 +200,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
         return {
           status: "approved",
           installationId: candidate.id,
-          settingsUrl: settingsUrl(candidate),
+          settingsUrl: githubInstallationSettingsUrl(candidate),
         };
       }
       // eslint-disable-next-line no-await-in-loop
@@ -238,7 +214,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
       settingsUrl:
         discoveredInstallation === undefined
           ? `https://github.com/apps/${this.#configuration.appSlug}/installations/new`
-          : settingsUrl(discoveredInstallation),
+          : githubInstallationSettingsUrl(discoveredInstallation),
     };
   }
 
