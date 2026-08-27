@@ -277,7 +277,10 @@ describe("default greenfield setup platform", () => {
     let now = 0;
     const sleeps: number[] = [];
     const setup = platform({
-      process: new FakeProcess(() => ({ stdout: reads.shift() ?? "", stderr: "" })),
+      process: new FakeProcess(() => ({
+        stdout: reads.shift() ?? JSON.stringify(expected),
+        stderr: "",
+      })),
       now: () => now,
       sleep: async (milliseconds) => {
         sleeps.push(milliseconds);
@@ -286,7 +289,31 @@ describe("default greenfield setup platform", () => {
     });
 
     await setup.verifyCloudPolicy(RESOURCES, expected);
-    assert.deepEqual(sleeps, [1_000, 1_000]);
+    assert.deepEqual(sleeps.slice(0, 2), [1_000, 1_000]);
+    assert.equal(sleeps.length, 60);
+  });
+
+  it("revalidates a current KV policy after the propagation window", async () => {
+    const expected = createEmptyPolicy(42);
+    let now = 0;
+    let reads = 0;
+    const sleeps: number[] = [];
+    const setup = platform({
+      process: new FakeProcess(() => {
+        reads += 1;
+        return { stdout: JSON.stringify(expected), stderr: "" };
+      }),
+      now: () => now,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        now += milliseconds;
+      },
+    });
+
+    await setup.verifyCloudPolicy(RESOURCES, expected);
+    assert.equal(now, 60_000);
+    assert.equal(reads, 61);
+    assert.equal(sleeps.length, 60);
   });
 
   it("fails closed when the KV policy misses the propagation deadline", async () => {

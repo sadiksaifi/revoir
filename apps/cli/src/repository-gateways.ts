@@ -15,6 +15,8 @@ import { ChildProcessSetupRunner, type SetupProcessRunner } from "./setup/platfo
 
 const GITHUB_PAGE_SIZE = 100;
 const MAX_GITHUB_PAGES = 100;
+const KV_PROPAGATION_WINDOW_MS = 60_000;
+const KV_ACTIVATION_DEADLINE_MS = 65_000;
 
 interface GitHubInstallationRecord {
   id: number;
@@ -359,12 +361,19 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
   }
 
   async verifyCloud(policy: RevoirPolicy): Promise<void> {
-    const deadline = this.#now() + 65_000;
+    const startedAt = this.#now();
+    const activationAt = startedAt + KV_PROPAGATION_WINDOW_MS;
+    const deadline = startedAt + KV_ACTIVATION_DEADLINE_MS;
     do {
       try {
         // eslint-disable-next-line no-await-in-loop
         const cloud = await this.loadCloud();
-        if (JSON.stringify(cloud) === JSON.stringify(policy)) return;
+        if (
+          JSON.stringify(cloud) === JSON.stringify(policy) &&
+          this.#now() >= activationAt
+        ) {
+          return;
+        }
       } catch {
         // Stale and transient reads are retried; callers remain fail closed meanwhile.
       }

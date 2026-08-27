@@ -114,6 +114,33 @@ describe("GitHub repository gateway", () => {
 });
 
 describe("Wrangler policy propagation", () => {
+  it("revalidates a current policy after the KV propagation window", async () => {
+    const expected = createEmptyPolicy(42);
+    let now = 0;
+    let reads = 0;
+    const sleeps: number[] = [];
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      process: {
+        async run() {
+          reads += 1;
+          return { stdout: JSON.stringify(expected), stderr: "" };
+        },
+      },
+      now: () => now,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        now += milliseconds;
+      },
+    });
+
+    await store.verifyCloud(expected);
+    assert.equal(now, 60_000);
+    assert.equal(reads, 61);
+    assert.equal(sleeps.length, 60);
+  });
+
   it("waits until the exact cloud policy is visible", async () => {
     const expected = createEmptyPolicy(42);
     const stale = withRepository(expected, 8, {
@@ -129,7 +156,7 @@ describe("Wrangler policy propagation", () => {
       policyFile: "/unused/policy.json",
       process: {
         async run() {
-          return { stdout: reads.shift() ?? "", stderr: "" };
+          return { stdout: reads.shift() ?? JSON.stringify(expected), stderr: "" };
         },
       },
       now: () => now,
@@ -140,7 +167,8 @@ describe("Wrangler policy propagation", () => {
     });
 
     await store.verifyCloud(expected);
-    assert.deepEqual(sleeps, [1_000, 1_000]);
+    assert.deepEqual(sleeps.slice(0, 2), [1_000, 1_000]);
+    assert.equal(sleeps.length, 60);
   });
 
   it("fails closed when cloud policy misses the propagation deadline", async () => {

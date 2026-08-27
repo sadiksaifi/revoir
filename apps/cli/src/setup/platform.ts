@@ -130,6 +130,9 @@ function samePolicy(left: RevoirPolicy, right: RevoirPolicy): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+const KV_PROPAGATION_WINDOW_MS = 60_000;
+const KV_ACTIVATION_DEADLINE_MS = 65_000;
+
 export class DefaultSetupPlatform implements SetupPlatform {
   readonly #browser: GitHubManifestBrowser;
   readonly #diagnostics: (
@@ -562,7 +565,9 @@ export class DefaultSetupPlatform implements SetupPlatform {
     resources: SetupCloudflareResources,
     expected: RevoirPolicy,
   ): Promise<void> {
-    const deadline = this.#now() + 65_000;
+    const startedAt = this.#now();
+    const activationAt = startedAt + KV_PROPAGATION_WINDOW_MS;
+    const deadline = startedAt + KV_ACTIVATION_DEADLINE_MS;
     do {
       // eslint-disable-next-line no-await-in-loop
       const result = await this.#process.run("wrangler", [
@@ -575,7 +580,10 @@ export class DefaultSetupPlatform implements SetupPlatform {
         "--text",
       ]);
       try {
-        if (samePolicy(parseRevoirPolicy(JSON.parse(result.stdout) as unknown), expected)) {
+        if (
+          samePolicy(parseRevoirPolicy(JSON.parse(result.stdout) as unknown), expected) &&
+          this.#now() >= activationAt
+        ) {
           return;
         }
       } catch {
