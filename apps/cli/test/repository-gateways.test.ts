@@ -253,6 +253,26 @@ describe("Wrangler policy propagation", () => {
     assert.equal(options?.environment?.CLOUDFLARE_ACCOUNT_ID, configuration.cloudflare.accountId);
   });
 
+  it("bounds Wrangler policy writes with the configured shell timeout", async () => {
+    const expected = createEmptyPolicy(42);
+    let options: { environment?: Readonly<Record<string, string>>; timeoutMs?: number } | undefined;
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      process: {
+        async run(_command, _arguments, receivedOptions) {
+          options = receivedOptions as typeof options;
+          return { stdout: "", stderr: "" };
+        },
+      },
+      shellCommandMs: 123,
+    });
+
+    await store.writeCloud(expected);
+    assert.equal(options?.timeoutMs, 123);
+    assert.equal(options?.environment?.CLOUDFLARE_ACCOUNT_ID, configuration.cloudflare.accountId);
+  });
+
   it("revalidates a current policy after the KV propagation window", async () => {
     const expected = createEmptyPolicy(42);
     let now = 0;

@@ -360,7 +360,10 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
         JSON.stringify(parseRevoirPolicy(policy)),
         "--remote",
       ],
-      { environment: { CLOUDFLARE_ACCOUNT_ID: this.#configuration.accountId } },
+      {
+        environment: { CLOUDFLARE_ACCOUNT_ID: this.#configuration.accountId },
+        timeoutMs: this.#shellCommandMs,
+      },
     );
   }
 
