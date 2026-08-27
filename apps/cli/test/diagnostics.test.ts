@@ -114,6 +114,8 @@ describe("diagnostic contracts", () => {
       url: string;
       method: string;
       authorization: string;
+      event: string;
+      signature: string;
       body: string | undefined;
     }> = [];
     const gateway = createDefaultDiagnosticGateway(async (url, init) => {
@@ -121,6 +123,8 @@ describe("diagnostic contracts", () => {
         url,
         method: init?.method ?? "GET",
         authorization: init?.headers?.Authorization ?? "",
+        event: init?.headers?.["X-GitHub-Event"] ?? "",
+        signature: init?.headers?.["X-Hub-Signature-256"] ?? "",
         body: init?.body,
       });
 
@@ -179,8 +183,8 @@ describe("diagnostic contracts", () => {
         };
       } else if (url === configuration.cloudflare.relayUrl) {
         return {
-          ok: false,
-          status: 405,
+          ok: true,
+          status: 202,
           async json() {
             return {};
           },
@@ -211,7 +215,13 @@ describe("diagnostic contracts", () => {
       await gateway.checkCloudflare(configuration.cloudflare),
       "queue review-jobs, HTTP pull consumer consumer; token and pull acknowledgement access verified without leasing messages.",
     );
-    assert.match(await gateway.checkRelay(configuration.cloudflare.relayUrl), /relay webhook/u);
+    assert.match(
+      await gateway.checkRelay(
+        configuration.cloudflare.relayUrl,
+        configuration.github.webhookSecret,
+      ),
+      /relay signature and policy path/u,
+    );
     assert.equal(requests.length, 8);
     assert.match(requests[0]?.authorization ?? "", /^Bearer [^.]+\.[^.]+\.[^.]+$/u);
     assert.equal(requests[1]?.method, "POST");
@@ -223,6 +233,10 @@ describe("diagnostic contracts", () => {
     assert.match(requests[6]?.url ?? "", /\/messages\/ack$/u);
     assert.deepEqual(JSON.parse(requests[6]?.body ?? ""), { acks: [], retries: [] });
     assert.equal(requests[7]?.url, configuration.cloudflare.relayUrl);
+    assert.equal(requests[7]?.method, "POST");
+    assert.equal(requests[7]?.event, "pull_request");
+    assert.match(requests[7]?.signature ?? "", /^sha256=[0-9a-f]{64}$/u);
+    assert.equal(requests[7]?.body, "{}");
   });
 
   it("validates every installation with its own token and repository allowlist", async () => {

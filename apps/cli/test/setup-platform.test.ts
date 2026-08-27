@@ -41,10 +41,18 @@ class FakeProcess implements SetupProcessRunner {
   }
 }
 
-function platform(input: { process: SetupProcessRunner; fetch?: typeof fetch; opened?: string[] }) {
+function platform(input: {
+  process: SetupProcessRunner;
+  fetch?: typeof fetch;
+  now?: () => number;
+  opened?: string[];
+  sleep?: (milliseconds: number) => Promise<void>;
+}) {
   return new DefaultSetupPlatform({
     process: input.process,
     ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
+    ...(input.now === undefined ? {} : { now: input.now }),
+    ...(input.sleep === undefined ? {} : { sleep: input.sleep }),
     browser: {
       async open(url) {
         input.opened?.push(url);
@@ -233,6 +241,72 @@ describe("default greenfield setup platform", () => {
     assert.match(requests[0]!.url, /accounts\/a{32}\/queues\/queue-immutable-id$/u);
     assert.match(requests[1]!.url, /\/messages\/ack$/u);
     assert.equal(requests[3]!.url, "https://api.github.com/app/hook/config");
+  });
+
+  it("opens a Queue-only token template scoped to the configured account", async () => {
+    const opened: string[] = [];
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      opened,
+    });
+
+    assert.equal(await setup.requestQueueApiToken(RESOURCES), "queue-token");
+    assert.equal(opened.length, 1);
+    const tokenTemplate = new URL(opened[0]!);
+    assert.equal(
+      tokenTemplate.origin + tokenTemplate.pathname,
+      "https://dash.cloudflare.com/profile/api-tokens",
+    );
+    assert.deepEqual(JSON.parse(tokenTemplate.searchParams.get("permissionGroupKeys") ?? ""), [
+      { key: "queues", type: "edit" },
+    ]);
+    assert.equal(tokenTemplate.searchParams.get("accountId"), RESOURCES.accountId);
+    assert.equal(tokenTemplate.searchParams.get("zoneId"), "all");
+    assert.equal(tokenTemplate.searchParams.get("name"), "Revoir Queue Pull");
+  });
+
+  it("waits for the exact KV policy while stale and malformed reads remain unauthorized", async () => {
+    const expected = createEmptyPolicy(42);
+    const stale = withRepository(expected, 8, {
+      id: 99,
+      owner: "owner",
+      name: "repository",
+    });
+    const reads = [JSON.stringify(stale), "not-json", JSON.stringify(expected)];
+    let now = 0;
+    const sleeps: number[] = [];
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: reads.shift() ?? "", stderr: "" })),
+      now: () => now,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        now += milliseconds;
+      },
+    });
+
+    await setup.verifyCloudPolicy(RESOURCES, expected);
+    assert.deepEqual(sleeps, [1_000, 1_000]);
+  });
+
+  it("fails closed when the KV policy misses the propagation deadline", async () => {
+    let now = 0;
+    let reads = 0;
+    const setup = platform({
+      process: new FakeProcess(() => {
+        reads += 1;
+        return { stdout: "not-json", stderr: "" };
+      }),
+      now: () => now,
+      sleep: async (milliseconds) => {
+        now += milliseconds;
+      },
+    });
+
+    await assert.rejects(
+      setup.verifyCloudPolicy(RESOURCES, createEmptyPolicy(42)),
+      /activation deadline/u,
+    );
+    assert.equal(reads, 65);
   });
 
   it("opens the exact App permission page when approval-required drift is detected", async () => {

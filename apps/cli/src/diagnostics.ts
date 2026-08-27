@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { sign } from "node:crypto";
+import { createHmac, sign } from "node:crypto";
 
 import { configuredRepositories, type RevoirPolicy } from "./config/policy.js";
 import type { RevoirConfiguration } from "./config/schema.js";
@@ -69,7 +69,7 @@ export interface DiagnosticGateway {
     policy: RevoirPolicy,
   ): Promise<{ app: string; repositories: string }>;
   checkCloudflare(configuration: RevoirConfiguration["cloudflare"]): Promise<string>;
-  checkRelay(relayUrl: string): Promise<string>;
+  checkRelay(relayUrl: string, webhookSecret: string): Promise<string>;
   checkPolicy(
     configuration: RevoirConfiguration["cloudflare"],
     policy: RevoirPolicy,
@@ -408,14 +408,25 @@ export function createDefaultDiagnosticGateway(
       return `queue ${queueName}, HTTP pull consumer ${consumerId}; token and pull acknowledgement access verified without leasing messages.`;
     },
 
-    async checkRelay(relayUrl) {
-      const response = await fetchImplementation(relayUrl, { method: "GET" });
-      if (response.status !== 405) {
+    async checkRelay(relayUrl, webhookSecret) {
+      const body = "{}";
+      const signature = `sha256=${createHmac("sha256", webhookSecret).update(body).digest("hex")}`;
+      const response = await fetchImplementation(relayUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-GitHub-Delivery": "revoir-diagnostic",
+          "X-GitHub-Event": "pull_request",
+          "X-Hub-Signature-256": signature,
+        },
+        body,
+      });
+      if (response.status !== 202) {
         throw new Error(
-          `Relay webhook health check expected HTTP 405 for GET, received ${response.status}.`,
+          `Relay signed policy-path check expected HTTP 202, received ${response.status}.`,
         );
       }
-      return `relay webhook reachable at ${new URL(relayUrl).host}`;
+      return `relay signature and policy path verified at ${new URL(relayUrl).host}`;
     },
 
     async checkPolicy(configuration, policy) {
@@ -519,7 +530,9 @@ export async function runDiagnostics(
     capture("cloudflare", "Cloudflare Queue", () =>
       gateway.checkCloudflare(configuration.cloudflare),
     ),
-    capture("relay", "Webhook relay", () => gateway.checkRelay(configuration.cloudflare.relayUrl)),
+    capture("relay", "Webhook relay", () =>
+      gateway.checkRelay(configuration.cloudflare.relayUrl, configuration.github.webhookSecret),
+    ),
     capture("policy", "Repository policy", () =>
       gateway.checkPolicy(configuration.cloudflare, policy),
     ),

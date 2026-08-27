@@ -761,7 +761,15 @@ export async function runCli(
     try {
       const result = await (
         dependencies.reviewService ??
-        createDefaultManualReviewService(configuration, () => loadPolicy(paths.policyFile))
+        createDefaultManualReviewService(
+          configuration,
+          createEffectivePolicyLoader(
+            new LocalAndWranglerPolicyStore({
+              cloudflare: configuration.cloudflare,
+              policyFile: paths.policyFile,
+            }),
+          ),
+        )
       ).review(reference);
       if (result.status === "clean") {
         write(io.stdout, `Clean review completed for ${reference.url} at ${result.reviewedSha}.\n`);

@@ -13,6 +13,9 @@ import { createGitHubAppJwt, type FetchLike } from "./review/github.js";
 import type { GitHubManifestBrowser } from "./setup/github-manifest.js";
 import { ChildProcessSetupRunner, type SetupProcessRunner } from "./setup/platform.js";
 
+const GITHUB_PAGE_SIZE = 100;
+const MAX_GITHUB_PAGES = 100;
+
 interface GitHubInstallationRecord {
   id: number;
   accountLogin: string;
@@ -105,15 +108,25 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
   }
 
   async #appInstallations(): Promise<GitHubInstallationRecord[]> {
-    const jwt = createGitHubAppJwt(this.#configuration.appId, this.#configuration.privateKey);
-    const response = await this.#fetch("https://api.github.com/app/installations?per_page=100", {
-      headers: appHeaders(jwt),
-    });
-    const value = await responseJson(response, "GitHub App installation discovery");
-    if (!Array.isArray(value)) {
-      throw new Error("GitHub App installation discovery returned an invalid response.");
+    const entries: GitHubInstallationRecord[] = [];
+    for (let page = 1; page <= MAX_GITHUB_PAGES; page += 1) {
+      const jwt = createGitHubAppJwt(this.#configuration.appId, this.#configuration.privateKey);
+      // eslint-disable-next-line no-await-in-loop
+      const response = await this.#fetch(
+        `https://api.github.com/app/installations?per_page=${GITHUB_PAGE_SIZE}&page=${page}`,
+        { headers: appHeaders(jwt) },
+      );
+      // eslint-disable-next-line no-await-in-loop
+      const value = await responseJson(response, "GitHub App installation discovery");
+      if (!Array.isArray(value)) {
+        throw new Error("GitHub App installation discovery returned an invalid response.");
+      }
+      entries.push(...value.map(installation));
+      if (value.length < GITHUB_PAGE_SIZE) {
+        return entries;
+      }
     }
-    return value.map(installation);
+    throw new Error("GitHub App installation discovery exceeded the supported pagination limit.");
   }
 
   async #installationToken(installationId: number): Promise<string> {
@@ -247,23 +260,35 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
     for (const candidate of installations) {
       // eslint-disable-next-line no-await-in-loop
       const token = await this.#installationToken(candidate.id);
-      // eslint-disable-next-line no-await-in-loop
-      const response = await this.#fetch(
-        "https://api.github.com/installation/repositories?per_page=100",
-        { headers: appHeaders(token) },
-      );
-      // eslint-disable-next-line no-await-in-loop
-      const responseValue = await responseJson(response, "GitHub installation repositories");
-      const value = record(responseValue, "GitHub installation repositories");
-      if (!Array.isArray(value.repositories)) {
-        throw new Error("GitHub installation repositories returned an invalid response.");
+      let complete = false;
+      for (let page = 1; page <= MAX_GITHUB_PAGES; page += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const response = await this.#fetch(
+          `https://api.github.com/installation/repositories?per_page=${GITHUB_PAGE_SIZE}&page=${page}`,
+          { headers: appHeaders(token) },
+        );
+        // eslint-disable-next-line no-await-in-loop
+        const responseValue = await responseJson(response, "GitHub installation repositories");
+        const value = record(responseValue, "GitHub installation repositories");
+        if (!Array.isArray(value.repositories)) {
+          throw new Error("GitHub installation repositories returned an invalid response.");
+        }
+        entries.push(
+          ...value.repositories.map((item) => ({
+            installationId: candidate.id,
+            repository: repository(item),
+          })),
+        );
+        if (value.repositories.length < GITHUB_PAGE_SIZE) {
+          complete = true;
+          break;
+        }
       }
-      entries.push(
-        ...value.repositories.map((item) => ({
-          installationId: candidate.id,
-          repository: repository(item),
-        })),
-      );
+      if (!complete) {
+        throw new Error(
+          `GitHub installation ${candidate.id} repositories exceeded the supported pagination limit.`,
+        );
+      }
     }
     return entries;
   }
@@ -271,17 +296,20 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
 
 export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
   readonly #configuration: RevoirConfiguration["cloudflare"];
+  readonly #now: () => number;
   readonly #policyFile: string;
   readonly #process: SetupProcessRunner;
   readonly #sleep: (milliseconds: number) => Promise<void>;
 
   constructor(input: {
     cloudflare: RevoirConfiguration["cloudflare"];
+    now?: () => number;
     policyFile: string;
     process?: SetupProcessRunner;
     sleep?: (milliseconds: number) => Promise<void>;
   }) {
     this.#configuration = input.cloudflare;
+    this.#now = input.now ?? Date.now;
     this.#policyFile = input.policyFile;
     this.#process = input.process ?? new ChildProcessSetupRunner();
     this.#sleep =
@@ -331,7 +359,7 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
   }
 
   async verifyCloud(policy: RevoirPolicy): Promise<void> {
-    const deadline = Date.now() + 65_000;
+    const deadline = this.#now() + 65_000;
     do {
       try {
         // eslint-disable-next-line no-await-in-loop
@@ -342,7 +370,7 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
       }
       // eslint-disable-next-line no-await-in-loop
       await this.#sleep(1_000);
-    } while (Date.now() < deadline);
+    } while (this.#now() < deadline);
     throw new Error("Cloudflare KV policy did not propagate before the activation deadline.");
   }
 }

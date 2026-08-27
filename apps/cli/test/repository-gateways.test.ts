@@ -1,0 +1,167 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
+import {
+  GitHubRepositoryGateway,
+  LocalAndWranglerPolicyStore,
+} from "../src/repository-gateways.js";
+import type { SetupProcessRunner } from "../src/setup/platform.js";
+import { createTestConfiguration } from "./helpers.js";
+
+const configuration = createTestConfiguration({
+  cacheDir: "/cache",
+  stateDir: "/state",
+  dataDir: "/data",
+});
+
+function installations(count: number, offset = 0) {
+  return Array.from({ length: count }, (_value, index) => ({
+    id: offset + index + 1,
+    account: { login: `other-${offset + index + 1}` },
+    target_type: "Organization",
+  }));
+}
+
+function repositories(count: number, offset = 0) {
+  return Array.from({ length: count }, (_value, index) => ({
+    id: offset + index + 1,
+    name: `repository-${offset + index + 1}`,
+    owner: { login: "owner" },
+  }));
+}
+
+describe("GitHub repository gateway", () => {
+  it("discovers an installation beyond the first GitHub page", async () => {
+    const urls: string[] = [];
+    const process: SetupProcessRunner = {
+      async run() {
+        return {
+          stdout: JSON.stringify({ id: 9001, name: "repository", owner: { login: "owner" } }),
+          stderr: "",
+        };
+      },
+    };
+    const gateway = new GitHubRepositoryGateway({
+      browser: { async open() {} },
+      configuration: configuration.github,
+      process,
+      fetch: async (input) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith("/app/installations/777/access_tokens")) {
+          return Response.json({ token: "installation-token" });
+        }
+        if (url.endsWith("/repositories/9001")) {
+          return Response.json({});
+        }
+        return Response.json(
+          url.endsWith("page=1")
+            ? installations(100)
+            : [{ id: 777, account: { login: "owner" }, target_type: "Organization" }],
+        );
+      },
+    });
+
+    assert.deepEqual(await gateway.discover({ owner: "owner", name: "repository" }), {
+      repository: { id: 9001, owner: "owner", name: "repository" },
+      installation: {
+        id: 777,
+        hasRepositoryAccess: true,
+        settingsUrl: "https://github.com/organizations/owner/settings/installations/777",
+      },
+      newInstallationUrl: `https://github.com/apps/${configuration.github.appSlug}/installations/new`,
+    });
+    assert.deepEqual(
+      urls
+        .filter((url) => url.includes("/app/installations?"))
+        .map((url) => new URL(url).searchParams.get("page")),
+      ["1", "2"],
+    );
+  });
+
+  it("lists repositories beyond the first GitHub page", async () => {
+    const urls: string[] = [];
+    const gateway = new GitHubRepositoryGateway({
+      browser: { async open() {} },
+      configuration: configuration.github,
+      fetch: async (input) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.includes("/app/installations?")) {
+          return Response.json([
+            { id: 8, account: { login: "owner" }, target_type: "Organization" },
+          ]);
+        }
+        if (url.endsWith("/app/installations/8/access_tokens")) {
+          return Response.json({ token: "installation-token" });
+        }
+        if (url.endsWith("page=1")) {
+          return Response.json({ repositories: repositories(100) });
+        }
+        return Response.json({ repositories: repositories(1, 100) });
+      },
+    });
+
+    const accessible = await gateway.listAccessibleRepositories();
+    assert.equal(accessible.length, 101);
+    assert.deepEqual(accessible.at(-1), {
+      installationId: 8,
+      repository: { id: 101, owner: "owner", name: "repository-101" },
+    });
+    assert.equal(urls.filter((url) => url.includes("/installation/repositories?")).length, 2);
+  });
+});
+
+describe("Wrangler policy propagation", () => {
+  it("waits until the exact cloud policy is visible", async () => {
+    const expected = createEmptyPolicy(42);
+    const stale = withRepository(expected, 8, {
+      id: 99,
+      owner: "owner",
+      name: "repository",
+    });
+    const reads = [JSON.stringify(stale), "not-json", JSON.stringify(expected)];
+    let now = 0;
+    const sleeps: number[] = [];
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      process: {
+        async run() {
+          return { stdout: reads.shift() ?? "", stderr: "" };
+        },
+      },
+      now: () => now,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        now += milliseconds;
+      },
+    });
+
+    await store.verifyCloud(expected);
+    assert.deepEqual(sleeps, [1_000, 1_000]);
+  });
+
+  it("fails closed when cloud policy misses the propagation deadline", async () => {
+    let now = 0;
+    let reads = 0;
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      process: {
+        async run() {
+          reads += 1;
+          return { stdout: "not-json", stderr: "" };
+        },
+      },
+      now: () => now,
+      sleep: async (milliseconds) => {
+        now += milliseconds;
+      },
+    });
+
+    await assert.rejects(store.verifyCloud(createEmptyPolicy(42)), /activation deadline/u);
+    assert.equal(reads, 65);
+  });
+});

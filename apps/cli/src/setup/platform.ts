@@ -141,6 +141,8 @@ export class DefaultSetupPlatform implements SetupPlatform {
   readonly #process: SetupProcessRunner;
   readonly #secretPrompt: (message: string) => Promise<string>;
   readonly #fetch: typeof fetch;
+  readonly #now: () => number;
+  readonly #sleep: (milliseconds: number) => Promise<void>;
 
   constructor(input: {
     browser: GitHubManifestBrowser;
@@ -150,6 +152,8 @@ export class DefaultSetupPlatform implements SetupPlatform {
     process?: SetupProcessRunner;
     manifest?: GitHubManifestFlow;
     fetch?: typeof fetch;
+    now?: () => number;
+    sleep?: (milliseconds: number) => Promise<void>;
   }) {
     this.#browser = input.browser;
     this.#diagnostics = input.diagnostics;
@@ -158,6 +162,10 @@ export class DefaultSetupPlatform implements SetupPlatform {
     this.#manifest = input.manifest ?? new GitHubManifestFlow(input.browser);
     this.#secretPrompt = input.secretPrompt;
     this.#fetch = input.fetch ?? fetch;
+    this.#now = input.now ?? Date.now;
+    this.#sleep =
+      input.sleep ??
+      ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
   async ensureGitHubAuthentication(): Promise<{ userId: number; login: string }> {
@@ -481,8 +489,16 @@ export class DefaultSetupPlatform implements SetupPlatform {
     }
   }
 
-  async requestQueueApiToken(_resources: SetupCloudflareResources): Promise<string> {
-    await this.#browser.open("https://dash.cloudflare.com/profile/api-tokens/create/custom");
+  async requestQueueApiToken(resources: SetupCloudflareResources): Promise<string> {
+    const tokenTemplate = new URL("https://dash.cloudflare.com/profile/api-tokens");
+    tokenTemplate.searchParams.set(
+      "permissionGroupKeys",
+      JSON.stringify([{ key: "queues", type: "edit" }]),
+    );
+    tokenTemplate.searchParams.set("accountId", resources.accountId);
+    tokenTemplate.searchParams.set("zoneId", "all");
+    tokenTemplate.searchParams.set("name", "Revoir Queue Pull");
+    await this.#browser.open(tokenTemplate.toString());
     const token = (await this.#secretPrompt("Cloudflare Queue read/write API token: ")).trim();
     if (token === "") {
       throw new Error("Cloudflare Queue API token cannot be empty.");
@@ -530,7 +546,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     resources: SetupCloudflareResources,
     expected: RevoirPolicy,
   ): Promise<void> {
-    const deadline = Date.now() + 65_000;
+    const deadline = this.#now() + 65_000;
     do {
       // eslint-disable-next-line no-await-in-loop
       const result = await this.#process.run("wrangler", [
@@ -550,8 +566,8 @@ export class DefaultSetupPlatform implements SetupPlatform {
         // A stale or unavailable KV read remains unauthorized while propagation continues.
       }
       // eslint-disable-next-line no-await-in-loop
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    } while (Date.now() < deadline);
+      await this.#sleep(1_000);
+    } while (this.#now() < deadline);
     throw new Error("Cloudflare KV policy did not become visible before the activation deadline.");
   }
 

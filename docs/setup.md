@@ -72,8 +72,8 @@ Setup is interactive and resumable. It performs these stages in order:
 4. creates one KV namespace, one Queue, its HTTP pull consumer, and one Worker;
 5. deploys the Worker bundled inside the executable;
 6. opens GitHub's App Manifest flow and creates one **Any account** GitHub App;
-7. opens Cloudflare's custom-token page and privately prompts for an
-   `Account > Queues > Edit` API token;
+7. opens a Cloudflare token template pre-scoped to the configured account and only
+   `Account > Queues > Edit`, then privately prompts for the once-shown token;
 8. writes an empty repository policy locally and to KV;
 9. installs and starts the per-user LaunchAgent;
 10. verifies the relay webhook route, LaunchAgent process health, App/installation
@@ -115,6 +115,11 @@ When the App is not installed for the owner, the CLI opens the App installation 
 first and waits for GitHub to confirm both the installation and selected repository.
 It then writes local policy, writes and verifies KV policy, and finally opens the
 existing installation settings if repository access still needs approval.
+
+Cloudflare KV changes are eventually consistent. Revoir keeps the repository
+unauthorized while it polls for the exact cloud policy and may wait up to 65 seconds
+before either enabling GitHub access or reporting an activation timeout. Rerun the same
+command after a timeout; it does not broaden trust from a stale KV read.
 
 Organization approval may outlive the bounded terminal wait. In that case the command
 reports `pending`, saves only a protected local pending-operation record, and exits

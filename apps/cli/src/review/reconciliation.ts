@@ -151,11 +151,6 @@ interface IndexedIdentity<T extends PriorFindingIdentity> {
   readonly identity: T;
 }
 
-function identitiesIntersect(left: PriorFindingIdentity, right: PriorFindingIdentity): boolean {
-  const rightFingerprints = identityFingerprints(right);
-  return [...identityFingerprints(left)].some((fingerprint) => rightFingerprints.has(fingerprint));
-}
-
 function compareCurrentIdentity(
   left: IndexedIdentity<CurrentFindingIdentity>,
   right: IndexedIdentity<CurrentFindingIdentity>,
@@ -319,16 +314,13 @@ function matchFindingIdentities(
   const semanticFingerprints = [...currentGroups.keys()].toSorted();
   for (const [index, identity] of prior.entries()) {
     const tokens = identityFingerprints(identity);
-    // A prior identity may participate only when its persisted aliases identify one semantic
-    // group. Legacy records without that alias can still migrate through one unique token overlap.
-    let possibleGroups = semanticFingerprints.filter((fingerprint) => tokens.has(fingerprint));
-    if (possibleGroups.length === 0) {
-      possibleGroups = semanticFingerprints.filter((fingerprint) =>
+    const possibleGroups = semanticFingerprints.filter(
+      (fingerprint) =>
+        tokens.has(fingerprint) ||
         currentGroups
           .get(fingerprint)!
-          .some(({ identity: currentIdentity }) => identitiesIntersect(currentIdentity, identity)),
-      );
-    }
+          .some(({ identity: currentIdentity }) => tokens.has(currentIdentity.fingerprint)),
+    );
     if (possibleGroups.length !== 1) {
       continue;
     }
