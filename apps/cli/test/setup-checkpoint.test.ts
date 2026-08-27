@@ -14,8 +14,17 @@ import {
   validateSetupCheckpoint,
   writeSetupCheckpoint,
 } from "../src/config/setup-checkpoint.js";
+import type { ProcessIdentity } from "../src/review/process-identity.js";
 
 const temporaryDirectories: string[] = [];
+const CURRENT_PROCESS_BIRTH = "current-command-process-birth";
+const REUSED_PROCESS_BIRTH = "previous-command-process-birth";
+
+function inspectCommandProcesses(
+  identities: ReadonlyMap<number, ProcessIdentity>,
+): (pid: number) => Promise<ProcessIdentity> {
+  return async (pid) => identities.get(pid) ?? { kind: "missing" };
+}
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "revoir-checkpoint-test-"));
@@ -64,6 +73,7 @@ async function seedStaleCommandLock(lockFile: string): Promise<void> {
       version: 1,
       pid: 2_147_483_647,
       token: "stale-owner",
+      processBirth: "missing-process-birth",
       acquiredAt: "2026-08-27T00:00:00.000Z",
     })}\n`,
     { mode: 0o600 },
@@ -188,6 +198,186 @@ describe("command lock", () => {
     await second.release();
   });
 
+  it("reclaims a canonical lock whose PID belongs to a newer process", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    await mkdir(join(root, "config"), { mode: 0o700 });
+    await writeFile(
+      lockFile,
+      `${JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        token: "reused-canonical",
+        processBirth: REUSED_PROCESS_BIRTH,
+        acquiredAt: "2026-08-27T00:00:00.000Z",
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const lease = await acquireCommandLock(lockFile, {
+      inspectProcess: inspectCommandProcesses(
+        new Map([[process.pid, { kind: "alive", processBirth: CURRENT_PROCESS_BIRTH }]]),
+      ),
+    });
+    await lease.release();
+  });
+
+  it("reclaims a pending publication candidate whose PID was reused", async () => {
+    const root = await temporaryDirectory();
+    const directory = join(root, "config");
+    const lockFile = join(directory, "command.lock");
+    await mkdir(directory, { mode: 0o700 });
+    const candidate = join(directory, `.command-lock.${process.pid}.reused-pending.pending`);
+    await writeFile(
+      candidate,
+      `${JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        token: "reused-pending",
+        processBirth: REUSED_PROCESS_BIRTH,
+        acquiredAt: "2026-08-27T00:00:00.000Z",
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const lease = await acquireCommandLock(lockFile, {
+      inspectProcess: inspectCommandProcesses(
+        new Map([[process.pid, { kind: "alive", processBirth: CURRENT_PROCESS_BIRTH }]]),
+      ),
+    });
+    await lease.release();
+    await assert.rejects(lstat(candidate), { code: "ENOENT" });
+  });
+
+  it("reclaims an unpublished reclaim candidate whose claimant PID was reused", async () => {
+    const root = await temporaryDirectory();
+    const directory = join(root, "config");
+    const lockFile = join(directory, "command.lock");
+    await seedStaleCommandLock(lockFile);
+    const staleStats = await lstat(lockFile);
+    const candidate = join(
+      directory,
+      `.command-lock.stale-owner.reclaim.${process.pid}.reused-claimant.tmp`,
+    );
+    await writeFile(
+      candidate,
+      `${JSON.stringify({
+        version: 1,
+        target: { token: "stale-owner", device: staleStats.dev, inode: staleStats.ino },
+        claimant: {
+          version: 1,
+          pid: process.pid,
+          token: "reused-claimant",
+          processBirth: REUSED_PROCESS_BIRTH,
+          acquiredAt: "2026-08-27T00:00:00.000Z",
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const lease = await acquireCommandLock(lockFile, {
+      inspectProcess: inspectCommandProcesses(
+        new Map([[process.pid, { kind: "alive", processBirth: CURRENT_PROCESS_BIRTH }]]),
+      ),
+    });
+    await lease.release();
+    await assert.rejects(lstat(candidate), { code: "ENOENT" });
+  });
+
+  it("reclaims a published reclaim claim whose claimant PID was reused", async () => {
+    const root = await temporaryDirectory();
+    const directory = join(root, "config");
+    const lockFile = join(directory, "command.lock");
+    await seedStaleCommandLock(lockFile);
+    const staleStats = await lstat(lockFile);
+    await writeFile(
+      join(directory, ".command-lock.stale-owner.reclaim"),
+      `${JSON.stringify({
+        version: 1,
+        target: { token: "stale-owner", device: staleStats.dev, inode: staleStats.ino },
+        claimant: {
+          version: 1,
+          pid: process.pid,
+          token: "reused-published-claimant",
+          processBirth: REUSED_PROCESS_BIRTH,
+          acquiredAt: "2026-08-27T00:00:00.000Z",
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const lease = await acquireCommandLock(lockFile, {
+      inspectProcess: inspectCommandProcesses(
+        new Map([[process.pid, { kind: "alive", processBirth: CURRENT_PROCESS_BIRTH }]]),
+      ),
+    });
+    await lease.release();
+  });
+
+  it("preserves every artifact owned by the exact live process identity", async () => {
+    const inspectProcess = inspectCommandProcesses(
+      new Map([
+        [process.pid, { kind: "alive", processBirth: CURRENT_PROCESS_BIRTH }],
+        [2_147_483_647, { kind: "missing" }],
+      ]),
+    );
+
+    const canonicalRoot = await temporaryDirectory();
+    const canonicalDirectory = join(canonicalRoot, "config");
+    const canonicalLock = join(canonicalDirectory, "command.lock");
+    await mkdir(canonicalDirectory, { mode: 0o700 });
+    const liveRecord = {
+      version: 1,
+      pid: process.pid,
+      token: "live-exact-owner",
+      processBirth: CURRENT_PROCESS_BIRTH,
+      acquiredAt: "2026-08-27T00:00:00.000Z",
+    } as const;
+    await writeFile(canonicalLock, `${JSON.stringify(liveRecord)}\n`, { mode: 0o600 });
+    await assert.rejects(
+      acquireCommandLock(canonicalLock, { inspectProcess }),
+      ConcurrentCommandError,
+    );
+    assert.deepEqual(JSON.parse(await readFile(canonicalLock, "utf8")), liveRecord);
+
+    const pendingRoot = await temporaryDirectory();
+    const pendingDirectory = join(pendingRoot, "config");
+    const pendingLock = join(pendingDirectory, "command.lock");
+    await mkdir(pendingDirectory, { mode: 0o700 });
+    const pendingPath = join(
+      pendingDirectory,
+      `.command-lock.${process.pid}.live-exact-owner.pending`,
+    );
+    await writeFile(pendingPath, `${JSON.stringify(liveRecord)}\n`, { mode: 0o600 });
+    const pendingLease = await acquireCommandLock(pendingLock, { inspectProcess });
+    await pendingLease.release();
+    assert.deepEqual(JSON.parse(await readFile(pendingPath, "utf8")), liveRecord);
+
+    const reclaimRoot = await temporaryDirectory();
+    const reclaimDirectory = join(reclaimRoot, "config");
+    const reclaimLock = join(reclaimDirectory, "command.lock");
+    await seedStaleCommandLock(reclaimLock);
+    const staleStats = await lstat(reclaimLock);
+    const liveClaim = {
+      version: 1,
+      target: { token: "stale-owner", device: staleStats.dev, inode: staleStats.ino },
+      claimant: liveRecord,
+    } as const;
+    const reclaimCandidate = join(
+      reclaimDirectory,
+      `.command-lock.stale-owner.reclaim.${process.pid}.live-exact-owner.tmp`,
+    );
+    const reclaimPublished = join(reclaimDirectory, ".command-lock.stale-owner.reclaim");
+    await writeFile(reclaimCandidate, `${JSON.stringify(liveClaim)}\n`, { mode: 0o600 });
+    await writeFile(reclaimPublished, `${JSON.stringify(liveClaim)}\n`, { mode: 0o600 });
+    await assert.rejects(
+      acquireCommandLock(reclaimLock, { inspectProcess }),
+      ConcurrentCommandError,
+    );
+    assert.deepEqual(JSON.parse(await readFile(reclaimCandidate, "utf8")), liveClaim);
+    assert.deepEqual(JSON.parse(await readFile(reclaimPublished, "utf8")), liveClaim);
+  });
+
   it("recovers when acquisition is interrupted before its durable record is published", async () => {
     const root = await temporaryDirectory();
     const lockFile = join(root, "config", "command.lock");
@@ -243,6 +433,7 @@ describe("command lock", () => {
         version: 1,
         pid: 2_147_483_647,
         token: "stale-owner",
+        processBirth: "missing-process-birth",
         acquiredAt: "2026-08-27T00:00:00.000Z",
       })}\n`,
       { mode: 0o600 },
@@ -431,6 +622,7 @@ describe("command lock", () => {
               version: 1,
               pid: 2_147_483_647,
               token: `dead-claim-${generation}`,
+              processBirth: "missing-process-birth",
               acquiredAt: "2026-08-27T00:00:00.000Z",
             },
           })}\n`,

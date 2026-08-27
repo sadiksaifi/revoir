@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { link, lstat, open, readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { inspectProcess, type ProcessIdentity } from "../review/process-identity.js";
 import {
   assertProtectedFile,
   assertProtectedPath,
@@ -15,6 +16,7 @@ interface CommandLockRecord {
   version: 1;
   pid: number;
   token: string;
+  processBirth: string;
   acquiredAt: string;
 }
 
@@ -41,6 +43,8 @@ export interface CommandLockAcquisitionOptions {
   beforePublish?(candidatePath: string): Promise<void> | void;
   afterReclaimCandidate?(candidatePath: string): Promise<void> | void;
   afterReclaimPublication?(claimPath: string): Promise<void> | void;
+  inspectProcess?(pid: number, signal?: AbortSignal): Promise<ProcessIdentity>;
+  signal?: AbortSignal;
 }
 
 export class ConcurrentCommandError extends Error {
@@ -67,7 +71,9 @@ function validateLock(value: unknown): CommandLockRecord {
     typeof value !== "object" ||
     value === null ||
     Array.isArray(value) ||
-    Object.keys(value).some((key) => !["version", "pid", "token", "acquiredAt"].includes(key))
+    Object.keys(value).some(
+      (key) => !["version", "pid", "token", "processBirth", "acquiredAt"].includes(key),
+    )
   ) {
     throw new ProtectedFileError("Command lock has an invalid shape.");
   }
@@ -78,6 +84,8 @@ function validateLock(value: unknown): CommandLockRecord {
     (record.pid as number) <= 0 ||
     typeof record.token !== "string" ||
     !LOCK_TOKEN.test(record.token) ||
+    typeof record.processBirth !== "string" ||
+    record.processBirth.length === 0 ||
     typeof record.acquiredAt !== "string" ||
     Number.isNaN(Date.parse(record.acquiredAt))
   ) {
@@ -91,11 +99,14 @@ function validateReclaim(value: unknown): CommandLockReclaim | undefined {
     typeof value !== "object" ||
     value === null ||
     Array.isArray(value) ||
+    Object.keys(value).some((key) => !["version", "target", "claimant"].includes(key)) ||
     !("version" in value) ||
     value.version !== 1 ||
     !("target" in value) ||
     typeof value.target !== "object" ||
     value.target === null ||
+    Array.isArray(value.target) ||
+    Object.keys(value.target).some((key) => !["token", "device", "inode"].includes(key)) ||
     !("token" in value.target) ||
     typeof value.target.token !== "string" ||
     !LOCK_TOKEN.test(value.target.token) ||
@@ -122,13 +133,29 @@ function validateReclaim(value: unknown): CommandLockReclaim | undefined {
   }
 }
 
-function processIsRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return isFileSystemError(error, "EPERM");
+async function processOwnsRecord(
+  record: CommandLockRecord,
+  processInspector: (pid: number, signal?: AbortSignal) => Promise<ProcessIdentity>,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const identity = await processInspector(record.pid, signal);
+  return (
+    identity.kind === "alive" &&
+    (identity.processBirth === undefined || identity.processBirth === record.processBirth)
+  );
+}
+
+async function currentProcessBirth(
+  processInspector: (pid: number, signal?: AbortSignal) => Promise<ProcessIdentity>,
+  signal?: AbortSignal,
+): Promise<string> {
+  const identity = await processInspector(process.pid, signal);
+  if (identity.kind !== "alive" || identity.processBirth === undefined) {
+    throw new ProtectedFileError(
+      "Command lock process identity could not be verified; refusing to publish a PID-only lock.",
+    );
   }
+  return identity.processBirth;
 }
 
 async function readLockSnapshot(path: string): Promise<CommandLockSnapshot | undefined> {
@@ -178,7 +205,11 @@ async function writeDurableRecord(path: string, value: unknown): Promise<void> {
   }
 }
 
-async function cleanUniqueCandidates(path: string): Promise<void> {
+async function cleanUniqueCandidates(
+  path: string,
+  processInspector: (pid: number, signal?: AbortSignal) => Promise<ProcessIdentity>,
+  signal?: AbortSignal,
+): Promise<void> {
   const directory = dirname(path);
   const names = await readdir(directory);
   await Promise.all(
@@ -191,14 +222,14 @@ async function cleanUniqueCandidates(path: string): Promise<void> {
       if (pending === null && reclaim === null) return;
       const pid = Number(pending?.[1] ?? reclaim?.[2]);
       const token = pending?.[2] ?? reclaim?.[3];
-      if (token === undefined) return;
-      if (!Number.isSafeInteger(pid) || pid <= 0 || processIsRunning(pid)) return;
+      if (token === undefined || !Number.isSafeInteger(pid) || pid <= 0) return;
       const candidatePath = join(directory, name);
       try {
         const value = await loadProtectedJson(candidatePath, "Command lock candidate");
         if (pending !== null) {
           const candidate = validateLock(value);
           if (candidate.pid !== pid || candidate.token !== token) return;
+          if (await processOwnsRecord(candidate, processInspector, signal)) return;
         } else {
           const candidate = validateReclaim(value);
           if (
@@ -209,6 +240,7 @@ async function cleanUniqueCandidates(path: string): Promise<void> {
           ) {
             return;
           }
+          if (await processOwnsRecord(candidate.claimant, processInspector, signal)) return;
         }
         await unlink(candidatePath);
       } catch (error) {
@@ -243,6 +275,7 @@ async function publishReclaimClaim(
   target: CommandLockSnapshot,
   claimant: CommandLockRecord,
   options: CommandLockAcquisitionOptions,
+  processInspector: (pid: number, signal?: AbortSignal) => Promise<ProcessIdentity>,
 ): Promise<{ paths: string[] } | undefined> {
   const directory = dirname(path);
   const claimRoot = join(directory, `.command-lock.${target.record.token}.reclaim`);
@@ -283,7 +316,8 @@ async function publishReclaimClaim(
       if (
         existing === undefined ||
         !sameReclaimTarget(existing.target, claim.target) ||
-        processIsRunning(existing.claimant.pid)
+        // eslint-disable-next-line no-await-in-loop
+        (await processOwnsRecord(existing.claimant, processInspector, options.signal))
       ) {
         return undefined;
       }
@@ -298,6 +332,8 @@ async function publishReclaimClaim(
 async function cleanPublishedReclaimClaims(
   path: string,
   options: CommandLockAcquisitionOptions,
+  processInspector: (pid: number, signal?: AbortSignal) => Promise<ProcessIdentity>,
+  processBirth: string,
 ): Promise<void> {
   const directory = dirname(path);
   const names = await readdir(directory);
@@ -329,7 +365,9 @@ async function cleanPublishedReclaimClaims(
         claim === undefined ||
         claim.target.token !== targetToken ||
         (target !== undefined && !sameReclaimTarget(target, claim.target)) ||
-        processIsRunning(claim.claimant.pid)
+        // Claim ownership checks are ordered with the persisted generation scan.
+        // eslint-disable-next-line no-await-in-loop
+        (await processOwnsRecord(claim.claimant, processInspector, options.signal))
       ) {
         reclaimable = false;
         break;
@@ -342,6 +380,7 @@ async function cleanPublishedReclaimClaims(
       version: 1,
       pid: process.pid,
       token: randomUUID(),
+      processBirth,
       acquiredAt: new Date().toISOString(),
     };
     // Claim groups are reclaimed sequentially so one process never publishes competing claims.
@@ -351,6 +390,7 @@ async function cleanPublishedReclaimClaims(
       { record: { ...claimant, token: target.token }, device: target.device, inode: target.inode },
       claimant,
       options,
+      processInspector,
     );
     if (lease === undefined) continue;
     // eslint-disable-next-line no-await-in-loop
@@ -365,9 +405,11 @@ async function cleanPublishedReclaimClaims(
 async function cleanCommandLockArtifacts(
   path: string,
   options: CommandLockAcquisitionOptions,
+  processInspector: (pid: number, signal?: AbortSignal) => Promise<ProcessIdentity>,
+  processBirth: string,
 ): Promise<void> {
-  await cleanUniqueCandidates(path);
-  await cleanPublishedReclaimClaims(path, options);
+  await cleanUniqueCandidates(path, processInspector, options.signal);
+  await cleanPublishedReclaimClaims(path, options, processInspector, processBirth);
 }
 
 async function claimStaleLock(
@@ -375,8 +417,9 @@ async function claimStaleLock(
   target: CommandLockSnapshot,
   claimant: CommandLockRecord,
   options: CommandLockAcquisitionOptions,
+  processInspector: (pid: number, signal?: AbortSignal) => Promise<ProcessIdentity>,
 ): Promise<{ paths: string[] } | undefined> {
-  return publishReclaimClaim(path, target, claimant, options);
+  return publishReclaimClaim(path, target, claimant, options, processInspector);
 }
 
 async function removeStaleLock(
@@ -384,8 +427,9 @@ async function removeStaleLock(
   observed: CommandLockSnapshot,
   claimant: CommandLockRecord,
   options: CommandLockAcquisitionOptions,
+  processInspector: (pid: number, signal?: AbortSignal) => Promise<ProcessIdentity>,
 ): Promise<boolean> {
-  const claim = await claimStaleLock(path, observed, claimant, options);
+  const claim = await claimStaleLock(path, observed, claimant, options, processInspector);
   if (claim === undefined) return false;
   try {
     const current = await readLockSnapshot(path);
@@ -408,28 +452,33 @@ export async function acquireCommandLock(
 ): Promise<CommandLockLease> {
   assertProtectedPath(path, "Command lock");
   await ensurePrivateDirectory(dirname(path), "Command lock directory");
-  await cleanCommandLockArtifacts(path, options);
-  return attemptCommandLock(path, 3, options);
+  const processInspector = options.inspectProcess ?? inspectProcess;
+  const processBirth = await currentProcessBirth(processInspector, options.signal);
+  await cleanCommandLockArtifacts(path, options, processInspector, processBirth);
+  return attemptCommandLock(path, 3, options, processInspector, processBirth);
 }
 
 async function attemptCommandLock(
   path: string,
   attemptsRemaining: number,
   options: CommandLockAcquisitionOptions,
+  processInspector: (pid: number, signal?: AbortSignal) => Promise<ProcessIdentity>,
+  processBirth: string,
 ): Promise<CommandLockLease> {
   const record: CommandLockRecord = {
     version: 1,
     pid: process.pid,
     token: randomUUID(),
+    processBirth,
     acquiredAt: new Date().toISOString(),
   };
   const existing = await readLockSnapshot(path);
   if (existing !== undefined) {
-    if (processIsRunning(existing.record.pid)) {
+    if (await processOwnsRecord(existing.record, processInspector, options.signal)) {
       throw new ConcurrentCommandError(path, existing.record.pid);
     }
     await options.afterStaleSnapshot?.();
-    if (!(await removeStaleLock(path, existing, record, options))) {
+    if (!(await removeStaleLock(path, existing, record, options, processInspector))) {
       throw new ConcurrentCommandError(path, existing.record.pid);
     }
   }
@@ -444,7 +493,13 @@ async function attemptCommandLock(
   } catch (error) {
     await unlink(candidatePath).catch(() => {});
     if (isFileSystemError(error, "EEXIST") && attemptsRemaining > 1) {
-      return attemptCommandLock(path, attemptsRemaining - 1, options);
+      return attemptCommandLock(
+        path,
+        attemptsRemaining - 1,
+        options,
+        processInspector,
+        processBirth,
+      );
     }
     if (isFileSystemError(error, "EEXIST")) {
       const concurrent = await readLockSnapshot(path);
