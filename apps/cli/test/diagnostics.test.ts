@@ -30,8 +30,25 @@ describe("diagnostic contracts", () => {
     assert.equal(diagnosticsPassed(results), true);
     assert.deepEqual(
       results.map((result) => result.id),
-      ["runtime", "git", "pi-auth", "github", "repositories", "cloudflare", "policy"],
+      ["runtime", "git", "pi-auth", "github", "repositories", "cloudflare", "relay", "policy"],
     );
+  });
+
+  it("includes the LaunchAgent health boundary when the caller supplies it", async () => {
+    const results = await runDiagnostics(
+      configuration,
+      configuration.policy,
+      passingGateway(),
+      undefined,
+      async () => "LaunchAgent is healthy with process 42.",
+    );
+
+    assert.deepEqual(results.at(-1), {
+      id: "service",
+      label: "macOS service",
+      status: "passed",
+      detail: "LaunchAgent is healthy with process 42.",
+    });
   });
 
   it("distinguishes every repository authorization state", () => {
@@ -160,6 +177,14 @@ describe("diagnostic contracts", () => {
             settings: { delivery_paused: false },
           },
         };
+      } else if (url === configuration.cloudflare.relayUrl) {
+        return {
+          ok: false,
+          status: 405,
+          async json() {
+            return {};
+          },
+        };
       } else {
         return {
           ok: false,
@@ -186,7 +211,8 @@ describe("diagnostic contracts", () => {
       await gateway.checkCloudflare(configuration.cloudflare),
       "queue review-jobs, HTTP pull consumer consumer; token and pull acknowledgement access verified without leasing messages.",
     );
-    assert.equal(requests.length, 7);
+    assert.match(await gateway.checkRelay(configuration.cloudflare.relayUrl), /relay webhook/u);
+    assert.equal(requests.length, 8);
     assert.match(requests[0]?.authorization ?? "", /^Bearer [^.]+\.[^.]+\.[^.]+$/u);
     assert.equal(requests[1]?.method, "POST");
     assert.equal(requests[2]?.authorization, "Bearer installation-secret");
@@ -196,6 +222,7 @@ describe("diagnostic contracts", () => {
     assert.equal(requests[6]?.method, "POST");
     assert.match(requests[6]?.url ?? "", /\/messages\/ack$/u);
     assert.deepEqual(JSON.parse(requests[6]?.body ?? ""), { acks: [], retries: [] });
+    assert.equal(requests[7]?.url, configuration.cloudflare.relayUrl);
   });
 
   it("validates every installation with its own token and repository allowlist", async () => {

@@ -8,8 +8,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import { resolveApplicationPaths, type PathEnvironment } from "./config/paths.js";
-import { loadPolicy, withRepository, writePolicy } from "./config/policy.js";
-import { createConfiguration } from "./config/schema.js";
+import {
+  createEmptyPolicy,
+  loadPolicy,
+  withRepository,
+  writePolicy,
+  type RevoirPolicy,
+} from "./config/policy.js";
+import { createConfiguration, type RevoirConfiguration } from "./config/schema.js";
+import type { SetupCheckpoint } from "./config/setup-checkpoint.js";
 import { loadConfiguration, writeConfiguration } from "./config/store.js";
 import {
   createDefaultDiagnosticGateway,
@@ -38,6 +45,7 @@ import {
   type LaunchctlGateway,
   type LaunchctlInspection,
 } from "./service/manager.js";
+import { EndToEndSetup, type SetupPlatform } from "./setup/orchestrator.js";
 
 const EXPECTED_RESULT = '{"version":2,"findings":[]}';
 const SYSTEM_PROMPT =
@@ -358,6 +366,80 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
     publicKeyEncoding: { type: "spki", format: "pem" },
   });
   const paths = resolveApplicationPaths(input.environment, homeDir);
+  let checkpoint: SetupCheckpoint | undefined;
+  let finalConfiguration: RevoirConfiguration | undefined;
+  let finalPolicy: RevoirPolicy | undefined;
+  const setupPlatform: SetupPlatform = {
+    async ensureGitHubAuthentication() {
+      return { userId: 1, login: "package-smoke" };
+    },
+    async ensureWranglerAuthentication() {
+      return { accountId: "package-smoke-account" };
+    },
+    async ensurePiAuthentication() {},
+    async ensureCloudflareResources(accountId, setupId, _existing, persist) {
+      const resources = {
+        accountId,
+        kvNamespaceId: "package-smoke-kv-id",
+        queueId: "package-smoke-queue-id",
+        queueName: `revoir-review-jobs-${setupId}`,
+        workerName: `revoir-relay-${setupId}`,
+      };
+      await persist(resources);
+      return resources;
+    },
+    async deployRelay() {
+      return "https://revoir-relay.example.workers.dev/github/webhook";
+    },
+    async createGitHubApp(created) {
+      const app = { appId: 2, appSlug: "package-smoke", privateKey };
+      await created.persist(app);
+      return app;
+    },
+    async reconcileGitHubApp() {},
+    async requestQueueApiToken() {
+      return "package-smoke-cloudflare-token";
+    },
+    async validateQueueApiToken() {},
+    async putCloudPolicy() {},
+    async getCloudPolicy() {
+      return createEmptyPolicy(1);
+    },
+    async verifyCloudPolicy() {},
+    async installService() {},
+    async runDiagnostics() {},
+  };
+  const greenfield = await new EndToEndSetup({
+    platform: setupPlatform,
+    state: {
+      async load() {
+        return checkpoint;
+      },
+      async write(value) {
+        checkpoint = structuredClone(value);
+      },
+      async remove() {
+        checkpoint = undefined;
+      },
+      async writeFinal(configuration, policy) {
+        finalConfiguration = structuredClone(configuration);
+        finalPolicy = structuredClone(policy);
+      },
+    },
+    defaults: {
+      model: { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      timeouts: { reviewMs: 1_200_000, shellCommandMs: 120_000 },
+      paths: { cacheDir: paths.cacheDir, stateDir: paths.stateDir, dataDir: paths.dataDir },
+    },
+  }).run();
+  if (
+    greenfield.policy.installations.length !== 0 ||
+    finalConfiguration?.github.privateKey !== privateKey ||
+    finalPolicy?.userId !== 1 ||
+    checkpoint !== undefined
+  ) {
+    throw new Error("Packaged greenfield setup orchestration did not complete cleanly.");
+  }
   const configuration = createConfiguration({
     github: {
       appId: 2,
@@ -372,7 +454,7 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
       kvNamespaceId: "package-smoke-kv-id",
       workerName: "revoir-relay",
       apiToken: "package-smoke-cloudflare-token",
-      relayUrl: "https://revoir-relay.example.workers.dev/webhook",
+      relayUrl: "https://revoir-relay.example.workers.dev/github/webhook",
     },
     paths: {
       cacheDir: paths.cacheDir,
@@ -407,6 +489,9 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
     },
     async checkCloudflare() {
       return "package-smoke queue";
+    },
+    async checkRelay() {
+      return "package-smoke relay";
     },
     async checkPolicy() {
       return "package-smoke policy";

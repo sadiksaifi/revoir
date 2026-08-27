@@ -95,7 +95,7 @@ function ownReview(id: number, body: string | null, state = "COMMENTED") {
   };
 }
 
-function legacyReviewBody(candidate: ReviewFindingV2): string {
+function unversionedReviewBody(candidate: ReviewFindingV2): string {
   return renderFileFinding(candidate);
 }
 
@@ -749,9 +749,7 @@ describe("GitHub App review gateway", () => {
     );
 
     assert.deepEqual(await session.getPriorReviewState(reference, new AbortController().signal), {
-      activeFingerprints: [ownBodyFingerprint, ownThreadFingerprint],
-      bodyFindings: [{ fingerprint: ownBodyFingerprint }],
-      bodyStateMigrationRequired: true,
+      bodyFindings: [],
       ownedOpenThreads: [
         {
           id: "THREAD_OWN_OPEN",
@@ -875,7 +873,7 @@ describe("GitHub App review gateway", () => {
     assert.deepEqual(mutations, ["THREAD_A"]);
   });
 
-  it("migrates the latest legacy body-marker review until a versioned snapshot exists", async () => {
+  it("ignores unversioned body-marker reviews", async () => {
     const olderFingerprint = "a".repeat(64);
     const latestFingerprint = "b".repeat(64);
     const ignoredFingerprint = "c".repeat(64);
@@ -892,7 +890,7 @@ describe("GitHub App review gateway", () => {
       anchor: "source.ts",
       attachment: { kind: "file", path: "source.ts" },
     };
-    const legacyBody = (fingerprint: string): string =>
+    const unversionedBody = (fingerprint: string): string =>
       renderFileFinding({ ...latestFinding, fingerprint });
 
     for (const hasVersionedSnapshot of [false, true]) {
@@ -909,13 +907,13 @@ describe("GitHub App review gateway", () => {
             {
               id: 201,
               state: "COMMENTED",
-              body: legacyBody(olderFingerprint),
+              body: unversionedBody(olderFingerprint),
               user: { login: "revoir-test[bot]" },
             },
             {
               id: 202,
               state: "COMMENTED",
-              body: legacyBody(latestFingerprint),
+              body: unversionedBody(latestFingerprint),
               user: { login: "revoir-test[bot]" },
             },
             ...(hasVersionedSnapshot
@@ -929,7 +927,7 @@ describe("GitHub App review gateway", () => {
                   {
                     id: 204,
                     state: "COMMENTED",
-                    body: legacyBody(ignoredFingerprint),
+                    body: unversionedBody(ignoredFingerprint),
                     user: { login: "revoir-test[bot]" },
                   },
                 ]
@@ -967,15 +965,10 @@ describe("GitHub App review gateway", () => {
       // eslint-disable-next-line no-await-in-loop
       const prior = await session.getPriorReviewState(reference, new AbortController().signal);
 
-      assert.deepEqual(
-        prior.bodyFindings,
-        hasVersionedSnapshot ? [] : [{ fingerprint: latestFingerprint }],
-      );
-      assert.equal(prior.bodyStateMigrationRequired === true, !hasVersionedSnapshot);
-      assert.deepEqual(
-        planFindingReconciliation([latestFinding], prior).netNewFindings,
-        hasVersionedSnapshot ? [latestFinding] : [],
-      );
+      assert.deepEqual(prior.bodyFindings, []);
+      assert.deepEqual(planFindingReconciliation([latestFinding], prior).netNewFindings, [
+        latestFinding,
+      ]);
       assert.equal(planFindingReconciliation([latestFinding], prior).bodyStateChanged, true);
     }
   });
@@ -995,46 +988,42 @@ describe("GitHub App review gateway", () => {
     };
     const scenarios = [
       {
-        name: "latest legacy marker set",
+        name: "latest unversioned marker set",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.older)),
-          ownReview(202, legacyReviewBody(findings.latest)),
+          ownReview(201, unversionedReviewBody(findings.older)),
+          ownReview(202, unversionedReviewBody(findings.latest)),
         ],
-        expectedBodyFingerprints: [fingerprints.latest],
-        migrationRequired: true,
+        expectedBodyFingerprints: [],
         candidate: findings.latest,
-        expectedNetNew: [],
+        expectedNetNew: [fingerprints.latest],
         bodyStateChanged: true,
         runHeadShas: [],
       },
       {
-        name: "empty legacy body",
-        reviews: [ownReview(201, legacyReviewBody(findings.older)), ownReview(202, "")],
+        name: "empty unversioned body",
+        reviews: [ownReview(201, unversionedReviewBody(findings.older)), ownReview(202, "")],
         expectedBodyFingerprints: [],
-        migrationRequired: true,
         candidate: findings.older,
         expectedNetNew: [fingerprints.older],
         bodyStateChanged: true,
         runHeadShas: [],
       },
       {
-        name: "null inline-only legacy body",
-        reviews: [ownReview(201, legacyReviewBody(findings.older)), ownReview(202, null)],
+        name: "null inline-only unversioned body",
+        reviews: [ownReview(201, unversionedReviewBody(findings.older)), ownReview(202, null)],
         expectedBodyFingerprints: [],
-        migrationRequired: true,
         candidate: findings.older,
         expectedNetNew: [fingerprints.older],
         bodyStateChanged: true,
         runHeadShas: [],
       },
       {
-        name: "run-only legacy body",
+        name: "run-only unversioned body",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(201, unversionedReviewBody(findings.older)),
           ownReview(202, `<!-- revoir:run:v1:${"3".repeat(40)} -->`),
         ],
         expectedBodyFingerprints: [],
-        migrationRequired: true,
         candidate: findings.older,
         expectedNetNew: [fingerprints.older],
         bodyStateChanged: true,
@@ -1043,31 +1032,29 @@ describe("GitHub App review gateway", () => {
       {
         name: "pending and non-App reviews are ignored",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.latest)),
-          ownReview(202, legacyReviewBody(findings.ignored), "PENDING"),
+          ownReview(201, unversionedReviewBody(findings.latest)),
+          ownReview(202, unversionedReviewBody(findings.ignored), "PENDING"),
           {
             id: 203,
             state: "COMMENTED",
-            body: legacyReviewBody(findings.other),
+            body: unversionedReviewBody(findings.other),
             user: { login: "human" },
           },
         ],
-        expectedBodyFingerprints: [fingerprints.latest],
-        migrationRequired: true,
+        expectedBodyFingerprints: [],
         candidate: findings.latest,
-        expectedNetNew: [],
+        expectedNetNew: [fingerprints.latest],
         bodyStateChanged: true,
         runHeadShas: [],
       },
       {
-        name: "legacy cannot override an explicit snapshot",
+        name: "unversioned state cannot override an explicit snapshot",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(201, unversionedReviewBody(findings.older)),
           ownReview(202, explicitReviewBody([findings.latest])),
-          ownReview(203, legacyReviewBody(findings.ignored)),
+          ownReview(203, unversionedReviewBody(findings.ignored)),
         ],
         expectedBodyFingerprints: [fingerprints.latest],
-        migrationRequired: false,
         candidate: findings.latest,
         expectedNetNew: [],
         bodyStateChanged: false,
@@ -1076,12 +1063,11 @@ describe("GitHub App review gateway", () => {
       {
         name: "explicit state without a run marker remains authoritative",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(201, unversionedReviewBody(findings.older)),
           ownReview(202, markerOnlyExplicitReviewBody(findings.latest)),
-          ownReview(203, legacyReviewBody(findings.ignored)),
+          ownReview(203, unversionedReviewBody(findings.ignored)),
         ],
         expectedBodyFingerprints: [fingerprints.latest],
-        migrationRequired: false,
         candidate: findings.latest,
         expectedNetNew: [],
         bodyStateChanged: false,
@@ -1092,10 +1078,9 @@ describe("GitHub App review gateway", () => {
         reviews: [
           ownReview(201, explicitReviewBody([findings.latest])),
           ownReview(202, explicitReviewBody([])),
-          ownReview(203, legacyReviewBody(findings.ignored)),
+          ownReview(203, unversionedReviewBody(findings.ignored)),
         ],
         expectedBodyFingerprints: [],
-        migrationRequired: false,
         candidate: findings.latest,
         expectedNetNew: [fingerprints.latest],
         bodyStateChanged: true,
@@ -1150,11 +1135,6 @@ describe("GitHub App review gateway", () => {
           scenario.expectedBodyFingerprints,
           scenario.name,
         );
-        assert.equal(
-          prior.bodyStateMigrationRequired === true,
-          scenario.migrationRequired,
-          scenario.name,
-        );
         assert.deepEqual(
           plan.netNewFindings.map(({ fingerprint }) => fingerprint),
           scenario.expectedNetNew,
@@ -1166,7 +1146,7 @@ describe("GitHub App review gateway", () => {
     );
   });
 
-  it("folds legacy snapshots across a review-page boundary and unions open App threads", async () => {
+  it("ignores unversioned snapshots across a review-page boundary", async () => {
     const retiredFingerprint = "a".repeat(64);
     const threadFingerprint = "b".repeat(64);
     const ignoredFingerprint = "c".repeat(64);
@@ -1243,8 +1223,6 @@ describe("GitHub App review gateway", () => {
     const plan = planFindingReconciliation([retiredFinding, threadFinding], prior);
 
     assert.deepEqual(prior.bodyFindings, []);
-    assert.equal(prior.bodyStateMigrationRequired, true);
-    assert.deepEqual(prior.activeFingerprints, [threadFingerprint]);
     assert.deepEqual(prior.ownedOpenThreads, [
       { id: "THREAD_OPEN", fingerprint: threadFingerprint },
     ]);
@@ -1379,10 +1357,6 @@ describe("GitHub App review gateway", () => {
 
           await session.removeOwnCompletionReaction(reference, new AbortController().signal);
           const prior = await session.getPriorReviewState(reference, new AbortController().signal);
-          assert.deepEqual(
-            prior.activeFingerprints,
-            priorRun === "findings" ? [historicalFingerprint, latestFingerprint] : [],
-          );
           assert.deepEqual(
             planFindingReconciliation([returnedFinding], prior).netNewFindings,
             priorRun === "findings" ? [] : [returnedFinding],

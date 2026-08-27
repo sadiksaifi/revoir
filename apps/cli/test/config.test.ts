@@ -49,7 +49,7 @@ function testConfiguration(
       kvNamespaceId: "kv-id",
       workerName: "revoir-relay",
       apiToken: "queue-token",
-      relayUrl: "https://revoir-relay.example.workers.dev/webhook",
+      relayUrl: "https://revoir-relay.example.workers.dev/github/webhook",
     },
     paths: {
       cacheDir: paths.cacheDir,

@@ -12,6 +12,7 @@ import {
   DEFAULT_REASONING,
   DEFAULT_REVIEW_TIMEOUT_MS,
   DEFAULT_SHELL_COMMAND_TIMEOUT_MS,
+  type RevoirConfiguration,
 } from "./config/schema.js";
 import {
   loadSetupCheckpoint,
@@ -443,24 +444,42 @@ export async function runCli(
         }
         const processRunner = new ChildProcessSetupRunner();
         const browser = createBrowserOpener(processRunner);
+        let setupServiceManager: ServiceManager | undefined;
+        const getSetupServiceManager = (configuration: RevoirConfiguration): ServiceManager => {
+          setupServiceManager ??=
+            dependencies.serviceManager ??
+            createDefaultServiceManager({
+              configFile,
+              homeDir: io.userHome ?? homedir(),
+              paths: {
+                ...paths,
+                cacheDir: configuration.paths.cacheDir,
+                stateDir: configuration.paths.stateDir,
+                dataDir: configuration.paths.dataDir,
+              },
+            });
+          return setupServiceManager;
+        };
+        const checkService = async (configuration: RevoirConfiguration): Promise<string> => {
+          const manager = getSetupServiceManager(configuration);
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            // eslint-disable-next-line no-await-in-loop
+            const status = await manager.status();
+            if (status.state === "healthy") return status.detail;
+            if (status.state !== "starting") {
+              throw new Error(`LaunchAgent is ${status.state}: ${status.detail}`);
+            }
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+          }
+          throw new Error("LaunchAgent did not become healthy within 10 seconds.");
+        };
         const platform = new DefaultSetupPlatform({
           browser,
           process: processRunner,
           secretPrompt: createHiddenPrompt(io),
           async installService(configuration) {
-            const manager =
-              dependencies.serviceManager ??
-              createDefaultServiceManager({
-                configFile,
-                homeDir: io.userHome ?? homedir(),
-                paths: {
-                  ...paths,
-                  cacheDir: configuration.paths.cacheDir,
-                  stateDir: configuration.paths.stateDir,
-                  dataDir: configuration.paths.dataDir,
-                },
-              });
-            await manager.install();
+            await getSetupServiceManager(configuration).install();
           },
           async diagnostics(configuration, policy) {
             const repositoryManager =
@@ -483,6 +502,7 @@ export async function runCli(
               policy,
               dependencies.gateway ?? createDefaultDiagnosticGateway(),
               await repositoryManager.list({ authenticate: false }),
+              () => checkService(configuration),
             );
             if (!diagnosticsPassed(results)) {
               throw new Error("End-to-end diagnostics did not pass.");
@@ -682,6 +702,27 @@ export async function runCli(
         policy,
         dependencies.gateway ?? createDefaultDiagnosticGateway(),
         authorizationEntries,
+        dependencies.gateway !== undefined && dependencies.serviceManager === undefined
+          ? undefined
+          : async () => {
+              const manager =
+                dependencies.serviceManager ??
+                createDefaultServiceManager({
+                  configFile,
+                  homeDir: io.userHome ?? homedir(),
+                  paths: {
+                    ...paths,
+                    cacheDir: configuration.paths.cacheDir,
+                    stateDir: configuration.paths.stateDir,
+                    dataDir: configuration.paths.dataDir,
+                  },
+                });
+              const status = await manager.status();
+              if (status.state !== "healthy") {
+                throw new Error(`LaunchAgent is ${status.state}: ${status.detail}`);
+              }
+              return status.detail;
+            },
       );
       write(io.stdout, renderDiagnostics(results, common.json, common.verbose, redactor));
       return diagnosticsPassed(results) ? 0 : 1;

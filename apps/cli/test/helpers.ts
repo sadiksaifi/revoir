@@ -31,7 +31,7 @@ export function createTestConfiguration(
       queueName: "revoir-review-jobs",
       kvNamespaceId: "kv-namespace",
       workerName: "revoir-relay",
-      relayUrl: "https://revoir-relay.example.workers.dev/webhook",
+      relayUrl: "https://revoir-relay.example.workers.dev/github/webhook",
       apiToken: overrides.apiToken ?? "cloudflare-secret-token",
     },
     paths: {
@@ -70,6 +70,9 @@ export function passingGateway(): DiagnosticGateway {
     },
     async checkCloudflare() {
       return "queue test-queue";
+    },
+    async checkRelay() {
+      return "relay webhook reachable";
     },
     async checkPolicy() {
       return "policy revision 1";

@@ -13,6 +13,8 @@ export interface SetupCloudflareResources {
   workerName: string;
 }
 
+export type SetupCloudflareCheckpoint = NonNullable<SetupCheckpoint["resources"]["cloudflare"]>;
+
 export interface SetupGitHubApp {
   appId: number;
   appSlug: string;
@@ -25,13 +27,16 @@ export interface SetupPlatform {
   ensurePiAuthentication(modelId: string, reasoning: string): Promise<void>;
   ensureCloudflareResources(
     accountId: string,
-    existing: SetupCheckpoint["resources"]["cloudflare"],
+    setupId: string,
+    existing: SetupCloudflareCheckpoint | undefined,
+    persist: (resources: SetupCloudflareCheckpoint) => Promise<void>,
   ): Promise<SetupCloudflareResources>;
   deployRelay(resources: SetupCloudflareResources, webhookSecret: string): Promise<string>;
   createGitHubApp(input: {
     relayUrl: string;
     state: string;
     webhookSecret: string;
+    persist: (app: SetupGitHubApp) => Promise<void>;
   }): Promise<SetupGitHubApp>;
   reconcileGitHubApp(configuration: RevoirConfiguration, policy: RevoirPolicy): Promise<void>;
   requestQueueApiToken(resources: SetupCloudflareResources): Promise<string>;
@@ -67,7 +72,7 @@ export class SetupStageError extends Error {
     const resources = [
       cloudflare === undefined
         ? undefined
-        : `Cloudflare account=${cloudflare.accountId}, KV=${cloudflare.kvNamespaceId}, Queue=${cloudflare.queueId}, Worker=${cloudflare.workerName}`,
+        : `Cloudflare account=${cloudflare.accountId}${cloudflare.kvNamespaceId === undefined ? "" : `, KV=${cloudflare.kvNamespaceId}`}${cloudflare.queueId === undefined ? "" : `, Queue=${cloudflare.queueId}`}, Worker=${cloudflare.workerName}`,
       github === undefined ? undefined : `GitHub App=${github.appId} (${github.appSlug})`,
     ].filter((value): value is string => value !== undefined);
     super(
@@ -95,7 +100,7 @@ function initialCheckpoint(): SetupCheckpoint {
   return {
     version: 1,
     completedStages: [],
-    resources: {},
+    resources: { setupId: randomBytes(8).toString("hex") },
     secrets: {
       githubWebhookSecret: randomBytes(32).toString("hex"),
     },
@@ -115,6 +120,18 @@ function assertCheckpointValue<T>(
   return value;
 }
 
+function assertCloudflareResources(
+  value: SetupCloudflareCheckpoint | undefined,
+  stage: SetupStage,
+): SetupCloudflareResources {
+  const resources = assertCheckpointValue(value, "Cloudflare resource identifiers", stage);
+  return {
+    ...resources,
+    kvNamespaceId: assertCheckpointValue(resources.kvNamespaceId, "the KV namespace id", stage),
+    queueId: assertCheckpointValue(resources.queueId, "the Queue id", stage),
+  };
+}
+
 export class EndToEndSetup {
   readonly #platform: SetupPlatform;
   readonly #state: SetupStateStore;
@@ -131,6 +148,19 @@ export class EndToEndSetup {
   }
 
   async run(): Promise<SetupResult> {
+    const writeCheckpoint = async (value: SetupCheckpoint): Promise<void> => {
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await this.#state.write(value);
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError;
+    };
     const loaded = await this.#state.load();
     const finalState = loaded === undefined ? await this.#state.loadFinal?.() : undefined;
     if (finalState !== undefined) {
@@ -156,6 +186,24 @@ export class EndToEndSetup {
           throw new SetupStageError(stage, reconciliationCheckpoint, { cause: error });
         }
       };
+      const [githubIdentity, cloudflareIdentity] = await reconcile("prerequisites", () =>
+        Promise.all([
+          this.#platform.ensureGitHubAuthentication(),
+          this.#platform.ensureWranglerAuthentication(),
+          this.#platform.ensurePiAuthentication(
+            finalState.configuration.model.id,
+            finalState.configuration.model.reasoning,
+          ),
+        ]).then(([github, cloudflare]) => [github, cloudflare] as const),
+      );
+      if (
+        githubIdentity.userId !== finalState.policy.userId ||
+        cloudflareIdentity.accountId !== resources.accountId
+      ) {
+        throw new SetupStageError("prerequisites", reconciliationCheckpoint, {
+          cause: new Error("Authenticated GitHub or Cloudflare identity differs from this setup."),
+        });
+      }
       const relayUrl = await reconcile("relay-deployed", () =>
         this.#platform.deployRelay(resources, finalState.configuration.github.webhookSecret),
       );
@@ -185,7 +233,7 @@ export class EndToEndSetup {
     let checkpoint = loaded ?? initialCheckpoint();
     if (loaded === undefined) {
       // Persist generated webhook material before the first external effect.
-      await this.#state.write(checkpoint);
+      await writeCheckpoint(checkpoint);
     }
 
     const execute = async (stage: SetupStage, operation: () => Promise<void>): Promise<void> => {
@@ -195,7 +243,7 @@ export class EndToEndSetup {
       try {
         await operation();
         checkpoint = markStage(checkpoint, stage);
-        await this.#state.write(checkpoint);
+        await writeCheckpoint(checkpoint);
       } catch (error) {
         throw new SetupStageError(stage, checkpoint, { cause: error });
       }
@@ -203,6 +251,7 @@ export class EndToEndSetup {
 
     let identity: { userId: number; login: string } | undefined;
     let account: { accountId: string } | undefined;
+    const prerequisitesCompletedAtStart = hasStage(checkpoint, "prerequisites");
     await execute("prerequisites", async () => {
       const [githubIdentity, cloudflareAccount] = await Promise.all([
         this.#platform.ensureGitHubAuthentication(),
@@ -222,7 +271,7 @@ export class EndToEndSetup {
           cloudflareAccountId: cloudflareAccount.accountId,
         },
       };
-      await this.#state.write(checkpoint);
+      await writeCheckpoint(checkpoint);
     });
     identity ??= assertCheckpointValue(
       checkpoint.resources.identity,
@@ -236,22 +285,54 @@ export class EndToEndSetup {
         "prerequisites",
       ),
     };
+    if (prerequisitesCompletedAtStart) {
+      const [verifiedGitHub, verifiedCloudflare] = await Promise.all([
+        this.#platform.ensureGitHubAuthentication(),
+        this.#platform.ensureWranglerAuthentication(),
+        this.#platform.ensurePiAuthentication(
+          this.#defaults.model.id,
+          this.#defaults.model.reasoning,
+        ),
+      ]).then(([github, cloudflare]) => [github, cloudflare] as const);
+      if (
+        verifiedGitHub.userId !== identity.userId ||
+        verifiedCloudflare.accountId !== account.accountId
+      ) {
+        throw new SetupStageError("prerequisites", checkpoint, {
+          cause: new Error(
+            "Authenticated GitHub or Cloudflare identity differs from the checkpoint.",
+          ),
+        });
+      }
+    }
 
     let cloudflare: SetupCloudflareResources | undefined;
     await execute("cloudflare-resources", async () => {
+      const setupId = assertCheckpointValue(
+        checkpoint.resources.setupId,
+        "the greenfield setup id",
+        "cloudflare-resources",
+      );
       cloudflare = await this.#platform.ensureCloudflareResources(
         account!.accountId,
+        setupId,
         checkpoint.resources.cloudflare,
+        async (partial) => {
+          checkpoint = {
+            ...checkpoint,
+            resources: { ...checkpoint.resources, cloudflare: partial },
+          };
+          await writeCheckpoint(checkpoint);
+        },
       );
       checkpoint = {
         ...checkpoint,
         resources: { ...checkpoint.resources, cloudflare },
       };
-      await this.#state.write(checkpoint);
+      await writeCheckpoint(checkpoint);
     });
-    cloudflare ??= assertCheckpointValue(
+    cloudflare ??= assertCloudflareResources(
       checkpoint.resources.cloudflare,
-      "Cloudflare resource identifiers",
       "cloudflare-resources",
     );
 
@@ -267,13 +348,9 @@ export class EndToEndSetup {
         ...checkpoint,
         resources: { ...checkpoint.resources, cloudflare },
       };
-      await this.#state.write(checkpoint);
+      await writeCheckpoint(checkpoint);
     });
-    cloudflare = assertCheckpointValue(
-      checkpoint.resources.cloudflare,
-      "the deployed relay URL",
-      "relay-deployed",
-    );
+    cloudflare = assertCloudflareResources(checkpoint.resources.cloudflare, "relay-deployed");
     const relayUrl = assertCheckpointValue(
       cloudflare.relayUrl,
       "the deployed relay URL",
@@ -282,21 +359,28 @@ export class EndToEndSetup {
 
     let github: SetupGitHubApp | undefined;
     await execute("github-app", async () => {
+      const persistedGitHub = checkpoint.resources.github;
+      const persistedPrivateKey = checkpoint.secrets.githubPrivateKey;
+      if (persistedGitHub !== undefined && persistedPrivateKey !== undefined) {
+        github = { ...persistedGitHub, privateKey: persistedPrivateKey };
+        return;
+      }
       github = await this.#platform.createGitHubApp({
         relayUrl,
         state: randomBytes(32).toString("base64url"),
         webhookSecret,
-      });
-      checkpoint = {
-        ...checkpoint,
-        resources: {
-          ...checkpoint.resources,
-          github: { appId: github.appId, appSlug: github.appSlug },
+        persist: async (created) => {
+          checkpoint = {
+            ...checkpoint,
+            resources: {
+              ...checkpoint.resources,
+              github: { appId: created.appId, appSlug: created.appSlug },
+            },
+            secrets: { ...checkpoint.secrets, githubPrivateKey: created.privateKey },
+          };
+          await writeCheckpoint(checkpoint);
         },
-        secrets: { ...checkpoint.secrets, githubPrivateKey: github.privateKey },
-      };
-      // The one-time manifest private key is durable before the stage completes.
-      await this.#state.write(checkpoint);
+      });
     });
     const githubResource = assertCheckpointValue(
       checkpoint.resources.github,
@@ -311,13 +395,27 @@ export class EndToEndSetup {
 
     let queueToken: string | undefined;
     await execute("queue-token", async () => {
-      queueToken = await this.#platform.requestQueueApiToken(cloudflare!);
-      await this.#platform.validateQueueApiToken(cloudflare!, queueToken);
-      checkpoint = {
-        ...checkpoint,
-        secrets: { ...checkpoint.secrets, cloudflareQueueApiToken: queueToken },
-      };
-      await this.#state.write(checkpoint);
+      const persisted = checkpoint.secrets.cloudflareQueueApiToken;
+      queueToken = persisted ?? (await this.#platform.requestQueueApiToken(cloudflare!));
+      if (persisted === undefined) {
+        checkpoint = {
+          ...checkpoint,
+          secrets: { ...checkpoint.secrets, cloudflareQueueApiToken: queueToken },
+        };
+        await writeCheckpoint(checkpoint);
+      }
+      try {
+        await this.#platform.validateQueueApiToken(cloudflare!, queueToken);
+      } catch (error) {
+        if (persisted === undefined) throw error;
+        queueToken = await this.#platform.requestQueueApiToken(cloudflare!);
+        checkpoint = {
+          ...checkpoint,
+          secrets: { ...checkpoint.secrets, cloudflareQueueApiToken: queueToken },
+        };
+        await writeCheckpoint(checkpoint);
+        await this.#platform.validateQueueApiToken(cloudflare!, queueToken);
+      }
     });
     queueToken ??= assertCheckpointValue(
       checkpoint.secrets.cloudflareQueueApiToken,

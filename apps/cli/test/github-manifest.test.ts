@@ -49,7 +49,7 @@ describe("GitHub App Manifest flow", () => {
 
     const result = await flow.create({
       appName: "Revoir Test",
-      relayUrl: "https://relay.example.workers.dev/webhook",
+      relayUrl: "https://relay.example.workers.dev/github/webhook",
       state: "expected-state",
       webhookSecret: "setup-secret",
     });
@@ -61,7 +61,7 @@ describe("GitHub App Manifest flow", () => {
     assert.deepEqual(manifest?.default_events, REQUIRED_GITHUB_APP_EVENTS);
     assert.deepEqual(manifest?.hook_attributes, {
       active: true,
-      url: "https://relay.example.workers.dev/webhook",
+      url: "https://relay.example.workers.dev/github/webhook",
       webhook_secret: "setup-secret",
     });
     assert.match(String(manifest?.redirect_url), /^http:\/\/127\.0\.0\.1:\d+\/callback$/u);
@@ -88,7 +88,7 @@ describe("GitHub App Manifest flow", () => {
     await assert.rejects(
       flow.create({
         appName: "Revoir Test",
-        relayUrl: "https://relay.example.workers.dev/webhook",
+        relayUrl: "https://relay.example.workers.dev/github/webhook",
         state: "expected-state",
         webhookSecret: "setup-secret",
       }),
@@ -111,7 +111,7 @@ describe("GitHub App Manifest flow", () => {
     await assert.rejects(
       flow.create({
         appName: "Revoir Test",
-        relayUrl: "https://relay.example.workers.dev/webhook",
+        relayUrl: "https://relay.example.workers.dev/github/webhook",
         state: "expected-state",
         webhookSecret: "setup-secret",
       }),

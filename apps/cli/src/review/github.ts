@@ -1667,11 +1667,8 @@ class InstallationSession implements GitHubReviewSession {
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<PriorReviewState> {
-    const activeFingerprints = new Set<string>();
     const runHeadShas = new Set<string>();
     let latestBodyFindings: readonly PriorFindingIdentity[] = [];
-    let bodyStateMigrationRequired = false;
-    let foundExplicitBodyState = false;
     let reviewPage = 1;
     for (;;) {
       throwIfAborted(signal);
@@ -1699,11 +1696,6 @@ class InstallationSession implements GitHubReviewSession {
           const bodyState = bodyStateFindingIdentities(review.body);
           if (bodyState !== undefined) {
             latestBodyFindings = bodyState;
-            bodyStateMigrationRequired = false;
-            foundExplicitBodyState = true;
-          } else if (!foundExplicitBodyState) {
-            latestBodyFindings = findingMarkerIdentities(review.body);
-            bodyStateMigrationRequired = true;
           }
         }
       }
@@ -1714,13 +1706,8 @@ class InstallationSession implements GitHubReviewSession {
       // eslint-disable-next-line no-await-in-loop
       await yieldToEventLoop(signal);
     }
-    if (!this.#priorRunWasClean) {
-      for (const finding of latestBodyFindings) {
-        activeFingerprints.add(finding.fingerprint);
-      }
-    } else {
+    if (this.#priorRunWasClean) {
       latestBodyFindings = [];
-      bodyStateMigrationRequired = false;
     }
 
     const ownedOpenThreads: Array<{
@@ -1792,7 +1779,6 @@ class InstallationSession implements GitHubReviewSession {
           findingIdentities.length === 1
         ) {
           const findingIdentity = findingIdentities[0]!;
-          activeFingerprints.add(findingIdentity.fingerprint);
           ownedOpenThreads.push({
             id,
             fingerprint: findingIdentity.fingerprint,
@@ -1817,9 +1803,7 @@ class InstallationSession implements GitHubReviewSession {
     );
     this.#ownedOpenThreadIds = new Set(sortedThreads.map(({ id }) => id));
     return {
-      activeFingerprints: [...activeFingerprints].toSorted(),
       bodyFindings: latestBodyFindings,
-      ...(bodyStateMigrationRequired ? { bodyStateMigrationRequired: true } : {}),
       ownedOpenThreads: sortedThreads,
       runHeadShas: [...runHeadShas].toSorted(),
     };

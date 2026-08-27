@@ -17,6 +17,7 @@ class MemorySetupState implements SetupStateStore {
   finalConfiguration: RevoirConfiguration | undefined;
   finalPolicy: RevoirPolicy | undefined;
   writes = 0;
+  writeFailures = 0;
 
   async load() {
     return this.checkpoint === undefined ? undefined : structuredClone(this.checkpoint);
@@ -33,6 +34,10 @@ class MemorySetupState implements SetupStateStore {
 
   async write(checkpoint: SetupCheckpoint) {
     this.writes += 1;
+    if (this.writeFailures > 0) {
+      this.writeFailures -= 1;
+      throw new Error("simulated checkpoint write failure");
+    }
     this.checkpoint = structuredClone(checkpoint);
   }
 
@@ -63,31 +68,37 @@ function platform(
   return {
     calls,
     async ensureGitHubAuthentication() {
-      assert.match(state.checkpoint?.secrets.githubWebhookSecret ?? "", /^[0-9a-f]{64}$/u);
+      if (state.checkpoint !== undefined) {
+        assert.match(state.checkpoint.secrets.githubWebhookSecret ?? "", /^[0-9a-f]{64}$/u);
+      }
       return stage("prerequisites", { userId: 42, login: "test-user" });
     },
     async ensureWranglerAuthentication() {
       return { accountId: "account" };
     },
     async ensurePiAuthentication() {},
-    async ensureCloudflareResources() {
-      return stage("cloudflare-resources", {
+    async ensureCloudflareResources(_accountId, _setupId, _existing, persist) {
+      const resources = await stage("cloudflare-resources", {
         accountId: "account",
         kvNamespaceId: "kv",
         queueId: "queue",
         queueName: "revoir-review-jobs",
         workerName: "revoir-relay",
       });
+      await persist(resources);
+      return resources;
     },
     async deployRelay() {
-      return stage("relay-deployed", "https://revoir-relay.example.workers.dev/webhook");
+      return stage("relay-deployed", "https://revoir-relay.example.workers.dev/github/webhook");
     },
-    async createGitHubApp() {
-      return stage("github-app", {
+    async createGitHubApp(input) {
+      const app = await stage("github-app", {
         appId: 7,
         appSlug: "revoir-test",
         privateKey: TEST_PRIVATE_KEY,
       });
+      await input.persist(app);
+      return app;
     },
     async reconcileGitHubApp() {},
     async requestQueueApiToken() {
@@ -174,6 +185,7 @@ describe("greenfield end-to-end setup", () => {
     assert.equal(result.resumed, true);
     assert.equal(result.configuration.github.webhookSecret, webhookSecret);
     assert.deepEqual(resumedPlatform.calls, [
+      "prerequisites",
       "github-app",
       "queue-token",
       "local-state",
@@ -203,11 +215,31 @@ describe("greenfield end-to-end setup", () => {
       // eslint-disable-next-line no-await-in-loop
       await setup(state, resumedPlatform).run();
       assert.equal(
-        resumedPlatform.calls.some((stage) => alreadyCompleted.has(stage)),
+        resumedPlatform.calls.some(
+          (stage) => stage !== "prerequisites" && alreadyCompleted.has(stage),
+        ),
         false,
         `${interruptedStage} resume repeated an already completed stage`,
       );
     }
+  });
+
+  it("retries the one-time App-key checkpoint before completing manifest conversion", async () => {
+    const state = new MemorySetupState();
+    const setupPlatform = platform(state);
+    let appCreations = 0;
+    setupPlatform.createGitHubApp = async (input) => {
+      appCreations += 1;
+      const app = { appId: 7, appSlug: "revoir-test", privateKey: TEST_PRIVATE_KEY };
+      state.writeFailures = 1;
+      await input.persist(app);
+      return app;
+    };
+
+    await setup(state, setupPlatform).run();
+
+    assert.equal(appCreations, 1);
+    assert.equal(state.finalConfiguration?.github.privateKey, TEST_PRIVATE_KEY);
   });
 
   it("reconciles its completed installation without creating another App or cloud resources", async () => {
@@ -219,6 +251,7 @@ describe("greenfield end-to-end setup", () => {
 
     assert.equal(result.resumed, true);
     assert.deepEqual(reconciliation.calls, [
+      "prerequisites",
       "relay-deployed",
       "local-state",
       "service-installed",

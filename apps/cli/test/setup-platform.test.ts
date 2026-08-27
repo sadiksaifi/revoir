@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
-import { createEmptyPolicy } from "../src/config/policy.js";
+import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import type { RevoirConfiguration } from "../src/config/schema.js";
 import {
   DefaultSetupPlatform,
@@ -65,6 +65,7 @@ const RESOURCES = {
   queueName: "revoir-review-jobs",
   workerName: "revoir-relay",
 } as const;
+const SETUP_ID = "0123456789abcdef";
 
 describe("default greenfield setup platform", () => {
   it("authenticates Wrangler and creates KV, Queue, and its HTTP pull consumer", async () => {
@@ -75,6 +76,7 @@ describe("default greenfield setup platform", () => {
       if (joined.startsWith("kv namespace create")) {
         return { stdout: '{"id":"kv-immutable-id"}', stderr: "" };
       }
+      if (joined === "kv namespace list") return { stdout: "[]", stderr: "" };
       if (joined.startsWith("queues info")) {
         return { stdout: "Queue ID: queue-immutable-id\n", stderr: "" };
       }
@@ -83,13 +85,72 @@ describe("default greenfield setup platform", () => {
     const setup = platform({ process });
 
     assert.deepEqual(await setup.ensureWranglerAuthentication(), { accountId });
-    assert.deepEqual(await setup.ensureCloudflareResources(accountId, undefined), RESOURCES);
+    const partials: unknown[] = [];
+    assert.deepEqual(
+      await setup.ensureCloudflareResources(accountId, SETUP_ID, undefined, async (resources) => {
+        partials.push(structuredClone(resources));
+      }),
+      {
+        ...RESOURCES,
+        queueName: `revoir-review-jobs-${SETUP_ID}`,
+        workerName: `revoir-relay-${SETUP_ID}`,
+      },
+    );
+    assert.equal(partials.length, 2);
     assert.equal(
       process.calls.some(({ arguments: arguments_ }) =>
-        arguments_.join(" ").startsWith("queues consumer http add revoir-review-jobs"),
+        arguments_.join(" ").startsWith(`queues consumer http add revoir-review-jobs-${SETUP_ID}`),
       ),
       true,
     );
+  });
+
+  it("recovers its deterministic KV after a post-create checkpoint interruption", async () => {
+    let kvCreated = false;
+    let kvCreates = 0;
+    let queueCreated = false;
+    const process = new FakeProcess((_command, arguments_) => {
+      const joined = arguments_.join(" ");
+      if (joined === "kv namespace list") {
+        return {
+          stdout: kvCreated
+            ? JSON.stringify([{ id: "kv-immutable-id", title: `revoir-policy-${SETUP_ID}` }])
+            : "[]",
+          stderr: "",
+        };
+      }
+      if (joined.startsWith("kv namespace create")) {
+        kvCreated = true;
+        kvCreates += 1;
+        return { stdout: '{"id":"kv-immutable-id"}', stderr: "" };
+      }
+      if (joined.startsWith("queues info")) {
+        if (!queueCreated) throw new Error("queue not found");
+        return { stdout: "Queue ID: queue-immutable-id\nHTTP Pull Consumer", stderr: "" };
+      }
+      if (joined.startsWith("queues create")) {
+        queueCreated = true;
+        return { stdout: "", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const setup = platform({ process });
+
+    await assert.rejects(
+      setup.ensureCloudflareResources("a".repeat(32), SETUP_ID, undefined, async () => {
+        throw new Error("checkpoint interrupted");
+      }),
+      /checkpoint interrupted/u,
+    );
+    const recovered = await setup.ensureCloudflareResources(
+      "a".repeat(32),
+      SETUP_ID,
+      undefined,
+      async () => {},
+    );
+
+    assert.equal(recovered.kvNamespaceId, "kv-immutable-id");
+    assert.equal(kvCreates, 1);
   });
 
   it("deploys the embedded relay with only KV, Queue, and webhook-secret bindings", async () => {
@@ -109,7 +170,7 @@ describe("default greenfield setup platform", () => {
 
     assert.equal(
       await setup.deployRelay(RESOURCES, "webhook-secret"),
-      "https://revoir-relay.example.workers.dev/webhook",
+      "https://revoir-relay.example.workers.dev/github/webhook",
     );
     assert.deepEqual(generatedConfiguration?.kv_namespaces, [
       { binding: "POLICY_KV", id: "kv-immutable-id" },
@@ -167,10 +228,11 @@ describe("default greenfield setup platform", () => {
     assert.deepEqual(opened, []);
     assert.deepEqual(
       requests.map(({ method }) => method),
-      ["GET", "GET", "PATCH"],
+      ["GET", "POST", "GET", "PATCH"],
     );
     assert.match(requests[0]!.url, /accounts\/a{32}\/queues\/queue-immutable-id$/u);
-    assert.equal(requests[2]!.url, "https://api.github.com/app/hook/config");
+    assert.match(requests[1]!.url, /\/messages\/ack$/u);
+    assert.equal(requests[3]!.url, "https://api.github.com/app/hook/config");
   });
 
   it("opens the exact App permission page when approval-required drift is detected", async () => {
@@ -199,5 +261,84 @@ describe("default greenfield setup platform", () => {
     assert.deepEqual(opened, [
       `https://github.com/settings/apps/${configuration.github.appSlug}/permissions`,
     ]);
+  });
+
+  it("rejects unexpected App permissions and events instead of silently widening authority", async () => {
+    const opened: string[] = [];
+    const configuration = createTestConfiguration({
+      cacheDir: "/tmp/revoir-test-cache",
+      stateDir: "/tmp/revoir-test-state",
+      dataDir: "/tmp/revoir-test-data",
+    });
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      opened,
+      fetch: async () =>
+        Response.json({
+          id: configuration.github.appId,
+          slug: configuration.github.appSlug,
+          events: ["issue_comment", "pull_request", "push"],
+          permissions: {
+            actions: "read",
+            checks: "write",
+            contents: "read",
+            issues: "write",
+            metadata: "read",
+            pull_requests: "write",
+            administration: "read",
+          },
+        }),
+    });
+
+    await assert.rejects(
+      setup.reconcileGitHubApp(configuration, configuration.policy),
+      /permissions or events require approval/u,
+    );
+    assert.deepEqual(opened, [
+      `https://github.com/settings/apps/${configuration.github.appSlug}/permissions`,
+    ]);
+  });
+
+  it("opens the exact installation page while a repository permission change awaits approval", async () => {
+    const opened: string[] = [];
+    const configuration = createTestConfiguration({
+      cacheDir: "/tmp/revoir-test-cache",
+      stateDir: "/tmp/revoir-test-state",
+      dataDir: "/tmp/revoir-test-data",
+    });
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      opened,
+      fetch: async (input) => {
+        const url = input.toString();
+        if (url === "https://api.github.com/app") {
+          return Response.json({
+            id: configuration.github.appId,
+            slug: configuration.github.appSlug,
+            events: ["issue_comment", "pull_request"],
+            permissions: {
+              actions: "read",
+              checks: "write",
+              contents: "read",
+              issues: "write",
+              metadata: "read",
+              pull_requests: "write",
+            },
+          });
+        }
+        return Response.json({ permissions: { metadata: "read" } });
+      },
+    });
+    const policy = withRepository(createEmptyPolicy(42), 8, {
+      id: 99,
+      owner: "owner",
+      name: "repository",
+    });
+
+    await assert.rejects(
+      setup.reconcileGitHubApp(configuration, policy),
+      /installation 8 requires permission approval/u,
+    );
+    assert.deepEqual(opened, ["https://github.com/settings/installations/8"]);
   });
 });

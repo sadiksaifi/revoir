@@ -101,7 +101,7 @@ function configuration(reviewMs = 60_000) {
       queueName: "revoir-review-jobs",
       kvNamespaceId: "kv-namespace",
       workerName: "revoir-relay",
-      relayUrl: "https://revoir-relay.example.workers.dev/webhook",
+      relayUrl: "https://revoir-relay.example.workers.dev/github/webhook",
       apiToken: "cloudflare-token",
     },
     paths: {
@@ -286,7 +286,6 @@ function harness(
       return (
         (pendingReviewRemoved ? options.priorReviewStateAfterPendingRemoval : undefined) ??
         options.priorReviewState ?? {
-          activeFingerprints: [],
           ownedOpenThreads: [],
           runHeadShas: [],
         }
@@ -722,7 +721,6 @@ describe("clean review orchestrator", () => {
     };
     const { createdPublications, events, orchestrator } = harness({
       priorReviewState: {
-        activeFingerprints: [unchanged.fingerprint],
         ownedOpenThreads: [
           { id: "THREAD_OLD", fingerprint: "c".repeat(64) },
           { id: "THREAD_CURRENT", fingerprint: unchanged.fingerprint },
@@ -757,7 +755,6 @@ describe("clean review orchestrator", () => {
     const unchanged = validatedFinding();
     const { createdPublications, events, orchestrator } = harness({
       priorReviewState: {
-        activeFingerprints: [unchanged.fingerprint],
         ownedOpenThreads: [{ id: "THREAD_CURRENT", fingerprint: unchanged.fingerprint }],
         runHeadShas: ["1".repeat(40)],
       },
@@ -781,7 +778,6 @@ describe("clean review orchestrator", () => {
     };
     const { createdPublications, orchestrator } = harness({
       priorReviewState: {
-        activeFingerprints: [unchangedInline.fingerprint, disappearedBody.fingerprint],
         bodyFindings: [{ fingerprint: disappearedBody.fingerprint }],
         ownedOpenThreads: [{ id: "THREAD_CURRENT", fingerprint: unchangedInline.fingerprint }],
         runHeadShas: ["1".repeat(40)],
@@ -812,7 +808,6 @@ describe("clean review orchestrator", () => {
     };
     const cleanRun = harness({
       priorReviewState: {
-        activeFingerprints: [returnedBodyFinding.fingerprint],
         bodyFindings: [{ fingerprint: returnedBodyFinding.fingerprint }],
         ownedOpenThreads: [],
         runHeadShas: ["1".repeat(40)],
@@ -835,7 +830,6 @@ describe("clean review orchestrator", () => {
     assert.equal(staleSuccessor.createdPublications.length, 0);
     assert.deepEqual(
       planFindingReconciliation([returnedBodyFinding], {
-        activeFingerprints: [],
         bodyFindings: persistedBodyFindings,
         ownedOpenThreads: [],
         runHeadShas: ["2".repeat(40)],
@@ -847,7 +841,6 @@ describe("clean review orchestrator", () => {
   it("refreshes prior state after an uncertain pending review becomes submitted", async () => {
     const unchanged = validatedFinding();
     const publishedState: PriorReviewState = {
-      activeFingerprints: [unchanged.fingerprint],
       ownedOpenThreads: [{ id: "THREAD_SUBMITTED", fingerprint: unchanged.fingerprint }],
       runHeadShas: ["1".repeat(40)],
     };
@@ -868,7 +861,6 @@ describe("clean review orchestrator", () => {
   it("resolves a disappeared owned finding before completing the clean review", async () => {
     const { events, orchestrator } = harness({
       priorReviewState: {
-        activeFingerprints: ["c".repeat(64)],
         ownedOpenThreads: [{ id: "THREAD_FIXED", fingerprint: "c".repeat(64) }],
         runHeadShas: ["1".repeat(40)],
       },
@@ -886,7 +878,6 @@ describe("clean review orchestrator", () => {
     const { events, orchestrator } = harness({
       mutateHeadDuring: "workspace-cleanup",
       priorReviewState: {
-        activeFingerprints: [],
         ownedOpenThreads: [{ id: "THREAD_OLD", fingerprint: "c".repeat(64) }],
         runHeadShas: [],
       },
@@ -904,7 +895,6 @@ describe("clean review orchestrator", () => {
     const { events, orchestrator } = harness({
       mutateHeadDuring: "pending-review-removal",
       priorReviewState: {
-        activeFingerprints: [],
         ownedOpenThreads: [{ id: "THREAD_OLD", fingerprint: "c".repeat(64) }],
         runHeadShas: [],
       },
@@ -927,7 +917,6 @@ describe("clean review orchestrator", () => {
     const { createdPublications, events, orchestrator } = harness({
       threadResolutionStaleSha: staleHeadSha,
       priorReviewState: {
-        activeFingerprints: ["b".repeat(64), "c".repeat(64)],
         ownedOpenThreads: [
           { id: "THREAD_A", fingerprint: "b".repeat(64) },
           { id: "THREAD_B", fingerprint: "c".repeat(64) },

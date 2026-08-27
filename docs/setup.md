@@ -32,10 +32,14 @@ to repair drift. Adding trust always requires `revoir repository add`.
 ## Prerequisites
 
 - macOS on the review machine;
-- Git and GitHub CLI (`gh`);
+- Git, GitHub CLI (`gh`), and Cloudflare Wrangler 4 (`wrangler`) on `PATH`;
 - a free Cloudflare account;
 - ChatGPT Plus or Pro;
-- `mise` for the repository's pinned Node.js and pnpm versions.
+- `mise` for building the standalone executable from this repository.
+
+The target Mac needs only the standalone `revoir` executable and the command-line
+prerequisites above. Pi and its OpenAI Codex OAuth flow are embedded in Revoir; a
+separate global `pi` executable is not required.
 
 Install dependencies and build the standalone executable from a clean checkout on the
 same architecture as the target Mac:
@@ -64,7 +68,7 @@ Setup is interactive and resumable. It performs these stages in order:
 
 1. verifies GitHub CLI authentication and opens `gh auth login --web` when needed;
 2. verifies Wrangler authentication and opens `wrangler login` when needed;
-3. verifies the configured Pi model and opens Pi for OpenAI Codex OAuth when needed;
+3. verifies the configured Pi model and opens the embedded OpenAI Codex OAuth flow when needed;
 4. creates one KV namespace, one Queue, its HTTP pull consumer, and one Worker;
 5. deploys the Worker bundled inside the executable;
 6. opens GitHub's App Manifest flow and creates one **Any account** GitHub App;
@@ -72,7 +76,8 @@ Setup is interactive and resumable. It performs these stages in order:
    `Account > Queues > Edit` API token;
 8. writes an empty repository policy locally and to KV;
 9. installs and starts the per-user LaunchAgent;
-10. runs end-to-end diagnostics.
+10. verifies the relay webhook route, LaunchAgent process health, App/installation
+    grants, Queue acknowledgement scope, and local/KV policy equality.
 
 The GitHub callback listener binds only to a random `127.0.0.1` port and validates a
 one-time state value. The generated GitHub private key and webhook secret are persisted
@@ -160,7 +165,7 @@ With default XDG locations, setup writes:
 - `~/.local/state/revoir/pending-repositories.json`: pending GitHub owner approvals;
 - `~/.local/state/revoir/`: service logs, locks, and durable review state;
 - `~/.cache/revoir/`: temporary review checkouts;
-- `~/Library/LaunchAgents/dev.revoir.worker.plist`: generated user service definition.
+- `~/Library/LaunchAgents/io.github.sadiksaifi.revoir.plist`: generated user service definition.
 
 Configuration, policy, checkpoints, and pending state use protected directories and
 `0600` files. Unsafe modes and symlinks are rejected rather than repaired.

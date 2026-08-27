@@ -37,3 +37,5 @@ export {
   type RevoirPolicyRepository,
   type RevoirPolicyV1,
 } from "./policy.js";
+
+export const REVOIR_WEBHOOK_PATH = "/github/webhook" as const;

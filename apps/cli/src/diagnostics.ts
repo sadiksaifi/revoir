@@ -50,8 +50,10 @@ export interface DiagnosticResult {
     | "github"
     | "repositories"
     | "cloudflare"
+    | "relay"
     | "policy"
-    | "authorization";
+    | "authorization"
+    | "service";
   label: string;
   status: DiagnosticStatus;
   detail: string;
@@ -67,6 +69,7 @@ export interface DiagnosticGateway {
     policy: RevoirPolicy,
   ): Promise<{ app: string; repositories: string }>;
   checkCloudflare(configuration: RevoirConfiguration["cloudflare"]): Promise<string>;
+  checkRelay(relayUrl: string): Promise<string>;
   checkPolicy(
     configuration: RevoirConfiguration["cloudflare"],
     policy: RevoirPolicy,
@@ -144,18 +147,22 @@ function validateGitHubPermissions(value: unknown): void {
   const invalidPermissions = Object.entries(REQUIRED_GITHUB_PERMISSIONS).filter(
     ([permission, requiredGrant]) => permissions[permission] !== requiredGrant,
   );
-  if (invalidPermissions.length === 0) {
+  const unexpectedPermissions = Object.keys(permissions).filter(
+    (permission) => !(permission in REQUIRED_GITHUB_PERMISSIONS),
+  );
+  if (invalidPermissions.length === 0 && unexpectedPermissions.length === 0) {
     return;
   }
 
-  const detail = invalidPermissions
-    .map(([permission, requiredGrant]) => {
+  const detail = [
+    ...invalidPermissions.map(([permission, requiredGrant]) => {
       const configuredGrant = permissions[permission];
       return `${permission} must be "${requiredGrant}" (found ${
         typeof configuredGrant === "string" ? `"${configuredGrant}"` : "missing"
       })`;
-    })
-    .join("; ");
+    }),
+    ...unexpectedPermissions.map((permission) => `${permission} must be absent`),
+  ].join("; ");
   throw new Error(
     `GitHub installation permissions are invalid: ${detail}. Update the repository permissions in the GitHub App settings, approve the permission change for this installation, and rerun diagnostics.`,
   );
@@ -166,9 +173,19 @@ function validateGitHubEvents(value: unknown): void {
     throw new Error("GitHub App webhook subscriptions are invalid: events are unavailable.");
   }
   const missingEvents = REQUIRED_GITHUB_EVENTS.filter((event) => !value.includes(event));
-  if (missingEvents.length > 0) {
+  const unexpectedEvents = value.filter(
+    (event) => !(REQUIRED_GITHUB_EVENTS as readonly string[]).includes(event),
+  );
+  if (missingEvents.length > 0 || unexpectedEvents.length > 0) {
     throw new Error(
-      `GitHub App webhook subscriptions are invalid: missing ${missingEvents.join(", ")}. Subscribe to the Pull request and Issue comment events in the GitHub App settings, then rerun diagnostics.`,
+      `GitHub App webhook subscriptions are invalid: ${[
+        missingEvents.length === 0 ? undefined : `missing ${missingEvents.join(", ")}`,
+        unexpectedEvents.length === 0 ? undefined : `unexpected ${unexpectedEvents.join(", ")}`,
+      ]
+        .filter((detail): detail is string => detail !== undefined)
+        .join(
+          "; ",
+        )}. Subscribe only to the Pull request and Issue comment events in the GitHub App settings, then rerun diagnostics.`,
     );
   }
 }
@@ -218,7 +235,7 @@ export function createDefaultDiagnosticGateway(
       const authCheck = await modelRuntime.checkAuth(providerId);
       if (auth === undefined || authCheck?.type !== "oauth") {
         throw new Error(
-          'Pi OpenAI Codex login is unavailable. Run "pi", then use "/login" and select OpenAI Codex.',
+          'Pi OpenAI Codex login is unavailable. Rerun "revoir setup" to complete browser authentication.',
         );
       }
       return `${modelId} (${reasoning} reasoning), OpenAI Codex OAuth`;
@@ -391,6 +408,16 @@ export function createDefaultDiagnosticGateway(
       return `queue ${queueName}, HTTP pull consumer ${consumerId}; token and pull acknowledgement access verified without leasing messages.`;
     },
 
+    async checkRelay(relayUrl) {
+      const response = await fetchImplementation(relayUrl, { method: "GET" });
+      if (response.status !== 405) {
+        throw new Error(
+          `Relay webhook health check expected HTTP 405 for GET, received ${response.status}.`,
+        );
+      }
+      return `relay webhook reachable at ${new URL(relayUrl).host}`;
+    },
+
     async checkPolicy(configuration, policy) {
       const { stdout } = await execFile(
         "wrangler",
@@ -445,8 +472,9 @@ export async function runDiagnostics(
   policy: RevoirPolicy,
   gateway: DiagnosticGateway = createDefaultDiagnosticGateway(),
   authorizationEntries?: readonly RepositoryListEntry[],
+  checkService?: () => Promise<string>,
 ): Promise<DiagnosticResult[]> {
-  const [runtime, git, pi, github, cloudflare, cloudPolicy] = await Promise.all([
+  const [runtime, git, pi, github, cloudflare, relay, cloudPolicy] = await Promise.all([
     capture("runtime", "Node runtime", () => gateway.checkRuntime()),
     capture("git", "System Git", () => gateway.checkGit(configuration.timeouts.shellCommandMs)),
     capture("pi-auth", "Pi Codex authentication", () =>
@@ -491,14 +519,18 @@ export async function runDiagnostics(
     capture("cloudflare", "Cloudflare Queue", () =>
       gateway.checkCloudflare(configuration.cloudflare),
     ),
+    capture("relay", "Webhook relay", () => gateway.checkRelay(configuration.cloudflare.relayUrl)),
     capture("policy", "Repository policy", () =>
       gateway.checkPolicy(configuration.cloudflare, policy),
     ),
   ]);
 
-  const results = [runtime, git, pi, ...github, cloudflare, cloudPolicy];
+  const results = [runtime, git, pi, ...github, cloudflare, relay, cloudPolicy];
   if (authorizationEntries !== undefined) {
     results.push(repositoryAuthorizationDiagnostic(authorizationEntries));
+  }
+  if (checkService !== undefined) {
+    results.push(await capture("service", "macOS service", checkService));
   }
   return results;
 }

@@ -26,12 +26,13 @@ export interface SetupCheckpoint {
   version: typeof SETUP_CHECKPOINT_VERSION;
   completedStages: SetupStage[];
   resources: {
+    setupId?: string;
     identity?: { userId: number; login: string };
     cloudflareAccountId?: string;
     cloudflare?: {
       accountId: string;
-      kvNamespaceId: string;
-      queueId: string;
+      kvNamespaceId?: string;
+      queueId?: string;
       queueName: string;
       workerName: string;
       relayUrl?: string;
@@ -97,8 +98,8 @@ function isCloudflareResources(
       "relayUrl",
     ]) &&
     isNonEmptyString(value.accountId) &&
-    isNonEmptyString(value.kvNamespaceId) &&
-    isNonEmptyString(value.queueId) &&
+    optionalString(value.kvNamespaceId) &&
+    optionalString(value.queueId) &&
     isNonEmptyString(value.queueName) &&
     isNonEmptyString(value.workerName) &&
     optionalString(value.relayUrl)
@@ -153,7 +154,14 @@ export function validateSetupCheckpoint(value: unknown): SetupCheckpoint {
 
   if (
     !isRecord(value.resources) ||
-    !hasOnlyKeys(value.resources, ["identity", "cloudflareAccountId", "cloudflare", "github"]) ||
+    !hasOnlyKeys(value.resources, [
+      "setupId",
+      "identity",
+      "cloudflareAccountId",
+      "cloudflare",
+      "github",
+    ]) ||
+    !optionalString(value.resources.setupId) ||
     (value.resources.identity !== undefined && !isIdentity(value.resources.identity)) ||
     !optionalString(value.resources.cloudflareAccountId) ||
     (value.resources.cloudflare !== undefined &&

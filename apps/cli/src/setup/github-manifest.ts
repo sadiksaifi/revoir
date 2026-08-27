@@ -115,6 +115,7 @@ export class GitHubManifestFlow {
     relayUrl: string;
     state: string;
     webhookSecret: string;
+    persist?: (result: GitHubManifestResult) => Promise<void>;
   }): Promise<GitHubManifestResult> {
     const callback = pendingCallback();
     void callback.promise.catch(() => {});
@@ -201,7 +202,9 @@ export class GitHubManifestFlow {
       if (!response.ok) {
         throw new Error(`GitHub App Manifest conversion failed with HTTP ${response.status}.`);
       }
-      return parseConversion(await response.json());
+      const result = parseConversion(await response.json());
+      await input.persist?.(result);
+      return result;
     } finally {
       await closeServer(server);
     }

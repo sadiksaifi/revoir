@@ -34,7 +34,7 @@ function configuration(timeouts?: { reviewMs?: number; shellCommandMs?: number }
       queueName: "revoir-review-jobs",
       kvNamespaceId: "kv-namespace",
       workerName: "revoir-relay",
-      relayUrl: "https://revoir-relay.example.workers.dev/webhook",
+      relayUrl: "https://revoir-relay.example.workers.dev/github/webhook",
       apiToken: "queue-token",
     },
     paths: {

@@ -1,5 +1,6 @@
 import {
   REVOIR_POLICY_KV_KEY,
+  REVOIR_WEBHOOK_PATH,
   REVIEW_JOB_ACTIONS,
   parseReviewQueueJob,
   parseRevoirPolicy,
@@ -271,7 +272,7 @@ export function createWebhookRelay(now: () => Date = () => new Date()) {
   return {
     async fetch(request: Request, environment: RelayEnvironment): Promise<Response> {
       const url = new URL(request.url);
-      if (url.pathname !== "/github/webhook") {
+      if (url.pathname !== REVOIR_WEBHOOK_PATH) {
         return new Response("Not Found", { status: 404 });
       }
       if (request.method !== "POST") {
