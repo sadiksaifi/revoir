@@ -110,6 +110,85 @@ describe("GitHub repository gateway", () => {
       repository: { id: 9001, owner: "owner", name: "repository" },
       newInstallationUrl: `https://github.com/apps/${configuration.github.appSlug}/installations/new`,
     });
+    assert.equal(
+      await gateway.waitForRepositoryAccess(8, { id: 9001 }, false),
+      "installation-absent",
+    );
+  });
+
+  it("does not classify a repository-probe 403 as missing access", async () => {
+    const gateway = new GitHubRepositoryGateway({
+      browser: { async open() {} },
+      configuration: configuration.github,
+      process: {
+        async run() {
+          return {
+            stdout: JSON.stringify({ id: 9001, name: "repository", owner: { login: "owner" } }),
+            stderr: "",
+          };
+        },
+      },
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes("/app/installations?")) {
+          return Response.json([
+            { id: 8, account: { login: "owner" }, target_type: "Organization" },
+          ]);
+        }
+        if (url.endsWith("/app/installations/8/access_tokens")) {
+          return Response.json({ token: "installation-token" });
+        }
+        if (url.endsWith("/repositories/9001")) {
+          return Response.json({ message: "API rate limit exceeded" }, { status: 403 });
+        }
+        throw new Error(`unexpected GitHub request: ${url}`);
+      },
+    });
+
+    await assert.rejects(
+      gateway.discover({ owner: "owner", name: "repository" }),
+      /repository access verification failed with HTTP 403/u,
+    );
+    await assert.rejects(
+      gateway.waitForRepositoryAccess(8, { id: 9001 }, false),
+      /repository access verification failed with HTTP 403/u,
+    );
+  });
+
+  it("propagates installation-token authentication, server, and network failures", async () => {
+    for (const failure of [401, 500, "network"] as const) {
+      const gateway = new GitHubRepositoryGateway({
+        browser: { async open() {} },
+        configuration: configuration.github,
+        process: {
+          async run() {
+            return {
+              stdout: JSON.stringify({ id: 9001, name: "repository", owner: { login: "owner" } }),
+              stderr: "",
+            };
+          },
+        },
+        fetch: async (input) => {
+          const url = String(input);
+          if (url.includes("/app/installations?")) {
+            return Response.json([
+              { id: 8, account: { login: "owner" }, target_type: "Organization" },
+            ]);
+          }
+          if (failure === "network") throw new Error("GitHub network unavailable");
+          return Response.json({ message: "failed" }, { status: failure });
+        },
+      });
+
+      // Each failure must remain operational, never authoritative absence.
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(
+        gateway.discover({ owner: "owner", name: "repository" }),
+        failure === "network"
+          ? /GitHub network unavailable/u
+          : new RegExp(`installation authentication failed with HTTP ${failure}`, "u"),
+      );
+    }
   });
 
   it("lists repositories beyond the first GitHub page", async () => {

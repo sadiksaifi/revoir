@@ -130,7 +130,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
     const response = await this.#fetch(`https://api.github.com/repositories/${repositoryId}`, {
       headers: appHeaders(token),
     });
-    if (response.status === 404 || response.status === 403) return false;
+    if (response.status === 404) return false;
     if (!response.ok) {
       throw new Error(`GitHub repository access verification failed with HTTP ${response.status}.`);
     }
