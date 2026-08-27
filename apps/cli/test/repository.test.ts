@@ -516,6 +516,41 @@ describe("repository authorization", () => {
     ]);
   });
 
+  it("durably revokes the local execution gate before persisting removal intent", async () => {
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+    policies.cloud = policies.local;
+    const pending = pendingStore();
+    const interruption = new Error("interrupted immediately after pending removal persistence");
+    pending.upsert = async (operation) => {
+      assert.equal(
+        installationForRepository(policies.local, "Owner", "repository"),
+        undefined,
+        "pending removal must never become durable while local execution remains authorized",
+      );
+      pending.values.push(operation);
+      throw interruption;
+    };
+
+    await assert.rejects(
+      new RepositoryManager({ github: fakeGitHub(), policies, pending }).remove({
+        owner: "Owner",
+        name: "repository",
+      }),
+      interruption,
+    );
+    assert.equal(installationForRepository(policies.local, "Owner", "repository"), undefined);
+    assert.equal(
+      installationForRepository(
+        await createEffectivePolicyLoader(policies)(),
+        "Owner",
+        "repository",
+      ),
+      undefined,
+    );
+    assert.equal(pending.values[0]?.kind, "remove");
+  });
+
   it("keeps local trust revoked when Wrangler authentication fails", async () => {
     const policies = new MemoryPolicies();
     policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);

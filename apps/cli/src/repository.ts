@@ -432,13 +432,12 @@ export class RepositoryManager {
         createdAt,
       });
     };
-    await savePendingRemoval();
-
     // Persist the execution-gate revocation before any remote authentication or discovery.
     let locallyRevoked = repository === undefined ? local : withoutRepository(local, repository.id);
     if (!policiesMatch(local, locallyRevoked)) {
       await this.#policies.writeLocal(locallyRevoked);
     }
+    await savePendingRemoval();
 
     await this.#policies.ensureAuthenticated?.();
     const cloud = await this.#policies.loadCloud();
