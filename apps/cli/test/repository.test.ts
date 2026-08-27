@@ -814,6 +814,62 @@ describe("repository authorization", () => {
     assert.ok(events.lastIndexOf("github-opened") < events.lastIndexOf("github-polled"));
   });
 
+  it("removes renamed cloud-only drift with one verified policy write", async () => {
+    const previousIdentity = { ...REPOSITORY, name: "previous-name" };
+    const events: string[] = [];
+    const policies = new MemoryPolicies();
+    policies.cloud = withRepository(createEmptyPolicy(42), 8, previousIdentity);
+    const writeCloud = policies.writeCloud.bind(policies);
+    policies.writeCloud = async (policy) => {
+      events.push("cloud-written");
+      await writeCloud(policy);
+    };
+    policies.verifyCloud = async () => {
+      events.push("cloud-verified");
+    };
+    const github = fakeGitHub();
+    github.ensureAuthenticated = async () => {
+      events.push("github-authenticated");
+    };
+    github.discover = async () => {
+      events.push("github-discovered");
+      return {
+        repository: REPOSITORY,
+        installation: {
+          id: 8,
+          hasRepositoryAccess: true,
+          settingsUrl: "https://github.com/settings/installations/8",
+        },
+        newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+      };
+    };
+    github.open = async () => {
+      events.push("github-opened");
+    };
+    github.waitForRepositoryAccess = async () => {
+      events.push("github-polled");
+      return "confirmed";
+    };
+
+    assert.deepEqual(
+      await new RepositoryManager({ github, policies, pending: pendingStore() }).remove({
+        owner: "Owner",
+        name: "repository",
+      }),
+      { status: "removed", repository: REPOSITORY },
+    );
+    assert.deepEqual(policies.local, createEmptyPolicy(42));
+    assert.deepEqual(policies.cloud, createEmptyPolicy(42));
+    assert.deepEqual(events, [
+      "cloud-written",
+      "cloud-verified",
+      "github-authenticated",
+      "github-discovered",
+      "github-opened",
+      "github-polled",
+    ]);
+  });
+
   it("removes renamed policy trust while preserving GitHub access on request", async () => {
     const previousIdentity = { ...REPOSITORY, name: "previous-name" };
     const policies = new MemoryPolicies();

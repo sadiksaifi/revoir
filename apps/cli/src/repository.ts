@@ -448,7 +448,7 @@ export class RepositoryManager {
     await savePendingRemoval();
 
     await this.#policies.ensureAuthenticated?.();
-    const cloud = await this.#policies.loadCloud();
+    let cloud = await this.#policies.loadCloud();
     const cloudEntry = configuredRepository(cloud, reference);
     repository ??= cloudEntry?.repository;
     installationId ??= cloudEntry?.installationId;
@@ -463,6 +463,7 @@ export class RepositoryManager {
       if (!policiesMatch(cloud, next)) {
         await this.#policies.writeCloud(next);
         await this.#policies.verifyCloud(next);
+        cloud = next;
       }
     } catch (error) {
       const label = `${repository?.owner ?? reference.owner}/${repository?.name ?? reference.name}`;
@@ -518,6 +519,7 @@ export class RepositoryManager {
         if (!policiesMatch(cloud, identityRevokedCloud)) {
           await this.#policies.writeCloud(identityRevokedCloud);
           await this.#policies.verifyCloud(identityRevokedCloud);
+          cloud = identityRevokedCloud;
         }
       } catch (error) {
         throw new RepositoryPolicyUpdateError(
