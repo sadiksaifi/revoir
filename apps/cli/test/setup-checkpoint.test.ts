@@ -26,6 +26,14 @@ function inspectCommandProcesses(
   return async (pid) => identities.get(pid) ?? { kind: "missing" };
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolvePromise!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "revoir-checkpoint-test-"));
   temporaryDirectories.push(directory);
@@ -376,6 +384,111 @@ describe("command lock", () => {
     );
     assert.deepEqual(JSON.parse(await readFile(reclaimCandidate, "utf8")), liveClaim);
     assert.deepEqual(JSON.parse(await readFile(reclaimPublished, "utf8")), liveClaim);
+  });
+
+  it("preserves empty and partial candidates when filename ownership is still live or unknown", async () => {
+    const root = await temporaryDirectory();
+    const directory = join(root, "config");
+    const lockFile = join(directory, "command.lock");
+    const livePid = 41_101;
+    await mkdir(directory, { mode: 0o700 });
+    const pending = join(directory, `.command-lock.${livePid}.live-partial.pending`);
+    const reclaim = join(
+      directory,
+      `.command-lock.stale-owner.reclaim.${livePid}.live-partial.tmp`,
+    );
+    await writeFile(pending, "", { mode: 0o600 });
+    await writeFile(reclaim, '{"version":1', { mode: 0o600 });
+    const inspectProcess = inspectCommandProcesses(
+      new Map([
+        [process.pid, { kind: "alive", processBirth: CURRENT_PROCESS_BIRTH }],
+        [livePid, { kind: "alive", processBirth: undefined }],
+      ]),
+    );
+
+    const lease = await acquireCommandLock(lockFile, { inspectProcess });
+    await lease.release();
+    assert.equal(await readFile(pending, "utf8"), "");
+    assert.equal(await readFile(reclaim, "utf8"), '{"version":1');
+  });
+
+  it("reclaims empty and partial candidates only after filename PID absence is proven", async () => {
+    const root = await temporaryDirectory();
+    const directory = join(root, "config");
+    const lockFile = join(directory, "command.lock");
+    const deadPid = 2_147_483_647;
+    await mkdir(directory, { mode: 0o700 });
+    const pending = join(directory, `.command-lock.${deadPid}.dead-partial.pending`);
+    const reclaim = join(
+      directory,
+      `.command-lock.stale-owner.reclaim.${deadPid}.dead-partial.tmp`,
+    );
+    await writeFile(pending, "", { mode: 0o600 });
+    await writeFile(reclaim, '{"version":1', { mode: 0o600 });
+
+    const lease = await acquireCommandLock(lockFile, {
+      inspectProcess: inspectCommandProcesses(
+        new Map([
+          [process.pid, { kind: "alive", processBirth: CURRENT_PROCESS_BIRTH }],
+          [deadPid, { kind: "missing" }],
+        ]),
+      ),
+    });
+    await lease.release();
+    await assert.rejects(lstat(pending), { code: "ENOENT" });
+    await assert.rejects(lstat(reclaim), { code: "ENOENT" });
+  });
+
+  it("turns pending-candidate partial-write races into one lease and one domain conflict", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    const candidateCreated = deferred();
+    const resumeWriter = deferred();
+    const inspectProcess = inspectCommandProcesses(
+      new Map([[process.pid, { kind: "alive", processBirth: CURRENT_PROCESS_BIRTH }]]),
+    );
+    const writer = acquireCommandLock(lockFile, {
+      inspectProcess,
+      async afterPendingCandidateCreate(candidatePath) {
+        await writeFile(candidatePath, '{"version":1', { mode: 0o600 });
+        candidateCreated.resolve();
+        await resumeWriter.promise;
+      },
+    });
+
+    await candidateCreated.promise;
+    const concurrent = await acquireCommandLock(lockFile, { inspectProcess });
+    resumeWriter.resolve();
+    await assert.rejects(writer, ConcurrentCommandError);
+    await concurrent.release();
+  });
+
+  it("turns reclaim-candidate partial-write races into one lease and one domain conflict", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    await seedStaleCommandLock(lockFile);
+    const candidateCreated = deferred();
+    const resumeWriter = deferred();
+    const inspectProcess = inspectCommandProcesses(
+      new Map([
+        [process.pid, { kind: "alive", processBirth: CURRENT_PROCESS_BIRTH }],
+        [2_147_483_647, { kind: "missing" }],
+      ]),
+    );
+    const writer = acquireCommandLock(lockFile, {
+      inspectProcess,
+      async afterReclaimCandidateCreate(candidatePath) {
+        await writeFile(candidatePath, '{"version":1', { mode: 0o600 });
+        candidateCreated.resolve();
+        await resumeWriter.promise;
+      },
+    });
+
+    await candidateCreated.promise;
+    const concurrent = await acquireCommandLock(lockFile, { inspectProcess });
+    resumeWriter.resolve();
+    await assert.rejects(writer, ConcurrentCommandError);
+    await concurrent.release();
   });
 
   it("recovers when acquisition is interrupted before its durable record is published", async () => {

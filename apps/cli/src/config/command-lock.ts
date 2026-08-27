@@ -40,7 +40,9 @@ export interface CommandLockLease {
 
 export interface CommandLockAcquisitionOptions {
   afterStaleSnapshot?(): Promise<void> | void;
+  afterPendingCandidateCreate?(candidatePath: string): Promise<void> | void;
   beforePublish?(candidatePath: string): Promise<void> | void;
+  afterReclaimCandidateCreate?(candidatePath: string): Promise<void> | void;
   afterReclaimCandidate?(candidatePath: string): Promise<void> | void;
   afterReclaimPublication?(claimPath: string): Promise<void> | void;
   inspectProcess?(pid: number, signal?: AbortSignal): Promise<ProcessIdentity>;
@@ -195,9 +197,14 @@ function sameSnapshot(left: CommandLockSnapshot, right: CommandLockSnapshot | un
   );
 }
 
-async function writeDurableRecord(path: string, value: unknown): Promise<void> {
+async function writeDurableRecord(
+  path: string,
+  value: unknown,
+  afterCreate?: (path: string) => Promise<void> | void,
+): Promise<void> {
   const handle = await open(path, "wx", PRIVATE_FILE_MODE);
   try {
+    await afterCreate?.(path);
     await handle.writeFile(`${JSON.stringify(value)}\n`, "utf8");
     await handle.sync();
   } finally {
@@ -224,6 +231,7 @@ async function cleanUniqueCandidates(
       const token = pending?.[2] ?? reclaim?.[3];
       if (token === undefined || !Number.isSafeInteger(pid) || pid <= 0) return;
       const candidatePath = join(directory, name);
+      const filenameIdentity = await processInspector(pid, signal);
       try {
         const value = await loadProtectedJson(candidatePath, "Command lock candidate");
         if (pending !== null) {
@@ -238,6 +246,9 @@ async function cleanUniqueCandidates(
             candidate.claimant.pid !== pid ||
             candidate.claimant.token !== token
           ) {
+            if (filenameIdentity.kind === "missing") {
+              await unlink(candidatePath).catch(() => {});
+            }
             return;
           }
           if (await processOwnsRecord(candidate.claimant, processInspector, signal)) return;
@@ -248,7 +259,9 @@ async function cleanUniqueCandidates(
           return;
         }
         if (error instanceof ProtectedFileError) {
-          await unlink(candidatePath).catch(() => {});
+          if (filenameIdentity.kind === "missing") {
+            await unlink(candidatePath).catch(() => {});
+          }
           return;
         }
         throw error;
@@ -287,7 +300,7 @@ async function publishReclaimClaim(
   };
   const paths: string[] = [];
   try {
-    await writeDurableRecord(candidatePath, claim);
+    await writeDurableRecord(candidatePath, claim, options.afterReclaimCandidateCreate);
     await options.afterReclaimCandidate?.(candidatePath);
     const artifactCount = (await readdir(directory)).length;
     for (let generation = 0; generation <= artifactCount; generation += 1) {
@@ -485,7 +498,7 @@ async function attemptCommandLock(
 
   const candidatePath = join(dirname(path), `.command-lock.${record.pid}.${record.token}.pending`);
   try {
-    await writeDurableRecord(candidatePath, record);
+    await writeDurableRecord(candidatePath, record, options.afterPendingCandidateCreate);
     await options.beforePublish?.(candidatePath);
     await link(candidatePath, path);
     await unlink(candidatePath).catch(() => {});
