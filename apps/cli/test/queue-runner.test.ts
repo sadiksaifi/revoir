@@ -883,6 +883,62 @@ describe("queue review runner", () => {
     );
   });
 
+  it("bounds repeated policy-load failures and acknowledges the third delivery", async () => {
+    const deliveries = [1, 2, 3].map((attempt) =>
+      delivery(`lease-policy-${attempt}`, reviewJob(), attempt),
+    );
+    const acknowledgements: string[] = [];
+    const retries: Array<{ leaseId: string; delaySeconds: number }> = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+      },
+      async retry(leaseId, delaySeconds) {
+        retries.push({ leaseId, delaySeconds });
+      },
+    };
+    const reviews: ManualReviewService = {
+      async review() {
+        assert.fail("An unavailable policy must not start a review.");
+      },
+    };
+    const reportedAttempts: number[] = [];
+    const reporter: ReviewFailureReporter = {
+      async report(_reference, _error, attempt) {
+        reportedAttempts.push(attempt);
+        throw new Error("policy is still unavailable to failure reporting");
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviews,
+      reporter,
+      failures,
+      undefined,
+      undefined,
+      async () => {
+        throw new Error("cloud policy unavailable");
+      },
+    );
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+    await runner.consumeOne();
+
+    assert.deepEqual(retries, [
+      { leaseId: "lease-policy-1", delaySeconds: 30 },
+      { leaseId: "lease-policy-2", delaySeconds: 120 },
+    ]);
+    assert.deepEqual(acknowledgements, ["lease-policy-3"]);
+    assert.deepEqual(reportedAttempts, [1, 2, 3]);
+    assert.equal(failures.failures.size, 0);
+  });
+
   it("acknowledges a successful third attempt after two reported operational failures", async () => {
     const deliveries = [1, 2, 3].map((attempt) =>
       delivery(`lease-${attempt}`, reviewJob(), attempt),
