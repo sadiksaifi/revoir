@@ -752,6 +752,198 @@ describe("repository authorization", () => {
     assert.equal(pending.values[0]?.kind, "remove");
   });
 
+  it("removes a renamed repository by immutable identity before GitHub cleanup", async () => {
+    const previousIdentity = { ...REPOSITORY, name: "previous-name" };
+    const events: string[] = [];
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, previousIdentity);
+    policies.cloud = policies.local;
+    const writeLocal = policies.writeLocal.bind(policies);
+    policies.writeLocal = async (policy) => {
+      events.push("local-revoked");
+      await writeLocal(policy);
+    };
+    const writeCloud = policies.writeCloud.bind(policies);
+    policies.writeCloud = async (policy) => {
+      events.push("cloud-written");
+      await writeCloud(policy);
+    };
+    policies.verifyCloud = async () => {
+      events.push("cloud-verified");
+    };
+    const github = fakeGitHub();
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      installation: {
+        id: 8,
+        hasRepositoryAccess: true,
+        settingsUrl: "https://github.com/settings/installations/8",
+      },
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+    github.open = async () => {
+      events.push("github-opened");
+    };
+    github.waitForRepositoryAccess = async () => {
+      events.push("github-polled");
+      return "confirmed";
+    };
+    const manager = new RepositoryManager({ github, policies, pending: pendingStore() });
+
+    assert.deepEqual(await manager.remove({ owner: "Owner", name: "repository" }), {
+      status: "removed",
+      repository: REPOSITORY,
+    });
+    assert.equal(
+      policies.local.installations.some((installation) =>
+        installation.repositories.some(({ id }) => id === REPOSITORY.id),
+      ),
+      false,
+    );
+    assert.equal(
+      policies.cloud.installations.some((installation) =>
+        installation.repositories.some(({ id }) => id === REPOSITORY.id),
+      ),
+      false,
+    );
+    assert.ok(events.lastIndexOf("local-revoked") < events.lastIndexOf("cloud-written"));
+    assert.ok(events.lastIndexOf("cloud-written") < events.lastIndexOf("cloud-verified"));
+    assert.ok(events.lastIndexOf("cloud-verified") < events.lastIndexOf("github-opened"));
+    assert.ok(events.lastIndexOf("github-opened") < events.lastIndexOf("github-polled"));
+  });
+
+  it("removes renamed policy trust while preserving GitHub access on request", async () => {
+    const previousIdentity = { ...REPOSITORY, name: "previous-name" };
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, previousIdentity);
+    policies.cloud = policies.local;
+    const github = fakeGitHub();
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      installation: {
+        id: 8,
+        hasRepositoryAccess: true,
+        settingsUrl: "https://github.com/settings/installations/8",
+      },
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+
+    assert.deepEqual(
+      await new RepositoryManager({ github, policies, pending: pendingStore() }).remove(
+        { owner: "Owner", name: "repository" },
+        { keepGitHubAccess: true },
+      ),
+      { status: "removed", repository: REPOSITORY },
+    );
+    assert.equal(
+      policies.local.installations.some((installation) =>
+        installation.repositories.some(({ id }) => id === REPOSITORY.id),
+      ),
+      false,
+    );
+    assert.equal(
+      policies.cloud.installations.some((installation) =>
+        installation.repositories.some(({ id }) => id === REPOSITORY.id),
+      ),
+      false,
+    );
+    assert.deepEqual(github.events, []);
+  });
+
+  it("keeps renamed authorization locally revoked when cloud cleanup is interrupted", async () => {
+    const previousIdentity = { ...REPOSITORY, name: "previous-name" };
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, previousIdentity);
+    policies.cloud = policies.local;
+    const writeCloud = policies.writeCloud.bind(policies);
+    let cloudWrites = 0;
+    policies.writeCloud = async (policy) => {
+      cloudWrites += 1;
+      if (cloudWrites === 2) throw new Error("KV unavailable");
+      await writeCloud(policy);
+    };
+    const github = fakeGitHub();
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      installation: {
+        id: 8,
+        hasRepositoryAccess: true,
+        settingsUrl: "https://github.com/settings/installations/8",
+      },
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+    const pending = pendingStore();
+
+    await assert.rejects(
+      new RepositoryManager({ github, policies, pending }).remove({
+        owner: "Owner",
+        name: "repository",
+      }),
+      (error) =>
+        error instanceof RepositoryPolicyUpdateError &&
+        /local authorization was revoked/iu.test(error.message),
+    );
+    assert.equal(
+      policies.local.installations.some((installation) =>
+        installation.repositories.some(({ id }) => id === REPOSITORY.id),
+      ),
+      false,
+    );
+    assert.equal(
+      policies.cloud.installations.some((installation) =>
+        installation.repositories.some(({ id }) => id === REPOSITORY.id),
+      ),
+      true,
+    );
+    assert.deepEqual(
+      pending.values.map(({ kind, repository }) => ({ kind, repository })),
+      [{ kind: "remove", repository: REPOSITORY }],
+    );
+    assert.deepEqual(github.events, []);
+  });
+
+  it("revokes renamed local trust before persisting remote cleanup intent", async () => {
+    const previousIdentity = { ...REPOSITORY, name: "previous-name" };
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, previousIdentity);
+    policies.cloud = policies.local;
+    const github = fakeGitHub();
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      installation: {
+        id: 8,
+        hasRepositoryAccess: true,
+        settingsUrl: "https://github.com/settings/installations/8",
+      },
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+    const pending = pendingStore();
+    pending.upsert = async () => {
+      throw new Error("interrupted before pending intent was durable");
+    };
+
+    await assert.rejects(
+      new RepositoryManager({ github, policies, pending }).remove({
+        owner: "Owner",
+        name: "repository",
+      }),
+      /interrupted before pending intent was durable/u,
+    );
+    assert.equal(
+      policies.local.installations.some((installation) =>
+        installation.repositories.some(({ id }) => id === REPOSITORY.id),
+      ),
+      false,
+    );
+    assert.equal(
+      policies.cloud.installations.some((installation) =>
+        installation.repositories.some(({ id }) => id === REPOSITORY.id),
+      ),
+      true,
+    );
+    assert.deepEqual(github.events, []);
+  });
+
   it("keeps GitHub-only repository access without opening settings or polling", async () => {
     const policies = new MemoryPolicies();
     const github = fakeGitHub();

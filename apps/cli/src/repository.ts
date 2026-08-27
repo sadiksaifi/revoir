@@ -493,8 +493,35 @@ export class RepositoryManager {
         `GitHub now resolves ${reference.owner}/${reference.name} to a different immutable repository id; Revoir authorization remains revoked.`,
       );
     }
+    const requiresIdentityReconciliation = repository === undefined;
     repository = discovered.repository;
     installationId ??= discovered.installation?.id;
+    if (
+      requiresIdentityReconciliation &&
+      [...repositories(locallyRevoked), ...repositories(cloud)].some(
+        ({ repository: candidate }) => candidate.id === discovered.repository.id,
+      )
+    ) {
+      const identityRevoked = withoutRepository(locallyRevoked, discovered.repository.id);
+      if (!policiesMatch(locallyRevoked, identityRevoked)) {
+        await this.#policies.writeLocal(identityRevoked);
+        locallyRevoked = identityRevoked;
+      }
+      await savePendingRemoval();
+      const identityRevokedCloud = withoutRepository(
+        intersectPolicies(locallyRevoked, cloud),
+        discovered.repository.id,
+      );
+      try {
+        await this.#policies.writeCloud(identityRevokedCloud);
+        await this.#policies.verifyCloud(identityRevokedCloud);
+      } catch (error) {
+        throw new RepositoryPolicyUpdateError(
+          `Local authorization was revoked for ${discovered.repository.owner}/${discovered.repository.name}, but Cloudflare policy cleanup is still required.`,
+          { cause: error },
+        );
+      }
+    }
     if (options.keepGitHubAccess === true) {
       await this.#pending.remove("add", discovered.repository.id);
       await this.#pending.remove("remove", discovered.repository.id);
