@@ -1054,6 +1054,29 @@ describe("repository authorization", () => {
     });
   });
 
+  it("reports repository identity changes under the same immutable id as drift", async () => {
+    const previousIdentity = { ...REPOSITORY, name: "previous-name" };
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, previousIdentity);
+    policies.cloud = policies.local;
+    const entries = await new RepositoryManager({
+      github: fakeGitHub(),
+      policies,
+      pending: pendingStore(),
+    }).list();
+
+    assert.deepEqual(entries, [
+      {
+        repository: REPOSITORY,
+        installationId: 8,
+        status: "drifted",
+        local: true,
+        cloud: true,
+        github: true,
+      },
+    ]);
+  });
+
   it("classifies installation identity agreement across every authorization source", async () => {
     const scenarios = [
       { name: "all sources agree", cloud: 8, github: 8, expected: "authorized" },

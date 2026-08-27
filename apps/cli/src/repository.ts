@@ -593,27 +593,29 @@ export class RepositoryManager {
     const pendingKeys = new Set(pending.map(pendingKey));
     return [...entries.values()]
       .map((entry): RepositoryListEntry => {
-        const localEntry = repositories(local).find(({ repository }) =>
-          repositoryMatches(repository, entry.repository),
+        const localEntry = repositories(local).find(
+          ({ repository }) => repository.id === entry.repository.id,
         );
-        const cloudEntry = repositories(cloud).find(({ repository }) =>
-          repositoryMatches(repository, entry.repository),
+        const cloudEntry = repositories(cloud).find(
+          ({ repository }) => repository.id === entry.repository.id,
         );
-        const githubEntry = github.find(({ repository }) =>
-          repositoryMatches(repository, entry.repository),
-        );
+        const githubEntry = github.find(({ repository }) => repository.id === entry.repository.id);
         const inLocal = localEntry !== undefined;
         const inCloud = cloudEntry !== undefined;
         const inGitHub = githubEntry !== undefined;
         const policyInstallationId =
           localEntry !== undefined &&
           cloudEntry !== undefined &&
-          localEntry.installationId === cloudEntry.installationId
+          localEntry.installationId === cloudEntry.installationId &&
+          repositoryMatches(localEntry.repository, cloudEntry.repository)
             ? localEntry.installationId
             : undefined;
         const exactlyAuthorized =
+          localEntry !== undefined &&
+          githubEntry !== undefined &&
           policyInstallationId !== undefined &&
-          githubEntry?.installationId === policyInstallationId;
+          githubEntry.installationId === policyInstallationId &&
+          repositoryMatches(localEntry.repository, githubEntry.repository);
         let status: RepositoryListStatus;
         if (
           pendingKeys.has(`add:${entry.repository.id}`) ||
