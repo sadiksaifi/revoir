@@ -320,6 +320,28 @@ describe("repository authorization", () => {
     assert.equal(pending.values[0]?.kind, "add");
   });
 
+  it("supersedes a pending external removal when the repository is re-added", async () => {
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+    policies.cloud = policies.local;
+    const pending = pendingStore();
+    const manager = new RepositoryManager({
+      github: fakeGitHub({ approval: "pending" }),
+      policies,
+      pending,
+    });
+
+    assert.equal(
+      (await manager.remove({ owner: "Owner", name: "repository" })).status,
+      "github-access-pending",
+    );
+    assert.equal(pending.values[0]?.kind, "remove");
+
+    assert.equal((await manager.add({ owner: "Owner", name: "repository" })).status, "authorized");
+    assert.deepEqual(pending.values, []);
+    assert.equal((await manager.list())[0]?.status, "authorized");
+  });
+
   it("revokes local trust before Wrangler and cloud trust before GitHub discovery", async () => {
     const events: string[] = [];
     const policies = new MemoryPolicies();

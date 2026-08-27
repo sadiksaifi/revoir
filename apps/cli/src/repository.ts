@@ -329,6 +329,9 @@ export class RepositoryManager {
         };
       }
     }
+    // A confirmed addition supersedes an earlier request to remove the same
+    // repository from the GitHub App installation.
+    await this.#pending.remove("remove", discovered.repository.id);
     await this.#pending.remove("add", discovered.repository.id);
     return {
       status: "authorized",
