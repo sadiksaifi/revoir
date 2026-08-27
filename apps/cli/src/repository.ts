@@ -47,7 +47,7 @@ export interface RepositoryGitHubGateway {
     installationId: number,
     repository: RepositoryIdentity,
     expected: boolean,
-  ): Promise<"confirmed" | "pending">;
+  ): Promise<"confirmed" | "pending" | "installation-absent">;
   listAccessibleRepositories(): Promise<
     readonly { installationId: number; repository: RepositoryIdentity }[]
   >;
@@ -258,33 +258,42 @@ export class RepositoryManager {
       }
       const installationId = pendingRemoval.installationId ?? installation?.id;
       const settingsUrl = pendingRemoval.settingsUrl ?? installation?.settingsUrl;
-      if (installationId === undefined || settingsUrl === undefined) {
-        return { status: "pending", repository: discovered.repository };
-      }
-      let removal: "confirmed" | "pending";
-      try {
-        await this.#github.open(settingsUrl);
-        removal = await this.#github.waitForRepositoryAccess(
-          installationId,
-          discovered.repository,
-          false,
-        );
-      } catch (error) {
-        throw new RepositoryGitHubAccessPendingError(
-          `The earlier GitHub removal for ${discovered.repository.owner}/${discovered.repository.name} is still pending. Revoir kept authorization revoked; rerun the same command to finish removal before re-adding access.`,
-          { cause: error },
-        );
-      }
-      if (removal === "pending") {
-        return {
-          status: "pending",
-          repository: discovered.repository,
-          installationId,
-        };
-      }
-      await this.#pending.remove("remove", discovered.repository.id);
-      if (installation?.id === installationId) {
-        installation = { ...installation, hasRepositoryAccess: false };
+      if (
+        pendingRemoval.installationId !== undefined &&
+        installation?.id !== pendingRemoval.installationId
+      ) {
+        await this.#pending.remove("remove", discovered.repository.id);
+      } else {
+        if (installationId === undefined || settingsUrl === undefined) {
+          return { status: "pending", repository: discovered.repository };
+        }
+        let removal: "confirmed" | "pending" | "installation-absent";
+        try {
+          await this.#github.open(settingsUrl);
+          removal = await this.#github.waitForRepositoryAccess(
+            installationId,
+            discovered.repository,
+            false,
+          );
+        } catch (error) {
+          throw new RepositoryGitHubAccessPendingError(
+            `The earlier GitHub removal for ${discovered.repository.owner}/${discovered.repository.name} is still pending. Revoir kept authorization revoked; rerun the same command to finish removal before re-adding access.`,
+            { cause: error },
+          );
+        }
+        if (removal === "pending") {
+          return {
+            status: "pending",
+            repository: discovered.repository,
+            installationId,
+          };
+        }
+        await this.#pending.remove("remove", discovered.repository.id);
+        if (removal === "installation-absent") {
+          installation = undefined;
+        } else if (installation?.id === installationId) {
+          installation = { ...installation, hasRepositoryAccess: false };
+        }
       }
     }
     if (installation === undefined) {
@@ -362,7 +371,7 @@ export class RepositoryManager {
         createdAt: this.#now().toISOString(),
       };
       await this.#pending.upsert(pendingOperation);
-      let approval: "confirmed" | "pending";
+      let approval: "confirmed" | "pending" | "installation-absent";
       try {
         await this.#github.open(installation.settingsUrl);
         approval = await this.#github.waitForRepositoryAccess(
@@ -376,7 +385,7 @@ export class RepositoryManager {
           { cause: error },
         );
       }
-      if (approval === "pending") {
+      if (approval !== "confirmed") {
         return {
           status: "pending",
           repository: discovered.repository,
@@ -498,7 +507,7 @@ export class RepositoryManager {
       createdAt: this.#now().toISOString(),
     };
     await this.#pending.upsert(pendingOperation);
-    let approval: "confirmed" | "pending";
+    let approval: "confirmed" | "pending" | "installation-absent";
     try {
       await this.#github.open(discovered.installation.settingsUrl);
       approval = await this.#github.waitForRepositoryAccess(

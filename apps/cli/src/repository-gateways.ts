@@ -107,12 +107,13 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
     throw new Error("GitHub App installation discovery exceeded the supported pagination limit.");
   }
 
-  async #installationToken(installationId: number): Promise<string> {
+  async #installationToken(installationId: number): Promise<string | undefined> {
     const jwt = createGitHubAppJwt(this.#configuration.appId, this.#configuration.privateKey);
     const response = await this.#fetch(
       `https://api.github.com/app/installations/${installationId}/access_tokens`,
       { method: "POST", headers: appHeaders(jwt) },
     );
+    if (response.status === 404) return undefined;
     const value = record(
       await responseJson(response, "GitHub installation authentication"),
       "GitHub installation authentication",
@@ -123,8 +124,9 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
     return value.token;
   }
 
-  async #hasAccess(installationId: number, repositoryId: number): Promise<boolean> {
+  async #hasAccess(installationId: number, repositoryId: number): Promise<boolean | undefined> {
     const token = await this.#installationToken(installationId);
+    if (token === undefined) return undefined;
     const response = await this.#fetch(`https://api.github.com/repositories/${repositoryId}`, {
       headers: appHeaders(token),
     });
@@ -162,14 +164,18 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
     const candidate = installations.find(
       (item) => item.accountLogin.toLowerCase() === resolvedRepository.owner.toLowerCase(),
     );
+    const access =
+      candidate === undefined
+        ? undefined
+        : await this.#hasAccess(candidate.id, resolvedRepository.id);
     return {
       repository: resolvedRepository,
-      ...(candidate === undefined
+      ...(candidate === undefined || access === undefined
         ? {}
         : {
             installation: {
               id: candidate.id,
-              hasRepositoryAccess: await this.#hasAccess(candidate.id, resolvedRepository.id),
+              hasRepositoryAccess: access,
               settingsUrl: githubInstallationSettingsUrl(candidate),
             },
           }),
@@ -195,7 +201,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
       if (
         candidate !== undefined &&
         // eslint-disable-next-line no-await-in-loop
-        (await this.#hasAccess(candidate.id, resolvedRepository.id))
+        (await this.#hasAccess(candidate.id, resolvedRepository.id)) === true
       ) {
         return {
           status: "approved",
@@ -222,10 +228,12 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
     installationId: number,
     candidate: { id: number },
     expected: boolean,
-  ): Promise<"confirmed" | "pending"> {
+  ): Promise<"confirmed" | "pending" | "installation-absent"> {
     for (let attempt = 0; attempt < this.#pollAttempts; attempt += 1) {
       // eslint-disable-next-line no-await-in-loop
-      if ((await this.#hasAccess(installationId, candidate.id)) === expected) return "confirmed";
+      const access = await this.#hasAccess(installationId, candidate.id);
+      if (access === undefined) return "installation-absent";
+      if (access === expected) return "confirmed";
       // eslint-disable-next-line no-await-in-loop
       await this.#sleep(2_000);
     }
@@ -238,6 +246,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
     for (const candidate of installations) {
       // eslint-disable-next-line no-await-in-loop
       const token = await this.#installationToken(candidate.id);
+      if (token === undefined) continue;
       let complete = false;
       for (let page = 1; page <= MAX_GITHUB_PAGES; page += 1) {
         // eslint-disable-next-line no-await-in-loop

@@ -375,6 +375,100 @@ describe("repository authorization", () => {
     assert.equal((await manager.list())[0]?.status, "authorized");
   });
 
+  it("treats an uninstalled pending installation as removed before starting a new installation", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    await pending.upsert({
+      version: 1,
+      kind: "remove",
+      repository: REPOSITORY,
+      installationId: 8,
+      settingsUrl: "https://github.com/settings/installations/8",
+      createdAt: "2026-08-27T00:00:00.000Z",
+    });
+    let replacementInstalled = false;
+    const github = fakeGitHub({ installation: false, approval: "pending" });
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      ...(replacementInstalled
+        ? {
+            installation: {
+              id: 9,
+              hasRepositoryAccess: true,
+              settingsUrl: "https://github.com/settings/installations/9",
+            },
+          }
+        : {}),
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+    github.waitForRepositoryAccess = async () => {
+      throw new Error("old installation token failed with HTTP 404");
+    };
+    github.waitForInstallation = async () => ({
+      status: "pending",
+      settingsUrl: "https://github.com/apps/revoir/installations/new",
+    });
+    const manager = new RepositoryManager({ github, policies, pending });
+
+    assert.deepEqual(await manager.add({ owner: "Owner", name: "repository" }), {
+      status: "pending",
+      repository: REPOSITORY,
+    });
+    assert.deepEqual(
+      github.events,
+      ["open:https://github.com/apps/revoir/installations/new"],
+      "the removed installation must not be opened or authenticated",
+    );
+    assert.deepEqual(
+      pending.values.map(({ kind, installationId }) => ({ kind, installationId })),
+      [{ kind: "add", installationId: undefined }],
+    );
+
+    replacementInstalled = true;
+    assert.deepEqual(await manager.add({ owner: "Owner", name: "repository" }), {
+      status: "authorized",
+      repository: REPOSITORY,
+      installationId: 9,
+    });
+    assert.deepEqual(pending.values, []);
+  });
+
+  it("treats a replacement installation identity as completion of the old pending removal", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    await pending.upsert({
+      version: 1,
+      kind: "remove",
+      repository: REPOSITORY,
+      installationId: 8,
+      settingsUrl: "https://github.com/settings/installations/8",
+      createdAt: "2026-08-27T00:00:00.000Z",
+    });
+    const github = fakeGitHub();
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      installation: {
+        id: 9,
+        hasRepositoryAccess: true,
+        settingsUrl: "https://github.com/settings/installations/9",
+      },
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+    github.waitForRepositoryAccess = async () => {
+      throw new Error("the replaced installation must not be polled");
+    };
+
+    assert.deepEqual(
+      await new RepositoryManager({ github, policies, pending }).add({
+        owner: "Owner",
+        name: "repository",
+      }),
+      { status: "authorized", repository: REPOSITORY, installationId: 9 },
+    );
+    assert.deepEqual(github.events, []);
+    assert.deepEqual(pending.values, []);
+  });
+
   it("revokes local trust before Wrangler and cloud trust before GitHub discovery", async () => {
     const events: string[] = [];
     const policies = new MemoryPolicies();

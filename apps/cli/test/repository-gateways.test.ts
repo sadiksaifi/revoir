@@ -80,6 +80,38 @@ describe("GitHub repository gateway", () => {
     );
   });
 
+  it("treats an installation-token 404 during discovery as authoritative uninstallation", async () => {
+    const gateway = new GitHubRepositoryGateway({
+      browser: { async open() {} },
+      configuration: configuration.github,
+      process: {
+        async run() {
+          return {
+            stdout: JSON.stringify({ id: 9001, name: "repository", owner: { login: "owner" } }),
+            stderr: "",
+          };
+        },
+      },
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes("/app/installations?")) {
+          return Response.json([
+            { id: 8, account: { login: "owner" }, target_type: "Organization" },
+          ]);
+        }
+        if (url.endsWith("/app/installations/8/access_tokens")) {
+          return Response.json({ message: "Not Found" }, { status: 404 });
+        }
+        throw new Error(`unexpected GitHub request: ${url}`);
+      },
+    });
+
+    assert.deepEqual(await gateway.discover({ owner: "owner", name: "repository" }), {
+      repository: { id: 9001, owner: "owner", name: "repository" },
+      newInstallationUrl: `https://github.com/apps/${configuration.github.appSlug}/installations/new`,
+    });
+  });
+
   it("lists repositories beyond the first GitHub page", async () => {
     const urls: string[] = [];
     const gateway = new GitHubRepositoryGateway({
