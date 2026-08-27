@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { lstat, open, unlink } from "node:fs/promises";
-import { dirname } from "node:path";
+import { link, lstat, open, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import {
   assertProtectedFile,
@@ -20,6 +20,10 @@ interface CommandLockRecord {
 
 export interface CommandLockLease {
   release(): Promise<void>;
+}
+
+export interface CommandLockAcquisitionOptions {
+  beforePublish?(candidatePath: string): Promise<void> | void;
 }
 
 export class ConcurrentCommandError extends Error {
@@ -81,11 +85,18 @@ async function readExistingLock(path: string): Promise<CommandLockRecord | undef
   return validateLock(await loadProtectedJson(path, "Command lock"));
 }
 
-export async function acquireCommandLock(path: string): Promise<CommandLockLease> {
-  return attemptCommandLock(path, true);
+export async function acquireCommandLock(
+  path: string,
+  options: CommandLockAcquisitionOptions = {},
+): Promise<CommandLockLease> {
+  return attemptCommandLock(path, true, options);
 }
 
-async function attemptCommandLock(path: string, mayRetry: boolean): Promise<CommandLockLease> {
+async function attemptCommandLock(
+  path: string,
+  mayRetry: boolean,
+  options: CommandLockAcquisitionOptions,
+): Promise<CommandLockLease> {
   const existing = await readExistingLock(path);
   if (existing !== undefined) {
     if (processIsRunning(existing.pid)) throw new ConcurrentCommandError(path, existing.pid);
@@ -98,26 +109,28 @@ async function attemptCommandLock(path: string, mayRetry: boolean): Promise<Comm
     token: randomUUID(),
     acquiredAt: new Date().toISOString(),
   };
-  let created = false;
+  const candidatePath = join(dirname(path), `.command-lock.${record.token}.pending`);
   try {
     await ensurePrivateDirectory(dirname(path), "Command lock directory");
-    const handle = await open(path, "wx", PRIVATE_FILE_MODE);
-    created = true;
+    const handle = await open(candidatePath, "wx", PRIVATE_FILE_MODE);
     try {
       await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
     }
+    await options.beforePublish?.(candidatePath);
+    await link(candidatePath, path);
+    await unlink(candidatePath).catch(() => {});
     await assertProtectedFile(path, "Command lock");
   } catch (error) {
-    if (created) await unlink(path).catch(() => {});
+    await unlink(candidatePath).catch(() => {});
     if (
       error instanceof Error &&
       "code" in error &&
       (error as NodeJS.ErrnoException).code === "EEXIST"
     ) {
-      if (mayRetry) return attemptCommandLock(path, false);
+      if (mayRetry) return attemptCommandLock(path, false, options);
       const concurrent = await readExistingLock(path);
       if (concurrent !== undefined) throw new ConcurrentCommandError(path, concurrent.pid);
     }

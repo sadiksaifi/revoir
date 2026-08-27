@@ -97,4 +97,48 @@ describe("command lock", () => {
     const second = await acquireCommandLock(lockFile);
     await second.release();
   });
+
+  it("recovers when acquisition is interrupted before its durable record is published", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    const interruption = new Error("process stopped before publication");
+
+    await assert.rejects(
+      acquireCommandLock(lockFile, {
+        beforePublish() {
+          throw interruption;
+        },
+      }),
+      interruption,
+    );
+
+    const recovered = await acquireCommandLock(lockFile);
+    await recovered.release();
+  });
+
+  it("does not remove a concurrent writer while another durable record awaits publication", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    let resumePublication!: () => void;
+    const publicationPaused = new Promise<void>((resolve) => {
+      resumePublication = resolve;
+    });
+    let candidateReady!: () => void;
+    const candidatePrepared = new Promise<void>((resolve) => {
+      candidateReady = resolve;
+    });
+    const firstAttempt = acquireCommandLock(lockFile, {
+      async beforePublish() {
+        candidateReady();
+        await publicationPaused;
+      },
+    });
+
+    await candidatePrepared;
+    const concurrent = await acquireCommandLock(lockFile);
+    resumePublication();
+    await assert.rejects(firstAttempt, ConcurrentCommandError);
+    await assert.rejects(acquireCommandLock(lockFile), ConcurrentCommandError);
+    await concurrent.release();
+  });
 });
