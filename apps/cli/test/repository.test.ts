@@ -320,24 +320,57 @@ describe("repository authorization", () => {
     assert.equal(pending.values[0]?.kind, "add");
   });
 
-  it("supersedes a pending external removal when the repository is re-added", async () => {
+  it("finishes a pending external removal before re-adding repository access", async () => {
     const policies = new MemoryPolicies();
     policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
     policies.cloud = policies.local;
     const pending = pendingStore();
-    const manager = new RepositoryManager({
-      github: fakeGitHub({ approval: "pending" }),
-      policies,
-      pending,
+    await pending.upsert({
+      version: 1,
+      kind: "remove",
+      repository: REPOSITORY,
+      installationId: 8,
+      settingsUrl: "https://github.com/settings/installations/8",
+      createdAt: "2026-08-27T00:00:00.000Z",
     });
+    const github = fakeGitHub();
+    let hasAccess = true;
+    let removalStarted = false;
+    let finishRemoval!: () => void;
+    const removalApproval = new Promise<void>((resolve) => {
+      finishRemoval = resolve;
+    });
+    github.waitForRepositoryAccess = async (_installationId, _repository, expected) => {
+      github.events.push(`poll:${String(expected)}`);
+      if (!expected) {
+        removalStarted = true;
+        await removalApproval;
+        hasAccess = false;
+      } else {
+        assert.equal(hasAccess, false, "re-add must observe the completed removal first");
+        hasAccess = true;
+      }
+      return "confirmed";
+    };
+    github.listAccessibleRepositories = async () =>
+      hasAccess ? [{ installationId: 8, repository: REPOSITORY }] : [];
+    const manager = new RepositoryManager({ github, policies, pending });
 
-    assert.equal(
-      (await manager.remove({ owner: "Owner", name: "repository" })).status,
-      "github-access-pending",
-    );
+    const adding = manager.add({ owner: "Owner", name: "repository" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(removalStarted, true);
+    assert.equal(policies.local.installations[0]?.repositories.length, 0);
+    assert.equal(policies.cloud.installations[0]?.repositories.length, 0);
     assert.equal(pending.values[0]?.kind, "remove");
 
-    assert.equal((await manager.add({ owner: "Owner", name: "repository" })).status, "authorized");
+    finishRemoval();
+    assert.equal((await adding).status, "authorized");
+    assert.deepEqual(github.events, [
+      "open:https://github.com/settings/installations/8",
+      "poll:false",
+      "open:https://github.com/settings/installations/8",
+      "poll:true",
+    ]);
     assert.deepEqual(pending.values, []);
     assert.equal((await manager.list())[0]?.status, "authorized");
   });

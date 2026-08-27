@@ -232,6 +232,61 @@ export class RepositoryManager {
     await this.#authenticate();
     const discovered = await this.#github.discover(reference);
     let installation = discovered.installation;
+    const pendingRemoval = (await this.#pending.load()).find(
+      (operation) =>
+        operation.kind === "remove" && operation.repository.id === discovered.repository.id,
+    );
+    if (pendingRemoval !== undefined) {
+      const [local, cloud] = await Promise.all([
+        this.#policies.loadLocal(),
+        this.#policies.loadCloud(),
+      ]);
+      const revoked = withoutRepository(intersectPolicies(local, cloud), discovered.repository.id);
+      if (!policiesMatch(local, revoked)) {
+        await this.#policies.writeLocal(revoked);
+      }
+      if (!policiesMatch(cloud, revoked)) {
+        try {
+          await this.#policies.writeCloud(revoked);
+          await this.#policies.verifyCloud(revoked);
+        } catch (error) {
+          throw new RepositoryPolicyUpdateError(
+            `The earlier GitHub removal for ${discovered.repository.owner}/${discovered.repository.name} is still pending. Local authorization is revoked, but Cloudflare policy cleanup must finish before access can be re-added.`,
+            { cause: error },
+          );
+        }
+      }
+      const installationId = pendingRemoval.installationId ?? installation?.id;
+      const settingsUrl = pendingRemoval.settingsUrl ?? installation?.settingsUrl;
+      if (installationId === undefined || settingsUrl === undefined) {
+        return { status: "pending", repository: discovered.repository };
+      }
+      let removal: "confirmed" | "pending";
+      try {
+        await this.#github.open(settingsUrl);
+        removal = await this.#github.waitForRepositoryAccess(
+          installationId,
+          discovered.repository,
+          false,
+        );
+      } catch (error) {
+        throw new RepositoryGitHubAccessPendingError(
+          `The earlier GitHub removal for ${discovered.repository.owner}/${discovered.repository.name} is still pending. Revoir kept authorization revoked; rerun the same command to finish removal before re-adding access.`,
+          { cause: error },
+        );
+      }
+      if (removal === "pending") {
+        return {
+          status: "pending",
+          repository: discovered.repository,
+          installationId,
+        };
+      }
+      await this.#pending.remove("remove", discovered.repository.id);
+      if (installation?.id === installationId) {
+        installation = { ...installation, hasRepositoryAccess: false };
+      }
+    }
     if (installation === undefined) {
       const pendingOperation: PendingRepositoryOperation = {
         version: 1,
@@ -329,9 +384,6 @@ export class RepositoryManager {
         };
       }
     }
-    // A confirmed addition supersedes an earlier request to remove the same
-    // repository from the GitHub App installation.
-    await this.#pending.remove("remove", discovered.repository.id);
     await this.#pending.remove("add", discovered.repository.id);
     return {
       status: "authorized",
