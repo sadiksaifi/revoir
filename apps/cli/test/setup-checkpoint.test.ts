@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -51,6 +51,57 @@ await acquireCommandLock(${JSON.stringify(lockFile)}, {
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       reject(new Error(`candidate child exited before ready (${String(code ?? signal)})`));
+    });
+  });
+  return child;
+}
+
+async function seedStaleCommandLock(lockFile: string): Promise<void> {
+  await mkdir(join(lockFile, ".."), { recursive: true, mode: 0o700 });
+  await writeFile(
+    lockFile,
+    `${JSON.stringify({
+      version: 1,
+      pid: 2_147_483_647,
+      token: "stale-owner",
+      acquiredAt: "2026-08-27T00:00:00.000Z",
+    })}\n`,
+    { mode: 0o600 },
+  );
+}
+
+async function spawnReclaimingCommandLock(
+  lockFile: string,
+  stage: "candidate" | "published",
+): Promise<ChildProcess> {
+  const moduleUrl = new URL("../src/config/command-lock.ts", import.meta.url).href;
+  const callback = stage === "candidate" ? "afterReclaimCandidate" : "afterReclaimPublication";
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "--eval",
+      `import { acquireCommandLock } from ${JSON.stringify(moduleUrl)};
+await acquireCommandLock(${JSON.stringify(lockFile)}, {
+  async ${callback}() {
+    process.stdout.write("READY\\n");
+    await new Promise(() => setInterval(() => {}, 1_000));
+  },
+});`,
+    ],
+    { cwd: new URL("..", import.meta.url), stdio: ["ignore", "pipe", "pipe"] },
+  );
+  await new Promise<void>((resolve, reject) => {
+    let output = "";
+    child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
+      output += chunk;
+      if (output.includes("READY\n")) resolve();
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      reject(new Error(`reclaim child exited before ready (${String(code ?? signal)})`));
     });
   });
   return child;
@@ -281,5 +332,118 @@ describe("command lock", () => {
     } finally {
       await killChild(child);
     }
+  });
+
+  it("reclaims a dead durable reclaim candidate created before claim publication", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    await seedStaleCommandLock(lockFile);
+    const child = await spawnReclaimingCommandLock(lockFile, "candidate");
+    await killChild(child);
+    assert.equal(
+      (await readdir(join(root, "config"))).some((name) => name.endsWith(".tmp")),
+      true,
+    );
+
+    const recovered = await acquireCommandLock(lockFile);
+    await recovered.release();
+    assert.equal(
+      (await readdir(join(root, "config"))).some((name) => name.includes(".reclaim")),
+      false,
+    );
+  });
+
+  it("reclaims a dead published reclaim claim after its owner is killed", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    await seedStaleCommandLock(lockFile);
+    const child = await spawnReclaimingCommandLock(lockFile, "published");
+    await killChild(child);
+    assert.equal(
+      (await readdir(join(root, "config"))).some((name) => name.includes(".reclaim")),
+      true,
+    );
+
+    const recovered = await acquireCommandLock(lockFile);
+    await recovered.release();
+    assert.equal(
+      (await readdir(join(root, "config"))).some((name) => name.includes(".reclaim")),
+      false,
+    );
+  });
+
+  it("preserves a live published reclaim claimant and the canonical stale lock", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    await seedStaleCommandLock(lockFile);
+    const child = await spawnReclaimingCommandLock(lockFile, "published");
+    try {
+      const before = await readdir(join(root, "config"));
+      await assert.rejects(acquireCommandLock(lockFile), ConcurrentCommandError);
+      assert.deepEqual(await readdir(join(root, "config")), before);
+      assert.equal(JSON.parse(await readFile(lockFile, "utf8")).token, "stale-owner");
+    } finally {
+      await killChild(child);
+    }
+  });
+
+  it("recovers a reclaim chain abandoned by repeated claimant process deaths", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    await seedStaleCommandLock(lockFile);
+    for (let generation = 0; generation < 3; generation += 1) {
+      // Each next process must observe the artifact left by the prior killed process.
+      // eslint-disable-next-line no-await-in-loop
+      const child = await spawnReclaimingCommandLock(lockFile, "published");
+      // eslint-disable-next-line no-await-in-loop
+      await killChild(child);
+      assert.equal(
+        // eslint-disable-next-line no-await-in-loop
+        (await readdir(join(root, "config"))).filter(
+          (name) => name.includes(".reclaim") && !name.endsWith(".tmp"),
+        ).length,
+        generation + 1,
+      );
+    }
+
+    const recovered = await acquireCommandLock(lockFile);
+    await recovered.release();
+    assert.equal(
+      (await readdir(join(root, "config"))).some((name) => name.includes(".reclaim")),
+      false,
+    );
+  });
+
+  it("recovers more abandoned reclaim generations than the former fixed limit", async () => {
+    const root = await temporaryDirectory();
+    const lockFile = join(root, "config", "command.lock");
+    await seedStaleCommandLock(lockFile);
+    const staleStats = await lstat(lockFile);
+    await Promise.all(
+      Array.from({ length: 105 }, async (_value, generation) => {
+        const suffix = generation === 0 ? "" : `.${generation}`;
+        await writeFile(
+          join(root, "config", `.command-lock.stale-owner.reclaim${suffix}`),
+          `${JSON.stringify({
+            version: 1,
+            target: { token: "stale-owner", device: staleStats.dev, inode: staleStats.ino },
+            claimant: {
+              version: 1,
+              pid: 2_147_483_647,
+              token: `dead-claim-${generation}`,
+              acquiredAt: "2026-08-27T00:00:00.000Z",
+            },
+          })}\n`,
+          { mode: 0o600 },
+        );
+      }),
+    );
+
+    const recovered = await acquireCommandLock(lockFile);
+    await recovered.release();
+    assert.equal(
+      (await readdir(join(root, "config"))).some((name) => name.includes(".reclaim")),
+      false,
+    );
   });
 });

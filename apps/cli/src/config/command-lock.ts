@@ -30,6 +30,8 @@ interface CommandLockReclaim {
   claimant: CommandLockRecord;
 }
 
+const LOCK_TOKEN = /^[A-Za-z0-9-]{1,128}$/u;
+
 export interface CommandLockLease {
   release(): Promise<void>;
 }
@@ -37,6 +39,8 @@ export interface CommandLockLease {
 export interface CommandLockAcquisitionOptions {
   afterStaleSnapshot?(): Promise<void> | void;
   beforePublish?(candidatePath: string): Promise<void> | void;
+  afterReclaimCandidate?(candidatePath: string): Promise<void> | void;
+  afterReclaimPublication?(claimPath: string): Promise<void> | void;
 }
 
 export class ConcurrentCommandError extends Error {
@@ -73,7 +77,7 @@ function validateLock(value: unknown): CommandLockRecord {
     !Number.isSafeInteger(record.pid) ||
     (record.pid as number) <= 0 ||
     typeof record.token !== "string" ||
-    record.token === "" ||
+    !LOCK_TOKEN.test(record.token) ||
     typeof record.acquiredAt !== "string" ||
     Number.isNaN(Date.parse(record.acquiredAt))
   ) {
@@ -94,6 +98,7 @@ function validateReclaim(value: unknown): CommandLockReclaim | undefined {
     value.target === null ||
     !("token" in value.target) ||
     typeof value.target.token !== "string" ||
+    !LOCK_TOKEN.test(value.target.token) ||
     !("device" in value.target) ||
     !Number.isSafeInteger(value.target.device) ||
     !("inode" in value.target) ||
@@ -173,23 +178,43 @@ async function writeDurableRecord(path: string, value: unknown): Promise<void> {
   }
 }
 
-async function cleanPendingCandidates(path: string): Promise<void> {
+async function cleanUniqueCandidates(path: string): Promise<void> {
   const directory = dirname(path);
   const names = await readdir(directory);
   await Promise.all(
     names.map(async (name) => {
-      const match = /^\.command-lock\.(\d+)\.([0-9a-f-]+)\.pending$/iu.exec(name);
-      if (match === null) return;
-      const pid = Number(match[1]);
-      const token = match[2]!;
+      const pending = /^\.command-lock\.(\d+)\.([A-Za-z0-9-]{1,128})\.pending$/u.exec(name);
+      const reclaim =
+        /^\.command-lock\.([A-Za-z0-9-]{1,128})\.reclaim\.(\d+)\.([A-Za-z0-9-]{1,128})\.tmp$/u.exec(
+          name,
+        );
+      if (pending === null && reclaim === null) return;
+      const pid = Number(pending?.[1] ?? reclaim?.[2]);
+      const token = pending?.[2] ?? reclaim?.[3];
+      if (token === undefined) return;
       if (!Number.isSafeInteger(pid) || pid <= 0 || processIsRunning(pid)) return;
       const candidatePath = join(directory, name);
       try {
-        const candidate = validateLock(await loadProtectedJson(candidatePath, "Command lock"));
-        if (candidate.pid !== pid || candidate.token !== token) return;
+        const value = await loadProtectedJson(candidatePath, "Command lock candidate");
+        if (pending !== null) {
+          const candidate = validateLock(value);
+          if (candidate.pid !== pid || candidate.token !== token) return;
+        } else {
+          const candidate = validateReclaim(value);
+          if (
+            candidate === undefined ||
+            candidate.target.token !== reclaim?.[1] ||
+            candidate.claimant.pid !== pid ||
+            candidate.claimant.token !== token
+          ) {
+            return;
+          }
+        }
         await unlink(candidatePath);
       } catch (error) {
-        if (isFileSystemError(error, "ENOENT")) return;
+        if (isFileSystemError(error, "ENOENT") || isProtectedFileSystemError(error, "ENOENT")) {
+          return;
+        }
         if (error instanceof ProtectedFileError) {
           await unlink(candidatePath).catch(() => {});
           return;
@@ -200,12 +225,27 @@ async function cleanPendingCandidates(path: string): Promise<void> {
   );
 }
 
-async function claimStaleLock(
+function reclaimClaimName(name: string): { generation: number; targetToken: string } | undefined {
+  const match = /^\.command-lock\.([A-Za-z0-9-]{1,128})\.reclaim(?:\.(0|[1-9]\d*))?$/u.exec(name);
+  if (match?.[1] === undefined) return undefined;
+  return { targetToken: match[1], generation: match[2] === undefined ? 0 : Number(match[2]) };
+}
+
+function sameReclaimTarget(
+  left: CommandLockReclaim["target"],
+  right: CommandLockReclaim["target"],
+): boolean {
+  return left.token === right.token && left.device === right.device && left.inode === right.inode;
+}
+
+async function publishReclaimClaim(
   path: string,
   target: CommandLockSnapshot,
   claimant: CommandLockRecord,
+  options: CommandLockAcquisitionOptions,
 ): Promise<{ paths: string[] } | undefined> {
-  const claimRoot = join(dirname(path), `.command-lock.${target.record.token}.reclaim`);
+  const directory = dirname(path);
+  const claimRoot = join(directory, `.command-lock.${target.record.token}.reclaim`);
   const candidatePath = `${claimRoot}.${claimant.pid}.${claimant.token}.tmp`;
   const claim: CommandLockReclaim = {
     version: 1,
@@ -215,12 +255,16 @@ async function claimStaleLock(
   const paths: string[] = [];
   try {
     await writeDurableRecord(candidatePath, claim);
-    for (let generation = 0; generation < 100; generation += 1) {
+    await options.afterReclaimCandidate?.(candidatePath);
+    const artifactCount = (await readdir(directory)).length;
+    for (let generation = 0; generation <= artifactCount; generation += 1) {
       const claimPath = generation === 0 ? claimRoot : `${claimRoot}.${generation}`;
       try {
         // eslint-disable-next-line no-await-in-loop
         await link(candidatePath, claimPath);
         paths.push(claimPath);
+        // eslint-disable-next-line no-await-in-loop
+        await options.afterReclaimPublication?.(claimPath);
         return { paths };
       } catch (error) {
         if (!isFileSystemError(error, "EEXIST")) throw error;
@@ -238,9 +282,7 @@ async function claimStaleLock(
       }
       if (
         existing === undefined ||
-        existing.target.token !== target.record.token ||
-        existing.target.device !== target.device ||
-        existing.target.inode !== target.inode ||
+        !sameReclaimTarget(existing.target, claim.target) ||
         processIsRunning(existing.claimant.pid)
       ) {
         return undefined;
@@ -253,12 +295,97 @@ async function claimStaleLock(
   }
 }
 
+async function cleanPublishedReclaimClaims(
+  path: string,
+  options: CommandLockAcquisitionOptions,
+): Promise<void> {
+  const directory = dirname(path);
+  const names = await readdir(directory);
+  const groups = new Map<string, string[]>();
+  for (const name of names) {
+    const claim = reclaimClaimName(name);
+    if (claim === undefined || !Number.isSafeInteger(claim.generation)) continue;
+    const group = groups.get(claim.targetToken) ?? [];
+    group.push(join(directory, name));
+    groups.set(claim.targetToken, group);
+  }
+
+  for (const [targetToken, claimPaths] of groups) {
+    let target: CommandLockReclaim["target"] | undefined;
+    let reclaimable = true;
+    for (const claimPath of claimPaths) {
+      let claim: CommandLockReclaim | undefined;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        claim = validateReclaim(await loadProtectedJson(claimPath, "Command lock reclaim"));
+      } catch (error) {
+        if (isFileSystemError(error, "ENOENT") || isProtectedFileSystemError(error, "ENOENT")) {
+          reclaimable = false;
+          break;
+        }
+        throw error;
+      }
+      if (
+        claim === undefined ||
+        claim.target.token !== targetToken ||
+        (target !== undefined && !sameReclaimTarget(target, claim.target)) ||
+        processIsRunning(claim.claimant.pid)
+      ) {
+        reclaimable = false;
+        break;
+      }
+      target = claim.target;
+    }
+    if (!reclaimable || target === undefined) continue;
+
+    const claimant: CommandLockRecord = {
+      version: 1,
+      pid: process.pid,
+      token: randomUUID(),
+      acquiredAt: new Date().toISOString(),
+    };
+    // Claim groups are reclaimed sequentially so one process never publishes competing claims.
+    // eslint-disable-next-line no-await-in-loop
+    const lease = await publishReclaimClaim(
+      path,
+      { record: { ...claimant, token: target.token }, device: target.device, inode: target.inode },
+      claimant,
+      options,
+    );
+    if (lease === undefined) continue;
+    // eslint-disable-next-line no-await-in-loop
+    await Promise.all(
+      [...new Set([...claimPaths, ...lease.paths])].map((claimPath) =>
+        unlink(claimPath).catch(() => {}),
+      ),
+    );
+  }
+}
+
+async function cleanCommandLockArtifacts(
+  path: string,
+  options: CommandLockAcquisitionOptions,
+): Promise<void> {
+  await cleanUniqueCandidates(path);
+  await cleanPublishedReclaimClaims(path, options);
+}
+
+async function claimStaleLock(
+  path: string,
+  target: CommandLockSnapshot,
+  claimant: CommandLockRecord,
+  options: CommandLockAcquisitionOptions,
+): Promise<{ paths: string[] } | undefined> {
+  return publishReclaimClaim(path, target, claimant, options);
+}
+
 async function removeStaleLock(
   path: string,
   observed: CommandLockSnapshot,
   claimant: CommandLockRecord,
+  options: CommandLockAcquisitionOptions,
 ): Promise<boolean> {
-  const claim = await claimStaleLock(path, observed, claimant);
+  const claim = await claimStaleLock(path, observed, claimant, options);
   if (claim === undefined) return false;
   try {
     const current = await readLockSnapshot(path);
@@ -281,7 +408,7 @@ export async function acquireCommandLock(
 ): Promise<CommandLockLease> {
   assertProtectedPath(path, "Command lock");
   await ensurePrivateDirectory(dirname(path), "Command lock directory");
-  await cleanPendingCandidates(path);
+  await cleanCommandLockArtifacts(path, options);
   return attemptCommandLock(path, 3, options);
 }
 
@@ -302,7 +429,7 @@ async function attemptCommandLock(
       throw new ConcurrentCommandError(path, existing.record.pid);
     }
     await options.afterStaleSnapshot?.();
-    if (!(await removeStaleLock(path, existing, record))) {
+    if (!(await removeStaleLock(path, existing, record, options))) {
       throw new ConcurrentCommandError(path, existing.record.pid);
     }
   }
