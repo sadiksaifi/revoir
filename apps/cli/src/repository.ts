@@ -416,8 +416,16 @@ export class RepositoryManager {
         operation.repository.owner.toLowerCase() === reference.owner.toLowerCase() &&
         operation.repository.name.toLowerCase() === reference.name.toLowerCase(),
     );
-    let repository = localEntry?.repository ?? priorPending?.repository;
-    let installationId = localEntry?.installationId ?? priorPending?.installationId;
+    const priorPendingAdd = pendingOperations.find(
+      (operation) =>
+        operation.kind === "add" &&
+        operation.repository.owner.toLowerCase() === reference.owner.toLowerCase() &&
+        operation.repository.name.toLowerCase() === reference.name.toLowerCase(),
+    );
+    let repository =
+      localEntry?.repository ?? priorPending?.repository ?? priorPendingAdd?.repository;
+    let installationId =
+      localEntry?.installationId ?? priorPending?.installationId ?? priorPendingAdd?.installationId;
     const createdAt = priorPending?.createdAt ?? this.#now().toISOString();
     const savePendingRemoval = async (): Promise<void> => {
       if (repository === undefined) return;
@@ -662,9 +670,11 @@ export class FilePendingRepositoryStore implements PendingRepositoryStore {
 
   async upsert(operation: PendingRepositoryOperation): Promise<void> {
     const operations = await this.load();
-    const key = pendingKey(operation);
     await this.#write([
-      ...operations.filter((candidate) => pendingKey(candidate) !== key),
+      ...operations.filter((candidate) => {
+        if (candidate.repository.id !== operation.repository.id) return true;
+        return operation.kind === "add" && candidate.kind === "remove";
+      }),
       operation,
     ]);
   }

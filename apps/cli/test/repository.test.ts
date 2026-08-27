@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -11,6 +14,7 @@ import { createEffectivePolicyLoader } from "../src/repository-gateways.js";
 import {
   parseGitHubRemote,
   parseRepositoryReference,
+  FilePendingRepositoryStore,
   RepositoryGitHubAccessPendingError,
   RepositoryManager,
   RepositoryPolicyUpdateError,
@@ -117,11 +121,10 @@ function pendingStore() {
       values.splice(
         0,
         values.length,
-        ...values.filter(
-          (candidate) =>
-            candidate.kind !== operation.kind ||
-            candidate.repository.id !== operation.repository.id,
-        ),
+        ...values.filter((candidate) => {
+          if (candidate.repository.id !== operation.repository.id) return true;
+          return operation.kind === "add" && candidate.kind === "remove";
+        }),
         operation,
       );
     },
@@ -153,6 +156,34 @@ describe("repository references", () => {
 });
 
 describe("repository authorization", () => {
+  it("atomically replaces persisted add intent with removal intent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "revoir-pending-transition-test-"));
+    try {
+      const pending = new FilePendingRepositoryStore(join(root, "state"));
+      const add: PendingRepositoryOperation = {
+        version: 1,
+        kind: "add",
+        repository: REPOSITORY,
+        settingsUrl: "https://github.com/apps/revoir/installations/new",
+        createdAt: "2026-08-27T00:00:00.000Z",
+      };
+      await pending.upsert(add);
+      await pending.upsert({
+        ...add,
+        kind: "remove",
+        installationId: 8,
+        settingsUrl: "https://github.com/settings/installations/8",
+      });
+
+      assert.deepEqual(
+        (await pending.load()).map(({ kind }) => kind),
+        ["remove"],
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("loads the fail-closed local/cloud intersection for each Mac authorization check", async () => {
     const policies = new MemoryPolicies();
     policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
@@ -318,6 +349,94 @@ describe("repository authorization", () => {
     assert.deepEqual(policies.local, policies.cloud);
     assert.equal(policies.local.installations[0]?.repositories[0]?.id, REPOSITORY.id);
     assert.equal(pending.values[0]?.kind, "add");
+  });
+
+  it("cancels an organization-install approval that never produced an installation", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    const github = fakeGitHub({ installation: false, access: false, approval: "pending" });
+    const manager = new RepositoryManager({ github, policies, pending });
+    assert.equal((await manager.add({ owner: "Owner", name: "repository" })).status, "pending");
+    assert.equal(pending.values[0]?.kind, "add");
+
+    assert.deepEqual(await manager.remove({ owner: "Owner", name: "repository" }), {
+      status: "removed",
+      repository: REPOSITORY,
+    });
+    assert.deepEqual(pending.values, []);
+    assert.deepEqual(await manager.list(), []);
+  });
+
+  it("cancels a pre-install pending add that has no installation identity", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    const github = fakeGitHub({ installation: false, access: false, failOpen: true });
+    const manager = new RepositoryManager({ github, policies, pending });
+    await assert.rejects(manager.add({ owner: "Owner", name: "repository" }));
+    assert.equal(pending.values[0]?.kind, "add");
+    assert.equal(pending.values[0]?.installationId, undefined);
+    github.open = async (url) => {
+      github.events.push(`open:${url}`);
+    };
+
+    assert.equal((await manager.remove({ owner: "Owner", name: "repository" })).status, "removed");
+    assert.deepEqual(pending.values, []);
+    assert.deepEqual(await manager.list(), []);
+  });
+
+  it("turns a late installation approval into cleanup without reviving pending add intent", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    const github = fakeGitHub({ installation: false, approval: "pending" });
+    const manager = new RepositoryManager({ github, policies, pending });
+    assert.equal((await manager.add({ owner: "Owner", name: "repository" })).status, "pending");
+    let hasAccess = true;
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      installation: {
+        id: 8,
+        hasRepositoryAccess: hasAccess,
+        settingsUrl: "https://github.com/settings/installations/8",
+      },
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+    github.waitForRepositoryAccess = async (_installationId, _repository, expected) => {
+      assert.equal(expected, false);
+      hasAccess = false;
+      return "confirmed";
+    };
+    github.listAccessibleRepositories = async () =>
+      hasAccess ? [{ installationId: 8, repository: REPOSITORY }] : [];
+
+    assert.equal((await manager.remove({ owner: "Owner", name: "repository" })).status, "removed");
+    assert.deepEqual(pending.values, []);
+    assert.deepEqual(await manager.list(), []);
+  });
+
+  it("cancels pending add intent while preserving late GitHub access on request", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    const github = fakeGitHub({ installation: false, approval: "pending" });
+    const manager = new RepositoryManager({ github, policies, pending });
+    assert.equal((await manager.add({ owner: "Owner", name: "repository" })).status, "pending");
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      installation: {
+        id: 8,
+        hasRepositoryAccess: true,
+        settingsUrl: "https://github.com/settings/installations/8",
+      },
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+
+    assert.equal(
+      (await manager.remove({ owner: "Owner", name: "repository" }, { keepGitHubAccess: true }))
+        .status,
+      "removed",
+    );
+    assert.deepEqual(pending.values, []);
+    assert.equal((await manager.list())[0]?.status, "github-access-only");
+    assert.notEqual((await manager.list())[0]?.status, "pending");
   });
 
   it("finishes a pending external removal before re-adding repository access", async () => {
