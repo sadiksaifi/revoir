@@ -4,6 +4,9 @@ import { isAbsolute, join } from "node:path";
 export interface ApplicationPaths {
   configDir: string;
   configFile: string;
+  policyFile: string;
+  setupCheckpointFile: string;
+  commandLockFile: string;
   cacheDir: string;
   stateDir: string;
   dataDir: string;
@@ -42,6 +45,9 @@ export function resolveApplicationPaths(
   return {
     configDir,
     configFile: join(configDir, "config.json"),
+    policyFile: join(configDir, "policy.json"),
+    setupCheckpointFile: join(configDir, "setup-checkpoint.json"),
+    commandLockFile: join(configDir, "command.lock"),
     cacheDir: join(
       resolveXdgBase(environment, "XDG_CACHE_HOME", join(userHome, ".cache")),
       "revoir",

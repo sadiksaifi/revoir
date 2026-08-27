@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 
-export const CONFIG_VERSION = 2 as const;
+export const CONFIG_VERSION = 1 as const;
 export const DEFAULT_MODEL = "openai-codex/gpt-5.6-sol";
 export const DEFAULT_REASONING = "high" as const;
 export const DEFAULT_REVIEW_TIMEOUT_MS = 20 * 60 * 1000;
@@ -9,54 +9,36 @@ export const DEFAULT_SHELL_COMMAND_TIMEOUT_MS = 2 * 60 * 1000;
 export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"] as const;
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 
-export interface RepositoryIdentity {
-  id: number;
-  owner: string;
-  name: string;
-}
-
-export interface GitHubInstallation {
-  id: number;
-  repositories: RepositoryIdentity[];
-}
-
 export interface GitHubConfiguration {
-  userId: number;
   appId: number;
+  appSlug: string;
   privateKey: string;
-  installations: GitHubInstallation[];
+  webhookSecret: string;
+}
+
+export interface CloudflareConfiguration {
+  accountId: string;
+  queueId: string;
+  queueName: string;
+  kvNamespaceId: string;
+  workerName: string;
+  apiToken: string;
+  relayUrl: string;
 }
 
 export interface RevoirConfiguration {
   version: typeof CONFIG_VERSION;
-  model: {
-    id: string;
-    reasoning: ReasoningLevel;
-  };
+  model: { id: string; reasoning: ReasoningLevel };
   github: GitHubConfiguration;
-  cloudflare: {
-    accountId: string;
-    queueId: string;
-    apiToken: string;
-  };
-  timeouts: {
-    reviewMs: number;
-    shellCommandMs: number;
-  };
-  paths: {
-    cacheDir: string;
-    stateDir: string;
-    dataDir: string;
-  };
+  cloudflare: CloudflareConfiguration;
+  timeouts: { reviewMs: number; shellCommandMs: number };
+  paths: { cacheDir: string; stateDir: string; dataDir: string };
 }
 
 export interface ConfigurationInput {
-  model?: {
-    id?: string;
-    reasoning?: ReasoningLevel;
-  };
-  github: RevoirConfiguration["github"];
-  cloudflare: RevoirConfiguration["cloudflare"];
+  model?: { id?: string; reasoning?: ReasoningLevel };
+  github: GitHubConfiguration;
+  cloudflare: CloudflareConfiguration;
   timeouts?: Partial<RevoirConfiguration["timeouts"]>;
   paths: RevoirConfiguration["paths"];
 }
@@ -82,9 +64,7 @@ function checkKeys(
   issues: string[],
 ): void {
   for (const key of Object.keys(value)) {
-    if (!expected.includes(key)) {
-      issues.push(`${path}.${key} is not supported.`);
-    }
+    if (!expected.includes(key)) issues.push(`${path}.${key} is not supported.`);
   }
 }
 
@@ -125,103 +105,20 @@ function readAbsolutePath(value: unknown, path: string, issues: string[]): strin
   return parsed;
 }
 
-function parseRepository(
-  value: unknown,
-  path: string,
-  issues: string[],
-): RepositoryIdentity | undefined {
-  const repository = readObject(value, path, issues);
-  if (repository === undefined) {
-    return undefined;
-  }
-  checkKeys(repository, path, ["id", "owner", "name"], issues);
-  const id = readPositiveInteger(repository.id, `${path}.id`, issues);
-  const owner = readString(repository.owner, `${path}.owner`, issues);
-  const name = readString(repository.name, `${path}.name`, issues);
-  if (id === undefined || owner === undefined || name === undefined) {
-    return undefined;
-  }
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(owner)) {
-    issues.push(`${path}.owner is not a valid GitHub owner name.`);
-  }
-  if (!/^[A-Za-z0-9._-]+$/u.test(name)) {
-    issues.push(`${path}.name is not a valid GitHub repository name.`);
-  }
-  return { id, owner, name };
-}
-
-function parseInstallation(
-  value: unknown,
-  index: number,
-  issues: string[],
-): GitHubInstallation | undefined {
-  const path = `github.installations[${index}]`;
-  const installation = readObject(value, path, issues);
-  if (installation === undefined) {
-    return undefined;
-  }
-  checkKeys(installation, path, ["id", "repositories"], issues);
-  const id = readPositiveInteger(installation.id, `${path}.id`, issues);
-  const repositoriesValue = installation.repositories;
-  const repositories: RepositoryIdentity[] = [];
-  if (!Array.isArray(repositoriesValue) || repositoriesValue.length === 0) {
-    issues.push(`${path}.repositories must contain at least one repository.`);
-  } else {
-    for (const [repositoryIndex, repository] of repositoriesValue.entries()) {
-      const parsed = parseRepository(
-        repository,
-        `${path}.repositories[${repositoryIndex}]`,
-        issues,
-      );
-      if (parsed !== undefined) {
-        repositories.push(parsed);
-      }
-    }
-  }
-  return id === undefined ? undefined : { id, repositories };
-}
-
-export function configuredRepositories(
-  configuration: GitHubConfiguration,
-): readonly RepositoryIdentity[] {
-  return configuration.installations.flatMap((installation) => installation.repositories);
-}
-
-export function installationForRepository(
-  configuration: GitHubConfiguration,
-  owner: string,
-  name: string,
-): GitHubInstallation | undefined {
-  return configuration.installations.find((installation) =>
-    installation.repositories.some(
-      (repository) =>
-        repository.owner.toLowerCase() === owner.toLowerCase() &&
-        repository.name.toLowerCase() === name.toLowerCase(),
-    ),
-  );
-}
-
 export function validateConfiguration(value: unknown): RevoirConfiguration {
   const issues: string[] = [];
   const root = readObject(value, "configuration", issues);
-  if (root === undefined) {
-    throw new ConfigurationValidationError(issues);
-  }
+  if (root === undefined) throw new ConfigurationValidationError(issues);
   checkKeys(
     root,
     "configuration",
     ["version", "model", "github", "cloudflare", "timeouts", "paths"],
     issues,
   );
-
-  if (root.version !== CONFIG_VERSION) {
-    issues.push(`version must be ${CONFIG_VERSION}.`);
-  }
+  if (root.version !== CONFIG_VERSION) issues.push(`version must be ${CONFIG_VERSION}.`);
 
   const model = readObject(root.model, "model", issues);
-  if (model !== undefined) {
-    checkKeys(model, "model", ["id", "reasoning"], issues);
-  }
+  if (model !== undefined) checkKeys(model, "model", ["id", "reasoning"], issues);
   const modelId = model === undefined ? undefined : readString(model.id, "model.id", issues);
   if (modelId !== undefined && !/^openai-codex\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(modelId)) {
     issues.push('model.id must use the "openai-codex/<model>" format.');
@@ -236,12 +133,15 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
 
   const github = readObject(root.github, "github", issues);
   if (github !== undefined) {
-    checkKeys(github, "github", ["userId", "appId", "privateKey", "installations"], issues);
+    checkKeys(github, "github", ["appId", "appSlug", "privateKey", "webhookSecret"], issues);
   }
-  const userId =
-    github === undefined ? undefined : readPositiveInteger(github.userId, "github.userId", issues);
   const appId =
     github === undefined ? undefined : readPositiveInteger(github.appId, "github.appId", issues);
+  const appSlug =
+    github === undefined ? undefined : readString(github.appSlug, "github.appSlug", issues);
+  if (appSlug !== undefined && !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(appSlug)) {
+    issues.push("github.appSlug must be a valid GitHub App slug.");
+  }
   const privateKey =
     github === undefined ? undefined : readString(github.privateKey, "github.privateKey", issues);
   if (
@@ -252,45 +152,19 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
   ) {
     issues.push("github.privateKey must be a PEM-encoded private key.");
   }
-
-  const installationsValue = github?.installations;
-  const installations: GitHubInstallation[] = [];
-  if (!Array.isArray(installationsValue) || installationsValue.length === 0) {
-    issues.push("github.installations must contain at least one installation group.");
-  } else {
-    for (const [index, installation] of installationsValue.entries()) {
-      const parsed = parseInstallation(installation, index, issues);
-      if (parsed !== undefined) {
-        installations.push(parsed);
-      }
-    }
-    const installationIds = new Set<number>();
-    const ids = new Set<number>();
-    const names = new Set<string>();
-    for (const installation of installations) {
-      if (installationIds.has(installation.id)) {
-        issues.push(`github.installations contains duplicate installation id ${installation.id}.`);
-      }
-      installationIds.add(installation.id);
-      for (const repository of installation.repositories) {
-        const fullName = `${repository.owner}/${repository.name}`.toLowerCase();
-        if (ids.has(repository.id)) {
-          issues.push(
-            `github.installations assigns repository id ${repository.id} more than once.`,
-          );
-        }
-        if (names.has(fullName)) {
-          issues.push(`github.installations assigns repository ${fullName} more than once.`);
-        }
-        ids.add(repository.id);
-        names.add(fullName);
-      }
-    }
-  }
+  const webhookSecret =
+    github === undefined
+      ? undefined
+      : readString(github.webhookSecret, "github.webhookSecret", issues);
 
   const cloudflare = readObject(root.cloudflare, "cloudflare", issues);
   if (cloudflare !== undefined) {
-    checkKeys(cloudflare, "cloudflare", ["accountId", "queueId", "apiToken"], issues);
+    checkKeys(
+      cloudflare,
+      "cloudflare",
+      ["accountId", "queueId", "queueName", "kvNamespaceId", "workerName", "apiToken", "relayUrl"],
+      issues,
+    );
   }
   const accountId =
     cloudflare === undefined
@@ -300,10 +174,44 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
     cloudflare === undefined
       ? undefined
       : readString(cloudflare.queueId, "cloudflare.queueId", issues);
+  const queueName =
+    cloudflare === undefined
+      ? undefined
+      : readString(cloudflare.queueName, "cloudflare.queueName", issues);
+  const kvNamespaceId =
+    cloudflare === undefined
+      ? undefined
+      : readString(cloudflare.kvNamespaceId, "cloudflare.kvNamespaceId", issues);
+  const workerName =
+    cloudflare === undefined
+      ? undefined
+      : readString(cloudflare.workerName, "cloudflare.workerName", issues);
   const apiToken =
     cloudflare === undefined
       ? undefined
       : readString(cloudflare.apiToken, "cloudflare.apiToken", issues);
+  const relayUrl =
+    cloudflare === undefined
+      ? undefined
+      : readString(cloudflare.relayUrl, "cloudflare.relayUrl", issues);
+  if (relayUrl !== undefined) {
+    try {
+      const url = new URL(relayUrl);
+      if (
+        url.protocol !== "https:" ||
+        url.username !== "" ||
+        url.password !== "" ||
+        url.search !== "" ||
+        url.hash !== ""
+      ) {
+        issues.push(
+          "cloudflare.relayUrl must be a credential-free HTTPS URL without query or fragment.",
+        );
+      }
+    } catch {
+      issues.push("cloudflare.relayUrl must be a valid HTTPS URL.");
+    }
+  }
 
   const timeouts = readObject(root.timeouts, "timeouts", issues);
   if (timeouts !== undefined) {
@@ -333,12 +241,17 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
     issues.length > 0 ||
     modelId === undefined ||
     typeof reasoning !== "string" ||
-    userId === undefined ||
     appId === undefined ||
+    appSlug === undefined ||
     privateKey === undefined ||
+    webhookSecret === undefined ||
     accountId === undefined ||
     queueId === undefined ||
+    queueName === undefined ||
+    kvNamespaceId === undefined ||
+    workerName === undefined ||
     apiToken === undefined ||
+    relayUrl === undefined ||
     reviewMs === undefined ||
     shellCommandMs === undefined ||
     cacheDir === undefined ||
@@ -351,13 +264,16 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
   return {
     version: CONFIG_VERSION,
     model: { id: modelId, reasoning: reasoning as ReasoningLevel },
-    github: {
-      userId,
-      appId,
-      privateKey,
-      installations,
+    github: { appId, appSlug, privateKey, webhookSecret },
+    cloudflare: {
+      accountId,
+      queueId,
+      queueName,
+      kvNamespaceId,
+      workerName,
+      apiToken,
+      relayUrl,
     },
-    cloudflare: { accountId, queueId, apiToken },
     timeouts: { reviewMs, shellCommandMs },
     paths: { cacheDir, stateDir, dataDir },
   };
