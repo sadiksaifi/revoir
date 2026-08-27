@@ -2248,9 +2248,7 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
             {
               method: "POST",
               body: JSON.stringify({
-                repository_ids: configuredInstallation.repositories
-                  .map(({ id }) => id)
-                  .toSorted((left, right) => left - right),
+                repository_ids: [configuredRepository.id],
               }),
               headers: { ...headers, "Content-Type": "application/json" },
               signal,
