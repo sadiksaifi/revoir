@@ -385,7 +385,27 @@ export class RepositoryManager {
           { cause: error },
         );
       }
-      if (approval !== "confirmed") {
+      if (approval === "installation-absent") {
+        await this.#policies.writeLocal(prior);
+        try {
+          await this.#policies.writeCloud(prior);
+          await this.#policies.verifyCloud(prior);
+        } catch (error) {
+          throw new RepositoryPolicyUpdateError(
+            `The GitHub App installation disappeared while adding ${discovered.repository.owner}/${discovered.repository.name}; local authorization was revoked, but Cloudflare policy cleanup is still required.`,
+            { cause: error },
+          );
+        }
+        await this.#pending.upsert({
+          version: 1,
+          kind: "add",
+          repository: discovered.repository,
+          settingsUrl: discovered.newInstallationUrl,
+          createdAt: this.#now().toISOString(),
+        });
+        return { status: "pending", repository: discovered.repository };
+      }
+      if (approval === "pending") {
         return {
           status: "pending",
           repository: discovered.repository,

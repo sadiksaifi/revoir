@@ -352,6 +352,53 @@ describe("repository authorization", () => {
     assert.equal(pending.values[0]?.kind, "add");
   });
 
+  it("revokes stale policy when an installation disappears during repository approval", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    let replacementInstalled = false;
+    const github = fakeGitHub({ access: false });
+    github.discover = async () => ({
+      repository: REPOSITORY,
+      installation: {
+        id: replacementInstalled ? 9 : 8,
+        hasRepositoryAccess: replacementInstalled,
+        settingsUrl: `https://github.com/settings/installations/${replacementInstalled ? 9 : 8}`,
+      },
+      newInstallationUrl: "https://github.com/apps/revoir/installations/new",
+    });
+    github.waitForRepositoryAccess = async () => "installation-absent";
+    const manager = new RepositoryManager({ github, policies, pending });
+
+    assert.deepEqual(await manager.add({ owner: "Owner", name: "repository" }), {
+      status: "pending",
+      repository: REPOSITORY,
+    });
+    assert.deepEqual(policies.local, createEmptyPolicy(42));
+    assert.deepEqual(policies.cloud, createEmptyPolicy(42));
+    assert.deepEqual(
+      pending.values.map(({ kind, installationId, settingsUrl }) => ({
+        kind,
+        installationId,
+        settingsUrl,
+      })),
+      [
+        {
+          kind: "add",
+          installationId: undefined,
+          settingsUrl: "https://github.com/apps/revoir/installations/new",
+        },
+      ],
+    );
+
+    replacementInstalled = true;
+    assert.deepEqual(await manager.add({ owner: "Owner", name: "repository" }), {
+      status: "authorized",
+      repository: REPOSITORY,
+      installationId: 9,
+    });
+    assert.deepEqual(pending.values, []);
+  });
+
   it("cancels an organization-install approval that never produced an installation", async () => {
     const policies = new MemoryPolicies();
     const pending = pendingStore();
