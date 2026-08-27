@@ -67,7 +67,7 @@ export interface PendingRepositoryOperation {
   kind: "add" | "remove";
   repository: RepositoryIdentity;
   installationId?: number;
-  settingsUrl: string;
+  settingsUrl?: string;
   createdAt: string;
 }
 
@@ -178,6 +178,21 @@ function repositoryMatches(left: RepositoryIdentity, right: RepositoryIdentity):
     left.owner.toLowerCase() === right.owner.toLowerCase() &&
     left.name.toLowerCase() === right.name.toLowerCase()
   );
+}
+
+function configuredRepository(
+  policy: RevoirPolicy,
+  reference: RepositoryReference,
+): { installationId: number; repository: RepositoryIdentity } | undefined {
+  const installation = installationForRepository(policy, reference.owner, reference.name);
+  const repository = installation?.repositories.find(
+    (candidate) =>
+      candidate.owner.toLowerCase() === reference.owner.toLowerCase() &&
+      candidate.name.toLowerCase() === reference.name.toLowerCase(),
+  );
+  return installation === undefined || repository === undefined
+    ? undefined
+    : { installationId: installation.id, repository };
 }
 
 function policiesMatch(left: RevoirPolicy, right: RevoirPolicy): boolean {
@@ -326,43 +341,94 @@ export class RepositoryManager {
     reference: RepositoryReference,
     options: { keepGitHubAccess?: boolean } = {},
   ): Promise<RepositoryRemoveResult> {
-    await this.#authenticate();
-    const discovered = await this.#github.discover(reference);
-    const [local, cloud] = await Promise.all([
+    const [local, pendingOperations] = await Promise.all([
       this.#policies.loadLocal(),
-      this.#policies.loadCloud(),
+      this.#pending.load(),
     ]);
-    const effective = intersectPolicies(local, cloud);
-    if (!policiesMatch(local, effective)) {
-      await this.#policies.writeLocal(effective);
-    }
-    const configured = installationForRepository(
-      effective,
-      discovered.repository.owner,
-      discovered.repository.name,
+    const localEntry = configuredRepository(local, reference);
+    const priorPending = pendingOperations.find(
+      (operation) =>
+        operation.kind === "remove" &&
+        operation.repository.owner.toLowerCase() === reference.owner.toLowerCase() &&
+        operation.repository.name.toLowerCase() === reference.name.toLowerCase(),
     );
-    const next = withoutRepository(effective, discovered.repository.id);
-    // Revocation order is deliberately one-way: a later failure never restores local trust.
-    await this.#policies.writeLocal(next);
+    let repository = localEntry?.repository ?? priorPending?.repository;
+    let installationId = localEntry?.installationId ?? priorPending?.installationId;
+    const createdAt = priorPending?.createdAt ?? this.#now().toISOString();
+    const savePendingRemoval = async (): Promise<void> => {
+      if (repository === undefined) return;
+      await this.#pending.upsert({
+        version: 1,
+        kind: "remove",
+        repository,
+        ...(installationId === undefined ? {} : { installationId }),
+        ...(priorPending?.settingsUrl === undefined
+          ? {}
+          : { settingsUrl: priorPending.settingsUrl }),
+        createdAt,
+      });
+    };
+    await savePendingRemoval();
+
+    // Persist the execution-gate revocation before any remote authentication or discovery.
+    let locallyRevoked = repository === undefined ? local : withoutRepository(local, repository.id);
+    if (!policiesMatch(local, locallyRevoked)) {
+      await this.#policies.writeLocal(locallyRevoked);
+    }
+
+    await this.#policies.ensureAuthenticated?.();
+    const cloud = await this.#policies.loadCloud();
+    const cloudEntry = configuredRepository(cloud, reference);
+    repository ??= cloudEntry?.repository;
+    installationId ??= cloudEntry?.installationId;
+    await savePendingRemoval();
+    const effective = intersectPolicies(locallyRevoked, cloud);
+    if (!policiesMatch(locallyRevoked, effective)) {
+      await this.#policies.writeLocal(effective);
+      locallyRevoked = effective;
+    }
+    const next = repository === undefined ? effective : withoutRepository(effective, repository.id);
     try {
       await this.#policies.writeCloud(next);
       await this.#policies.verifyCloud(next);
     } catch (error) {
+      const label = `${repository?.owner ?? reference.owner}/${repository?.name ?? reference.name}`;
       throw new RepositoryPolicyUpdateError(
-        `Local authorization was revoked for ${discovered.repository.owner}/${discovered.repository.name}, but Cloudflare policy cleanup is still required.`,
+        `Local authorization was revoked for ${label}, but Cloudflare policy cleanup is still required.`,
         { cause: error },
       );
     }
-    await this.#pending.remove("add", discovered.repository.id);
-    if (
-      options.keepGitHubAccess === true ||
-      discovered.installation === undefined ||
-      !discovered.installation.hasRepositoryAccess
-    ) {
+    if (repository !== undefined) {
+      await this.#pending.remove("add", repository.id);
+    }
+    if (options.keepGitHubAccess === true && repository !== undefined) {
+      await this.#pending.remove("remove", repository.id);
+      return { status: "removed", repository };
+    }
+
+    let discovered: RepositoryDiscovery;
+    try {
+      await this.#github.ensureAuthenticated?.();
+      discovered = await this.#github.discover(reference);
+    } catch (error) {
+      if (repository === undefined) throw error;
+      throw new RepositoryGitHubAccessPendingError(
+        `Revoir authorization is revoked for ${repository.owner}/${repository.name}, but GitHub App access cleanup remains pending and was saved. Rerun the same command to resume.`,
+        { cause: error },
+      );
+    }
+    if (repository !== undefined && !repositoryMatches(repository, discovered.repository)) {
+      throw new RepositoryPolicyUpdateError(
+        `GitHub now resolves ${reference.owner}/${reference.name} to a different immutable repository id; Revoir authorization remains revoked.`,
+      );
+    }
+    repository = discovered.repository;
+    installationId ??= discovered.installation?.id;
+    if (discovered.installation === undefined || !discovered.installation.hasRepositoryAccess) {
       await this.#pending.remove("remove", discovered.repository.id);
       return { status: "removed", repository: discovered.repository };
     }
-    const installationId = configured?.id ?? discovered.installation.id;
+    installationId ??= discovered.installation.id;
     const pendingOperation: PendingRepositoryOperation = {
       version: 1,
       kind: "remove",
@@ -481,8 +547,10 @@ function parsePending(value: unknown): PendingRepositoryOperation[] {
       !Number.isSafeInteger(repository.id) ||
       typeof repository.owner !== "string" ||
       typeof repository.name !== "string" ||
-      typeof operation.settingsUrl !== "string" ||
-      !operation.settingsUrl.startsWith("https://github.com/") ||
+      (operation.kind === "add" && typeof operation.settingsUrl !== "string") ||
+      (operation.settingsUrl !== undefined &&
+        (typeof operation.settingsUrl !== "string" ||
+          !operation.settingsUrl.startsWith("https://github.com/"))) ||
       typeof operation.createdAt !== "string" ||
       !Number.isFinite(Date.parse(operation.createdAt)) ||
       (operation.installationId !== undefined &&

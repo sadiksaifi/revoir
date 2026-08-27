@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { createEmptyPolicy, withRepository, type RevoirPolicy } from "../src/config/policy.js";
+import {
+  createEmptyPolicy,
+  installationForRepository,
+  withRepository,
+  type RevoirPolicy,
+} from "../src/config/policy.js";
 import { createEffectivePolicyLoader } from "../src/repository-gateways.js";
 import {
   parseGitHubRemote,
@@ -23,6 +28,8 @@ class MemoryPolicies implements RepositoryPolicyStore {
   cloud: RevoirPolicy = createEmptyPolicy(42);
   events: string[] = [];
   failWrite = false;
+
+  async ensureAuthenticated(): Promise<void> {}
 
   async loadLocal(): Promise<RevoirPolicy> {
     return this.local;
@@ -283,6 +290,109 @@ describe("repository authorization", () => {
     assert.equal(pending.values[0]?.kind, "add");
   });
 
+  it("revokes local trust before Wrangler and cloud trust before GitHub discovery", async () => {
+    const events: string[] = [];
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+    policies.cloud = policies.local;
+    let localWrites = 0;
+    policies.writeLocal = async (policy) => {
+      events.push(localWrites === 0 ? "local-revoked" : "local-synchronized");
+      localWrites += 1;
+      policies.local = policy;
+    };
+    policies.ensureAuthenticated = async () => {
+      events.push("wrangler-authenticated");
+    };
+    policies.writeCloud = async (policy) => {
+      events.push("cloud-revoked");
+      policies.cloud = policy;
+    };
+    policies.verifyCloud = async () => {
+      events.push("cloud-verified");
+    };
+    const github = fakeGitHub();
+    github.ensureAuthenticated = async () => {
+      events.push("github-authenticated");
+    };
+    const discover = github.discover.bind(github);
+    github.discover = async (reference) => {
+      events.push("github-discovered");
+      return discover(reference);
+    };
+
+    await new RepositoryManager({ github, policies, pending: pendingStore() }).remove({
+      owner: "Owner",
+      name: "repository",
+    });
+
+    assert.deepEqual(events, [
+      "local-revoked",
+      "wrangler-authenticated",
+      "local-synchronized",
+      "cloud-revoked",
+      "cloud-verified",
+      "github-authenticated",
+      "github-discovered",
+    ]);
+  });
+
+  it("keeps local trust revoked when Wrangler authentication fails", async () => {
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+    policies.cloud = policies.local;
+    policies.ensureAuthenticated = async () => {
+      throw new Error("Wrangler unavailable");
+    };
+    const pending = pendingStore();
+
+    await assert.rejects(
+      new RepositoryManager({ github: fakeGitHub(), policies, pending }).remove({
+        owner: "Owner",
+        name: "repository",
+      }),
+      /Wrangler unavailable/u,
+    );
+
+    assert.equal(installationForRepository(policies.local, "Owner", "repository"), undefined);
+    assert.equal(installationForRepository(policies.cloud, "Owner", "repository")?.id, 8);
+    assert.deepEqual(pending.values, [
+      {
+        version: 1,
+        kind: "remove",
+        repository: REPOSITORY,
+        installationId: 8,
+        createdAt: pending.values[0]?.createdAt,
+      },
+    ]);
+  });
+
+  it("keeps both policy gates revoked when GitHub authentication fails", async () => {
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+    policies.cloud = policies.local;
+    const github = fakeGitHub();
+    github.ensureAuthenticated = async () => {
+      throw new Error("GitHub unavailable");
+    };
+    const pending = pendingStore();
+
+    await assert.rejects(
+      new RepositoryManager({ github, policies, pending }).remove({
+        owner: "Owner",
+        name: "repository",
+      }),
+      (error) =>
+        error instanceof RepositoryGitHubAccessPendingError &&
+        /authorization is revoked/u.test(error.message),
+    );
+
+    assert.equal(installationForRepository(policies.local, "Owner", "repository"), undefined);
+    assert.equal(installationForRepository(policies.cloud, "Owner", "repository"), undefined);
+    assert.equal(pending.values[0]?.kind, "remove");
+    assert.equal(pending.values[0]?.repository.id, REPOSITORY.id);
+  });
+
   it("revokes local and cloud policy before attempting GitHub cleanup", async () => {
     const policies = new MemoryPolicies();
     const seedManager = new RepositoryManager({
@@ -300,7 +410,7 @@ describe("repository authorization", () => {
       (await manager.remove({ owner: "Owner", name: "repository" })).status,
       "github-access-pending",
     );
-    assert.deepEqual(policies.events, ["local:1", "cloud:1", "cloud:verified"]);
+    assert.deepEqual(policies.events, ["local:1", "local:1", "cloud:1", "cloud:verified"]);
     assert.equal(policies.local.installations[0]?.repositories.length, 0);
     assert.deepEqual(github.events, [
       "open:https://github.com/settings/installations/8",
