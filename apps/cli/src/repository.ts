@@ -460,8 +460,10 @@ export class RepositoryManager {
     }
     const next = repository === undefined ? effective : withoutRepository(effective, repository.id);
     try {
-      await this.#policies.writeCloud(next);
-      await this.#policies.verifyCloud(next);
+      if (!policiesMatch(cloud, next)) {
+        await this.#policies.writeCloud(next);
+        await this.#policies.verifyCloud(next);
+      }
     } catch (error) {
       const label = `${repository?.owner ?? reference.owner}/${repository?.name ?? reference.name}`;
       throw new RepositoryPolicyUpdateError(
@@ -513,8 +515,10 @@ export class RepositoryManager {
         discovered.repository.id,
       );
       try {
-        await this.#policies.writeCloud(identityRevokedCloud);
-        await this.#policies.verifyCloud(identityRevokedCloud);
+        if (!policiesMatch(cloud, identityRevokedCloud)) {
+          await this.#policies.writeCloud(identityRevokedCloud);
+          await this.#policies.verifyCloud(identityRevokedCloud);
+        }
       } catch (error) {
         throw new RepositoryPolicyUpdateError(
           `Local authorization was revoked for ${discovered.repository.owner}/${discovered.repository.name}, but Cloudflare policy cleanup is still required.`,

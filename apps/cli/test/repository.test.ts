@@ -383,6 +383,7 @@ describe("repository authorization", () => {
     assert.equal((await manager.remove({ owner: "Owner", name: "repository" })).status, "removed");
     assert.deepEqual(pending.values, []);
     assert.deepEqual(await manager.list(), []);
+    assert.deepEqual(policies.events, []);
   });
 
   it("turns a late installation approval into cleanup without reviving pending add intent", async () => {
@@ -857,10 +858,14 @@ describe("repository authorization", () => {
     policies.local = withRepository(createEmptyPolicy(42), 8, previousIdentity);
     policies.cloud = policies.local;
     const writeCloud = policies.writeCloud.bind(policies);
-    let cloudWrites = 0;
     policies.writeCloud = async (policy) => {
-      cloudWrites += 1;
-      if (cloudWrites === 2) throw new Error("KV unavailable");
+      if (
+        !policy.installations.some((installation) =>
+          installation.repositories.some(({ id }) => id === REPOSITORY.id),
+        )
+      ) {
+        throw new Error("KV unavailable");
+      }
       await writeCloud(policy);
     };
     const github = fakeGitHub();
@@ -956,6 +961,26 @@ describe("repository authorization", () => {
       { status: "removed", repository: REPOSITORY },
     );
     assert.deepEqual(github.events, []);
+    assert.deepEqual(pending.values, []);
+    assert.deepEqual(policies.events, []);
+  });
+
+  it("narrows stale local trust without rewriting an already-revoked cloud policy", async () => {
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+    const pending = pendingStore();
+
+    assert.deepEqual(
+      await new RepositoryManager({
+        github: fakeGitHub({ access: false }),
+        policies,
+        pending,
+      }).remove({ owner: "Owner", name: "repository" }),
+      { status: "removed", repository: REPOSITORY },
+    );
+    assert.equal(installationForRepository(policies.local, "Owner", "repository"), undefined);
+    assert.deepEqual(policies.cloud, createEmptyPolicy(42));
+    assert.equal(policies.events.some((event) => event.startsWith("cloud:")), false);
     assert.deepEqual(pending.values, []);
   });
 
