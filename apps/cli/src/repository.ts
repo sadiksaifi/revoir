@@ -589,26 +589,38 @@ export class RepositoryManager {
     const pendingKeys = new Set(pending.map(pendingKey));
     return [...entries.values()]
       .map((entry): RepositoryListEntry => {
-        const inLocal = repositories(local).some(({ repository }) =>
+        const localEntry = repositories(local).find(({ repository }) =>
           repositoryMatches(repository, entry.repository),
         );
-        const inCloud = repositories(cloud).some(({ repository }) =>
+        const cloudEntry = repositories(cloud).find(({ repository }) =>
           repositoryMatches(repository, entry.repository),
         );
-        const inGitHub = github.some(({ repository }) =>
+        const githubEntry = github.find(({ repository }) =>
           repositoryMatches(repository, entry.repository),
         );
+        const inLocal = localEntry !== undefined;
+        const inCloud = cloudEntry !== undefined;
+        const inGitHub = githubEntry !== undefined;
+        const policyInstallationId =
+          localEntry !== undefined &&
+          cloudEntry !== undefined &&
+          localEntry.installationId === cloudEntry.installationId
+            ? localEntry.installationId
+            : undefined;
+        const exactlyAuthorized =
+          policyInstallationId !== undefined &&
+          githubEntry?.installationId === policyInstallationId;
         let status: RepositoryListStatus;
         if (
           pendingKeys.has(`add:${entry.repository.id}`) ||
           pendingKeys.has(`remove:${entry.repository.id}`)
         ) {
           status = "pending";
-        } else if (inLocal && inCloud && inGitHub) {
+        } else if (exactlyAuthorized) {
           status = "authorized";
         } else if (!inLocal && !inCloud && inGitHub) {
           status = "github-access-only";
-        } else if (inLocal && inCloud && !inGitHub) {
+        } else if (policyInstallationId !== undefined && !inGitHub) {
           status = "inaccessible";
         } else {
           status = "drifted";

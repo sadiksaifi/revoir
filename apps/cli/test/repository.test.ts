@@ -10,6 +10,7 @@ import {
   withRepository,
   type RevoirPolicy,
 } from "../src/config/policy.js";
+import { repositoryAuthorizationDiagnostic } from "../src/diagnostics.js";
 import { createEffectivePolicyLoader } from "../src/repository-gateways.js";
 import {
   parseGitHubRemote,
@@ -993,6 +994,75 @@ describe("repository authorization", () => {
     });
     assert.equal((await manager.list())[0]?.status, "github-access-only");
     assert.equal(policies.local.installations.length, 0);
+  });
+
+  it("reports installation replacement as authorization drift", async () => {
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+    policies.cloud = policies.local;
+    const github = fakeGitHub();
+    github.listAccessibleRepositories = async () => [
+      { installationId: 9, repository: REPOSITORY },
+    ];
+    const entries = await new RepositoryManager({
+      github,
+      policies,
+      pending: pendingStore(),
+    }).list();
+
+    assert.deepEqual(entries, [
+      {
+        repository: REPOSITORY,
+        installationId: 9,
+        status: "drifted",
+        local: true,
+        cloud: true,
+        github: true,
+      },
+    ]);
+    assert.deepEqual(repositoryAuthorizationDiagnostic(entries), {
+      id: "authorization",
+      label: "Repository authorization",
+      status: "failed",
+      detail: "drifted: Owner/repository",
+    });
+  });
+
+  it("classifies installation identity agreement across every authorization source", async () => {
+    const scenarios = [
+      { name: "all sources agree", cloud: 8, github: 8, expected: "authorized" },
+      { name: "GitHub access is absent", cloud: 8, github: undefined, expected: "inaccessible" },
+      { name: "GitHub installation differs", cloud: 8, github: 9, expected: "drifted" },
+      { name: "cloud installation differs", cloud: 9, github: 8, expected: "drifted" },
+      {
+        name: "local installation differs from cloud and GitHub",
+        cloud: 9,
+        github: 9,
+        expected: "drifted",
+      },
+      {
+        name: "policy installations differ while GitHub access is absent",
+        cloud: 9,
+        github: undefined,
+        expected: "drifted",
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const policies = new MemoryPolicies();
+      policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+      policies.cloud = withRepository(createEmptyPolicy(42), scenario.cloud, REPOSITORY);
+      const github = fakeGitHub();
+      github.listAccessibleRepositories = async () =>
+        scenario.github === undefined
+          ? []
+          : [{ installationId: scenario.github, repository: REPOSITORY }];
+
+      const entry = (
+        await new RepositoryManager({ github, policies, pending: pendingStore() }).list()
+      )[0];
+      assert.equal(entry?.status, scenario.expected, scenario.name);
+    }
   });
 
   it("lists a non-authorizing pending approval before GitHub exposes an installation", async () => {
