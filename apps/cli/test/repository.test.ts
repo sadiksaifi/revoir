@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { createEmptyPolicy, withRepository, type RevoirPolicy } from "../src/config/policy.js";
+import { createEffectivePolicyLoader } from "../src/repository-gateways.js";
 import {
   parseGitHubRemote,
   parseRepositoryReference,
+  RepositoryGitHubAccessPendingError,
   RepositoryManager,
   RepositoryPolicyUpdateError,
   type PendingRepositoryOperation,
@@ -50,6 +52,8 @@ function fakeGitHub(
   overrides: {
     access?: boolean;
     approval?: "confirmed" | "pending";
+    failOpen?: boolean;
+    failWait?: boolean;
     installation?: boolean;
   } = {},
 ): RepositoryGitHubGateway & { events: string[] } {
@@ -74,8 +78,10 @@ function fakeGitHub(
     },
     async open(url) {
       events.push(`open:${url}`);
+      if (overrides.failOpen === true) throw new Error("browser unavailable");
     },
     async waitForInstallation(): Promise<RepositoryApproval> {
+      if (overrides.failWait === true) throw new Error("installation polling unavailable");
       return {
         status: overrides.approval === "pending" ? "pending" : "approved",
         installationId: 8,
@@ -84,6 +90,7 @@ function fakeGitHub(
     },
     async waitForRepositoryAccess(_installationId, _repository, expected) {
       events.push(`poll:${String(expected)}`);
+      if (overrides.failWait === true) throw new Error("repository polling unavailable");
       return overrides.approval ?? "confirmed";
     },
     async listAccessibleRepositories() {
@@ -139,6 +146,21 @@ describe("repository references", () => {
 });
 
 describe("repository authorization", () => {
+  it("loads the fail-closed local/cloud intersection for each Mac authorization check", async () => {
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+
+    assert.deepEqual(await createEffectivePolicyLoader(policies)(), createEmptyPolicy(42));
+
+    policies.cloud = policies.local;
+    assert.deepEqual(await createEffectivePolicyLoader(policies)(), policies.local);
+
+    policies.loadCloud = async () => {
+      throw new Error("KV unavailable");
+    };
+    await assert.rejects(createEffectivePolicyLoader(policies)(), /KV unavailable/u);
+  });
+
   it("adds local then cloud policy before reporting GitHub-confirmed authorization", async () => {
     const policies = new MemoryPolicies();
     const github = fakeGitHub({ access: false });
@@ -220,6 +242,47 @@ describe("repository authorization", () => {
     ]);
   });
 
+  it("persists non-authorizing installation approval before opening GitHub", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    const manager = new RepositoryManager({
+      github: fakeGitHub({ installation: false, failOpen: true }),
+      policies,
+      pending,
+      now: () => new Date("2026-08-27T00:00:00.000Z"),
+    });
+
+    await assert.rejects(
+      manager.add({ owner: "Owner", name: "repository" }),
+      (error) =>
+        error instanceof RepositoryGitHubAccessPendingError &&
+        /No Revoir authorization was added/u.test(error.message),
+    );
+    assert.deepEqual(policies.local, createEmptyPolicy(42));
+    assert.equal(pending.values[0]?.kind, "add");
+    assert.equal(pending.values[0]?.installationId, undefined);
+  });
+
+  it("persists GitHub access pending after both policy gates synchronize", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    const manager = new RepositoryManager({
+      github: fakeGitHub({ access: false, failWait: true }),
+      policies,
+      pending,
+    });
+
+    await assert.rejects(
+      manager.add({ owner: "Owner", name: "repository" }),
+      (error) =>
+        error instanceof RepositoryGitHubAccessPendingError &&
+        /Local and cloud policy are synchronized/u.test(error.message),
+    );
+    assert.deepEqual(policies.local, policies.cloud);
+    assert.equal(policies.local.installations[0]?.repositories[0]?.id, REPOSITORY.id);
+    assert.equal(pending.values[0]?.kind, "add");
+  });
+
   it("revokes local and cloud policy before attempting GitHub cleanup", async () => {
     const policies = new MemoryPolicies();
     const seedManager = new RepositoryManager({
@@ -243,6 +306,32 @@ describe("repository authorization", () => {
       "open:https://github.com/settings/installations/8",
       "poll:false",
     ]);
+    assert.equal(pending.values[0]?.kind, "remove");
+  });
+
+  it("keeps authorization revoked and saves GitHub cleanup when polling fails", async () => {
+    const policies = new MemoryPolicies();
+    const seedManager = new RepositoryManager({
+      github: fakeGitHub(),
+      policies,
+      pending: pendingStore(),
+    });
+    await seedManager.add({ owner: "Owner", name: "repository" });
+    const pending = pendingStore();
+    const manager = new RepositoryManager({
+      github: fakeGitHub({ failWait: true }),
+      policies,
+      pending,
+    });
+
+    await assert.rejects(
+      manager.remove({ owner: "Owner", name: "repository" }),
+      (error) =>
+        error instanceof RepositoryGitHubAccessPendingError &&
+        /Revoir authorization is revoked/u.test(error.message),
+    );
+    assert.equal(policies.local.installations[0]?.repositories.length, 0);
+    assert.equal(policies.cloud.installations[0]?.repositories.length, 0);
     assert.equal(pending.values[0]?.kind, "remove");
   });
 

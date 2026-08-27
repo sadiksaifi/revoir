@@ -28,7 +28,11 @@ import {
 } from "./diagnostics.js";
 import { createDefaultQueueRunService, type QueueRunService } from "./queue/runner.js";
 import { SecretRedactor } from "./redaction.js";
-import { GitHubRepositoryGateway, LocalAndWranglerPolicyStore } from "./repository-gateways.js";
+import {
+  createEffectivePolicyLoader,
+  GitHubRepositoryGateway,
+  LocalAndWranglerPolicyStore,
+} from "./repository-gateways.js";
 import {
   FilePendingRepositoryStore,
   inferCurrentRepository,
@@ -799,10 +803,19 @@ export async function runCli(
         model: configuration.model.id,
         reasoning: configuration.model.reasoning,
       });
-      await (
+      const runService =
         dependencies.runService ??
-        createDefaultQueueRunService(configuration, () => loadPolicy(paths.policyFile), logger)
-      ).run(dependencies.shutdownSignal);
+        createDefaultQueueRunService(
+          configuration,
+          createEffectivePolicyLoader(
+            new LocalAndWranglerPolicyStore({
+              cloudflare: configuration.cloudflare,
+              policyFile: paths.policyFile,
+            }),
+          ),
+          logger,
+        );
+      await runService.run(dependencies.shutdownSignal);
       await logger.write("daemon_stopped", {
         pid: process.pid,
         reason: dependencies.shutdownSignal?.aborted === true ? "shutdown" : "completed",

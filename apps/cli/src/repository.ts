@@ -108,6 +108,13 @@ export class RepositoryPolicyUpdateError extends Error {
   }
 }
 
+export class RepositoryGitHubAccessPendingError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "RepositoryGitHubAccessPendingError";
+  }
+}
+
 export function parseRepositoryReference(value: string): RepositoryReference {
   const match = /^([^/]+)\/([^/]+)$/u.exec(value.trim());
   const owner = match?.[1];
@@ -211,13 +218,27 @@ export class RepositoryManager {
     const discovered = await this.#github.discover(reference);
     let installation = discovered.installation;
     if (installation === undefined) {
-      await this.#github.open(discovered.newInstallationUrl);
-      const approval = await this.#github.waitForInstallation(reference);
+      const pendingOperation: PendingRepositoryOperation = {
+        version: 1,
+        kind: "add",
+        repository: discovered.repository,
+        settingsUrl: discovered.newInstallationUrl,
+        createdAt: this.#now().toISOString(),
+      };
+      await this.#pending.upsert(pendingOperation);
+      let approval: RepositoryApproval;
+      try {
+        await this.#github.open(discovered.newInstallationUrl);
+        approval = await this.#github.waitForInstallation(reference);
+      } catch (error) {
+        throw new RepositoryGitHubAccessPendingError(
+          `No Revoir authorization was added for ${discovered.repository.owner}/${discovered.repository.name}; GitHub installation approval remains pending and was saved. Rerun the same command to resume.`,
+          { cause: error },
+        );
+      }
       if (approval.status === "pending" || approval.installationId === undefined) {
         await this.#pending.upsert({
-          version: 1,
-          kind: "add",
-          repository: discovered.repository,
+          ...pendingOperation,
           ...(approval.installationId === undefined
             ? {}
             : { installationId: approval.installationId }),
@@ -262,21 +283,30 @@ export class RepositoryManager {
     }
 
     if (!installation.hasRepositoryAccess) {
-      await this.#github.open(installation.settingsUrl);
-      const approval = await this.#github.waitForRepositoryAccess(
-        installation.id,
-        discovered.repository,
-        true,
-      );
+      const pendingOperation: PendingRepositoryOperation = {
+        version: 1,
+        kind: "add",
+        repository: discovered.repository,
+        installationId: installation.id,
+        settingsUrl: installation.settingsUrl,
+        createdAt: this.#now().toISOString(),
+      };
+      await this.#pending.upsert(pendingOperation);
+      let approval: "confirmed" | "pending";
+      try {
+        await this.#github.open(installation.settingsUrl);
+        approval = await this.#github.waitForRepositoryAccess(
+          installation.id,
+          discovered.repository,
+          true,
+        );
+      } catch (error) {
+        throw new RepositoryGitHubAccessPendingError(
+          `Local and cloud policy are synchronized for ${discovered.repository.owner}/${discovered.repository.name}, but GitHub App access remains pending and was saved. Revoir will not review the repository until GitHub grants access; rerun the same command to resume.`,
+          { cause: error },
+        );
+      }
       if (approval === "pending") {
-        await this.#pending.upsert({
-          version: 1,
-          kind: "add",
-          repository: discovered.repository,
-          installationId: installation.id,
-          settingsUrl: installation.settingsUrl,
-          createdAt: this.#now().toISOString(),
-        });
         return {
           status: "pending",
           repository: discovered.repository,
@@ -329,22 +359,34 @@ export class RepositoryManager {
       discovered.installation === undefined ||
       !discovered.installation.hasRepositoryAccess
     ) {
+      await this.#pending.remove("remove", discovered.repository.id);
       return { status: "removed", repository: discovered.repository };
     }
     const installationId = configured?.id ?? discovered.installation.id;
-    await this.#github.open(discovered.installation.settingsUrl);
-    if (
-      (await this.#github.waitForRepositoryAccess(installationId, discovered.repository, false)) ===
-      "pending"
-    ) {
-      await this.#pending.upsert({
-        version: 1,
-        kind: "remove",
-        repository: discovered.repository,
+    const pendingOperation: PendingRepositoryOperation = {
+      version: 1,
+      kind: "remove",
+      repository: discovered.repository,
+      installationId,
+      settingsUrl: discovered.installation.settingsUrl,
+      createdAt: this.#now().toISOString(),
+    };
+    await this.#pending.upsert(pendingOperation);
+    let approval: "confirmed" | "pending";
+    try {
+      await this.#github.open(discovered.installation.settingsUrl);
+      approval = await this.#github.waitForRepositoryAccess(
         installationId,
-        settingsUrl: discovered.installation.settingsUrl,
-        createdAt: this.#now().toISOString(),
-      });
+        discovered.repository,
+        false,
+      );
+    } catch (error) {
+      throw new RepositoryGitHubAccessPendingError(
+        `Revoir authorization is revoked for ${discovered.repository.owner}/${discovered.repository.name}, but GitHub App access remains and its cleanup was saved. Rerun the same command to resume.`,
+        { cause: error },
+      );
+    }
+    if (approval === "pending") {
       return { status: "github-access-pending", repository: discovered.repository };
     }
     await this.#pending.remove("remove", discovered.repository.id);

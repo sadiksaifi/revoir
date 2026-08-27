@@ -41,6 +41,7 @@ export interface LaunchdServiceInput {
   configFile: string;
   executableArguments: readonly string[];
   homeDir: string;
+  executablePath?: string;
   paths: ApplicationPaths;
   uid: number;
 }
@@ -144,6 +145,7 @@ export class LaunchdServiceManager {
       executableArguments: input.executableArguments,
       configFile: input.configFile,
       homeDir: input.homeDir,
+      ...(input.executablePath === undefined ? {} : { executablePath: input.executablePath }),
       paths: input.paths,
     });
     this.#expectedPlist = renderLaunchAgentPlist(this.#definition);
@@ -395,6 +397,7 @@ export function createDefaultServiceManager(input: {
       configFile: input.configFile,
       executableArguments: currentExecutableArguments(),
       homeDir: input.homeDir,
+      ...(process.env.PATH === undefined ? {} : { executablePath: process.env.PATH }),
       paths: input.paths,
       uid,
     },

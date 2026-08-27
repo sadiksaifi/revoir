@@ -21,6 +21,7 @@ export interface LaunchAgentInput {
   executableArguments: readonly string[];
   configFile: string;
   homeDir: string;
+  executablePath?: string;
   paths: ApplicationPaths;
 }
 
@@ -48,6 +49,9 @@ export function createLaunchAgentDefinition(input: LaunchAgentInput): LaunchAgen
     programArguments: [...input.executableArguments, "run", "--config", input.configFile],
     environment: {
       HOME: input.homeDir,
+      ...(input.executablePath === undefined || input.executablePath === ""
+        ? {}
+        : { PATH: input.executablePath }),
       XDG_CACHE_HOME: dirname(input.paths.cacheDir),
       XDG_CONFIG_HOME: dirname(input.paths.configDir),
       XDG_DATA_HOME: dirname(input.paths.dataDir),

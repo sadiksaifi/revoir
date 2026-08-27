@@ -1,6 +1,6 @@
 import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY } from "@revoir/contracts";
 
-import { loadPolicy, writePolicy, type RevoirPolicy } from "./config/policy.js";
+import { intersectPolicies, loadPolicy, writePolicy, type RevoirPolicy } from "./config/policy.js";
 import type { RevoirConfiguration } from "./config/schema.js";
 import {
   type RepositoryApproval,
@@ -345,4 +345,13 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
     } while (Date.now() < deadline);
     throw new Error("Cloudflare KV policy did not propagate before the activation deadline.");
   }
+}
+
+export function createEffectivePolicyLoader(
+  policies: Pick<RepositoryPolicyStore, "loadLocal" | "loadCloud">,
+): () => Promise<RevoirPolicy> {
+  return async () => {
+    const [local, cloud] = await Promise.all([policies.loadLocal(), policies.loadCloud()]);
+    return intersectPolicies(local, cloud);
+  };
 }

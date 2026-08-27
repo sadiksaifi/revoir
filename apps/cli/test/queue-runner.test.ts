@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { withRepository } from "../src/config/policy.js";
+import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
 import type { QueueDelivery } from "../src/queue/client.js";
 import type {
@@ -150,6 +150,38 @@ class MemoryReviewRequestCompletionStore implements ReviewRequestCompletionStore
 }
 
 describe("queue review runner", () => {
+  it("rejects a queued job after current cloud policy revokes it", async () => {
+    let reviewed = false;
+    let acknowledged = false;
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return delivery("cloud-revoked", reviewJob());
+        },
+        async acknowledge() {
+          acknowledged = true;
+        },
+        async retry() {},
+      },
+      {
+        async review() {
+          reviewed = true;
+          throw new Error("A cloud-revoked job must not start review work.");
+        },
+      },
+      silentFailureReporter,
+      new MemoryOperationalFailureStore(),
+      undefined,
+      new MemoryReviewRequestCompletionStore(),
+      async () => createEmptyPolicy(42),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(acknowledged, true);
+    assert.equal(reviewed, false);
+  });
+
   it("reviews an authorized issue-comment request at the latest eligible head", async () => {
     const deliveries = [
       delivery("requested", requestedReviewJob()),
