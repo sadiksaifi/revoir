@@ -980,7 +980,10 @@ describe("repository authorization", () => {
     );
     assert.equal(installationForRepository(policies.local, "Owner", "repository"), undefined);
     assert.deepEqual(policies.cloud, createEmptyPolicy(42));
-    assert.equal(policies.events.some((event) => event.startsWith("cloud:")), false);
+    assert.equal(
+      policies.events.some((event) => event.startsWith("cloud:")),
+      false,
+    );
     assert.deepEqual(pending.values, []);
   });
 
@@ -1026,9 +1029,7 @@ describe("repository authorization", () => {
     policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
     policies.cloud = policies.local;
     const github = fakeGitHub();
-    github.listAccessibleRepositories = async () => [
-      { installationId: 9, repository: REPOSITORY },
-    ];
+    github.listAccessibleRepositories = async () => [{ installationId: 9, repository: REPOSITORY }];
     const entries = await new RepositoryManager({
       github,
       policies,
@@ -1073,21 +1074,27 @@ describe("repository authorization", () => {
       },
     ] as const;
 
-    for (const scenario of scenarios) {
-      const policies = new MemoryPolicies();
-      policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
-      policies.cloud = withRepository(createEmptyPolicy(42), scenario.cloud, REPOSITORY);
-      const github = fakeGitHub();
-      github.listAccessibleRepositories = async () =>
-        scenario.github === undefined
-          ? []
-          : [{ installationId: scenario.github, repository: REPOSITORY }];
+    const results = await Promise.all(
+      scenarios.map(async (scenario) => {
+        const policies = new MemoryPolicies();
+        policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+        policies.cloud = withRepository(createEmptyPolicy(42), scenario.cloud, REPOSITORY);
+        const github = fakeGitHub();
+        github.listAccessibleRepositories = async () =>
+          scenario.github === undefined
+            ? []
+            : [{ installationId: scenario.github, repository: REPOSITORY }];
 
-      const entry = (
-        await new RepositoryManager({ github, policies, pending: pendingStore() }).list()
-      )[0];
-      assert.equal(entry?.status, scenario.expected, scenario.name);
-    }
+        const entry = (
+          await new RepositoryManager({ github, policies, pending: pendingStore() }).list()
+        )[0];
+        return { name: scenario.name, status: entry?.status };
+      }),
+    );
+    assert.deepEqual(
+      results,
+      scenarios.map(({ name, expected }) => ({ name, status: expected })),
+    );
   });
 
   it("lists a non-authorizing pending approval before GitHub exposes an installation", async () => {
