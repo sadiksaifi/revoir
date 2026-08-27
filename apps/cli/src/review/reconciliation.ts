@@ -1,8 +1,4 @@
-import {
-  findingFingerprint,
-  prerequisiteFindingFingerprint,
-  type ReviewFindingV1,
-} from "./findings.js";
+import { exactFindingFingerprint, findingFingerprint, type ReviewFindingV2 } from "./findings.js";
 
 const FINDING_MARKER = /^<!-- revoir:finding:v1:([0-9a-f]{64}) -->\r?$/gmu;
 const FINDING_ALIAS_MARKER =
@@ -31,9 +27,9 @@ export interface PriorReviewState {
 }
 
 export interface FindingReconciliationPlan {
-  readonly netNewFindings: readonly ReviewFindingV1[];
+  readonly netNewFindings: readonly ReviewFindingV2[];
   readonly obsoleteThreadIds: readonly string[];
-  readonly currentBodyFindings: readonly ReviewFindingV1[];
+  readonly currentBodyFindings: readonly ReviewFindingV2[];
   readonly bodyStateChanged: boolean;
 }
 
@@ -97,12 +93,12 @@ interface CurrentFindingIdentity extends PriorFindingIdentity {
   readonly semanticFingerprint: string;
 }
 
-function currentFindingIdentity(finding: ReviewFindingV1): CurrentFindingIdentity {
+function currentFindingIdentity(finding: ReviewFindingV2): CurrentFindingIdentity {
   const semanticFingerprint = findingFingerprint(finding);
   const aliases = new Set([
     ...(finding.fingerprintAliases ?? []),
     semanticFingerprint,
-    prerequisiteFindingFingerprint(finding),
+    exactFindingFingerprint(finding),
   ]);
   aliases.delete(finding.fingerprint);
   return {
@@ -475,7 +471,7 @@ function matchFindingIdentities(
 }
 
 export function planFindingReconciliation(
-  findings: readonly ReviewFindingV1[],
+  findings: readonly ReviewFindingV2[],
   prior: PriorReviewState,
 ): FindingReconciliationPlan {
   const current = findings.map((finding) => currentFindingIdentity(finding));

@@ -5,9 +5,9 @@ import {
   FINDING_CONTRACT_VERSION,
   parseModelFinding,
   parseModelReviewOutput,
-  type FindingRangeV1,
-  type FindingV1,
-  type ModelFindingV1,
+  type FindingRangeV2,
+  type FindingV2,
+  type ModelFindingV2,
 } from "@revoir/contracts";
 
 import { isAttachableRange, parseGitDiff, type DiffFile, type DiffSide } from "./diff.js";
@@ -22,7 +22,7 @@ export {
   type FindingPriority,
 } from "@revoir/contracts";
 
-export interface ReviewFindingV1 extends FindingV1 {
+export interface ReviewFindingV2 extends FindingV2 {
   attachment: FindingAttachment;
   fingerprintAliases?: readonly string[];
 }
@@ -48,7 +48,7 @@ export interface FindingDiagnostic {
 
 export interface ValidatedReviewOutput {
   version: typeof FINDING_CONTRACT_VERSION;
-  findings: readonly ReviewFindingV1[];
+  findings: readonly ReviewFindingV2[];
   diagnostics: readonly FindingDiagnostic[];
 }
 
@@ -85,7 +85,7 @@ function safeRepositoryPath(value: string): string {
 
 async function validatePath(
   checkout: string,
-  finding: ModelFindingV1,
+  finding: ModelFindingV2,
   file: DiffFile | undefined,
   signal: AbortSignal | undefined,
   shellCommandMs: number,
@@ -112,7 +112,7 @@ function changedLineKey(side: DiffSide, line: number): string {
   return `${side}:${line}`;
 }
 
-function exactAnchorRanges(file: DiffFile, anchor: string): FindingRangeV1[] {
+function exactAnchorRanges(file: DiffFile, anchor: string): FindingRangeV2[] {
   return [...file.changedLineText.entries()].flatMap(([key, text]) => {
     if (text.trim() !== anchor) {
       return [];
@@ -127,7 +127,7 @@ function exactAnchorRanges(file: DiffFile, anchor: string): FindingRangeV1[] {
   });
 }
 
-function validateTechnicalAnchor(finding: ModelFindingV1, file: DiffFile): ModelFindingV1 {
+function validateTechnicalAnchor(finding: ModelFindingV2, file: DiffFile): ModelFindingV2 {
   if (finding.range !== null) {
     const hasExactSelectedLine = Array.from(
       { length: finding.range.end - finding.range.start + 1 },
@@ -227,7 +227,7 @@ async function reviewedHeadEntry(
 
 export function findingFingerprint(
   finding: Pick<
-    ModelFindingV1,
+    ModelFindingV2,
     "path" | "range" | "defectKind" | "impactKind" | "fixAction" | "anchor"
   >,
   occurrenceContext?: string,
@@ -245,27 +245,30 @@ export function findingFingerprint(
   return createHash("sha256").update(JSON.stringify(identityParts)).digest("hex");
 }
 
-export function prerequisiteFindingFingerprint(
+export function exactFindingFingerprint(
   finding: Pick<
-    ModelFindingV1,
+    ModelFindingV2,
     "path" | "range" | "defectKind" | "impactKind" | "fixAction" | "anchor"
   >,
 ): string {
-  const identity = JSON.stringify([
-    FINDING_CONTRACT_VERSION,
-    finding.path,
-    finding.range?.start ?? null,
-    finding.range?.end ?? null,
-    finding.range?.side ?? null,
-    finding.defectKind,
-    finding.impactKind,
-    finding.fixAction,
-    finding.anchor,
-  ]);
-  return createHash("sha256").update(identity).digest("hex");
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        FINDING_CONTRACT_VERSION,
+        finding.path,
+        finding.range?.start ?? null,
+        finding.range?.end ?? null,
+        finding.range?.side ?? null,
+        finding.defectKind,
+        finding.impactKind,
+        finding.fixAction,
+        finding.anchor,
+      ]),
+    )
+    .digest("hex");
 }
 
-function anchorOccurrenceContext(file: DiffFile, finding: ModelFindingV1): string | undefined {
+function anchorOccurrenceContext(file: DiffFile, finding: ModelFindingV2): string | undefined {
   if (finding.range === null) {
     return undefined;
   }
@@ -295,7 +298,7 @@ function anchorOccurrenceContext(file: DiffFile, finding: ModelFindingV1): strin
   return JSON.stringify([before ?? null, after ?? null]);
 }
 
-function occurrenceKey(finding: ModelFindingV1): string {
+function occurrenceKey(finding: ModelFindingV2): string {
   return JSON.stringify([
     finding.range?.start ?? null,
     finding.range?.end ?? null,
@@ -305,14 +308,14 @@ function occurrenceKey(finding: ModelFindingV1): string {
 
 interface ValidatedCandidate {
   readonly index: number;
-  readonly finding: ModelFindingV1;
+  readonly finding: ModelFindingV2;
   readonly attachment: FindingAttachment;
   readonly baseFingerprint: string;
   readonly contextFingerprint?: string;
   readonly occurrenceKey: string;
 }
 
-function attachment(file: DiffFile, finding: ModelFindingV1): FindingAttachment {
+function attachment(file: DiffFile, finding: ModelFindingV2): FindingAttachment {
   if (finding.range === null || !isAttachableRange(file, finding.range)) {
     return { kind: "file", path: file.apiPath };
   }
@@ -403,7 +406,7 @@ export async function validateModelReviewOutput(
     occurrenceKeysByFingerprint.set(candidate.baseFingerprint, keys);
   }
 
-  const findings: ReviewFindingV1[] = [];
+  const findings: ReviewFindingV2[] = [];
   const seenOccurrences = new Set<string>();
   for (const candidate of candidates) {
     const occurrenceIdentity = `${candidate.baseFingerprint}:${candidate.occurrenceKey}`;
@@ -423,7 +426,7 @@ export async function validateModelReviewOutput(
       : candidate.baseFingerprint;
     const fingerprintAliases = new Set([
       candidate.baseFingerprint,
-      prerequisiteFindingFingerprint(candidate.finding),
+      exactFindingFingerprint(candidate.finding),
       ...(candidate.contextFingerprint === undefined ? [] : [candidate.contextFingerprint]),
     ]);
     fingerprintAliases.delete(fingerprint);

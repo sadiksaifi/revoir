@@ -38,7 +38,7 @@ import {
   type LaunchctlInspection,
 } from "./service/manager.js";
 
-const EXPECTED_RESULT = '{"version":1,"findings":[]}';
+const EXPECTED_RESULT = '{"version":2,"findings":[]}';
 const SYSTEM_PROMPT =
   "This is a packaged Revoir runtime probe. Return exactly one empty Revoir finding envelope.";
 

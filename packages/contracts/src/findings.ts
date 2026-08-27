@@ -1,4 +1,4 @@
-export const FINDING_CONTRACT_VERSION = 1 as const;
+export const FINDING_CONTRACT_VERSION = 2 as const;
 export type FindingPriority = "P0" | "P1" | "P2" | "P3";
 export type FindingSide = "LEFT" | "RIGHT";
 export const FINDING_DEFECT_KINDS = [
@@ -7,6 +7,9 @@ export const FINDING_DEFECT_KINDS = [
   "resource-lifecycle",
   "concurrency",
   "security",
+  "privacy",
+  "performance",
+  "architecture",
   "compatibility",
   "error-handling",
   "test-coverage",
@@ -18,6 +21,9 @@ export const FINDING_IMPACT_KINDS = [
   "resource-leak",
   "execution-stall",
   "security-exposure",
+  "privacy-exposure",
+  "performance-degradation",
+  "boundary-violation",
   "compatibility-break",
   "regression-risk",
 ] as const;
@@ -28,6 +34,9 @@ export const FINDING_FIX_ACTIONS = [
   "propagate",
   "synchronize",
   "release",
+  "minimize",
+  "optimize",
+  "decouple",
   "restore",
   "add-test",
 ] as const;
@@ -35,28 +44,29 @@ export type FindingDefectKind = (typeof FINDING_DEFECT_KINDS)[number];
 export type FindingImpactKind = (typeof FINDING_IMPACT_KINDS)[number];
 export type FindingFixAction = (typeof FINDING_FIX_ACTIONS)[number];
 
-export interface FindingRangeV1 {
+export interface FindingRangeV2 {
   start: number;
   end: number;
   side: FindingSide;
 }
 
-export interface ModelFindingV1 {
+export interface ModelFindingV2 {
   priority: FindingPriority;
   path: string;
-  range: FindingRangeV1 | null;
+  range: FindingRangeV2 | null;
   defectKind: FindingDefectKind;
   impactKind: FindingImpactKind;
   fixAction: FindingFixAction;
+  reason: string;
   anchor: string;
 }
 
-export interface ModelReviewOutputV1 {
+export interface ModelReviewOutputV2 {
   version: typeof FINDING_CONTRACT_VERSION;
   findings: readonly unknown[];
 }
 
-export interface FindingV1 extends ModelFindingV1 {
+export interface FindingV2 extends ModelFindingV2 {
   version: typeof FINDING_CONTRACT_VERSION;
   fingerprint: string;
 }
@@ -66,6 +76,7 @@ const DEFECT_KINDS = new Set<FindingDefectKind>(FINDING_DEFECT_KINDS);
 const IMPACT_KINDS = new Set<FindingImpactKind>(FINDING_IMPACT_KINDS);
 const FIX_ACTIONS = new Set<FindingFixAction>(FINDING_FIX_ACTIONS);
 const MAX_ANCHOR_LENGTH = 4096;
+const MAX_REASON_LENGTH = 1000;
 
 export class FindingSchemaError extends Error {
   constructor(message: string) {
@@ -110,6 +121,24 @@ function anchorString(value: unknown, path: string, maximum: number): string {
   const normalized = stringValue.trim();
   if (normalized.length === 0 || stringValue.length > maximum) {
     throw new FindingSchemaError(`${path} must contain 1-${maximum} non-whitespace characters.`);
+  }
+  if (/[\r\n]/u.test(stringValue)) {
+    throw new FindingSchemaError(`${path} must be a single line.`);
+  }
+  if (stringValue.includes("\u0000")) {
+    throw new FindingSchemaError(`${path} contains an unsupported null byte.`);
+  }
+  return normalized;
+}
+
+function reasonString(value: unknown, path: string): string {
+  const stringValue = contractString(value, path);
+  const normalized = stringValue.trim();
+  const length = [...normalized].length;
+  if (length === 0 || length > MAX_REASON_LENGTH) {
+    throw new FindingSchemaError(
+      `${path} must contain 1-${MAX_REASON_LENGTH} non-whitespace Unicode scalar values.`,
+    );
   }
   if (/[\r\n]/u.test(stringValue)) {
     throw new FindingSchemaError(`${path} must be a single line.`);
@@ -170,7 +199,7 @@ function enumString<T extends string>(
   return stringValue as T;
 }
 
-function parseRange(value: unknown, path: string): FindingRangeV1 | null {
+function parseRange(value: unknown, path: string): FindingRangeV2 | null {
   if (value === null) {
     return null;
   }
@@ -191,7 +220,7 @@ function parseRange(value: unknown, path: string): FindingRangeV1 | null {
   return { start, end, side };
 }
 
-export function parseModelReviewOutput(value: string): ModelReviewOutputV1 {
+export function parseModelReviewOutput(value: string): ModelReviewOutputV2 {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value.trim());
@@ -217,12 +246,12 @@ export function parseModelReviewOutput(value: string): ModelReviewOutputV1 {
   return { version: FINDING_CONTRACT_VERSION, findings: envelope.findings };
 }
 
-export function parseModelFinding(value: unknown, index: number): ModelFindingV1 {
+export function parseModelFinding(value: unknown, index: number): ModelFindingV2 {
   const path = `findings[${index}]`;
   const finding = record(value, path);
   exactKeys(
     finding,
-    ["priority", "path", "range", "defectKind", "impactKind", "fixAction", "anchor"],
+    ["priority", "path", "range", "defectKind", "impactKind", "fixAction", "reason", "anchor"],
     path,
   );
   const priority = contractString(finding.priority, `${path}.priority`) as FindingPriority;
@@ -236,6 +265,7 @@ export function parseModelFinding(value: unknown, index: number): ModelFindingV1
     defectKind: enumString(finding.defectKind, `${path}.defectKind`, DEFECT_KINDS, "defect kind"),
     impactKind: enumString(finding.impactKind, `${path}.impactKind`, IMPACT_KINDS, "impact kind"),
     fixAction: enumString(finding.fixAction, `${path}.fixAction`, FIX_ACTIONS, "fix action"),
+    reason: reasonString(finding.reason, `${path}.reason`),
     anchor: anchorString(finding.anchor, `${path}.anchor`, MAX_ANCHOR_LENGTH),
   };
 }

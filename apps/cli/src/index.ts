@@ -63,7 +63,7 @@ export {
   type FindingFixAction,
   type FindingImpactKind,
   type FindingPriority,
-  type ReviewFindingV1,
+  type ReviewFindingV2,
   type ValidatedReviewOutput,
 } from "./review/findings.js";
 export {

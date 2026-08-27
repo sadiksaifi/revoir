@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { promisify } from "node:util";
 
-import type { ModelFindingV1 } from "@revoir/contracts";
+import type { ModelFindingV2 } from "@revoir/contracts";
 
 import {
   FindingContractError,
@@ -107,6 +107,7 @@ function finding(overrides: Record<string, unknown> = {}) {
     defectKind: "concurrency",
     impactKind: "execution-stall",
     fixAction: "synchronize",
+    reason: "Concurrent transitions can leave the affected review stalled.",
     anchor: "const added = true;",
     ...overrides,
   };
@@ -133,7 +134,7 @@ function finding(overrides: Record<string, unknown> = {}) {
 }
 
 function output(findings: readonly unknown[], extra: Record<string, unknown> = {}): string {
-  return JSON.stringify({ version: 1, findings, ...extra });
+  return JSON.stringify({ version: 2, findings, ...extra });
 }
 
 describe("finding validation", () => {
@@ -211,7 +212,7 @@ describe("finding validation", () => {
 
   it("accepts clean output and exact inline additions", async () => {
     assert.deepEqual(await validateModelReviewOutput(output([]), { checkout, diff: DIFF }), {
-      version: 1,
+      version: 2,
       findings: [],
       diagnostics: [],
     });
@@ -1210,7 +1211,7 @@ index 1111111..2222222 100644
   });
 
   it("uses a stable finding-identity fingerprint matrix across repeated reviews", () => {
-    const base = finding() as unknown as ModelFindingV1;
+    const base = finding() as unknown as ModelFindingV2;
     const fingerprint = findingFingerprint(base);
     assert.equal(
       findingFingerprint({
@@ -1237,6 +1238,8 @@ index 1111111..2222222 100644
       fingerprint,
       "changed remediation for the same defect",
     );
+    const reworded = { ...base, reason: "The same defect explained with different wording." };
+    assert.equal(findingFingerprint(reworded), fingerprint, "reworded reason for the same defect");
     assert.notEqual(findingFingerprint({ ...base, path: "new-name.ts" }), fingerprint);
     for (const changed of [
       { defectKind: "correctness" },
@@ -1327,7 +1330,7 @@ index 5555555..6666666 100644
         {
           path: NFD_PATH,
           fingerprint: findingFingerprint({
-            ...(finding() as unknown as ModelFindingV1),
+            ...(finding() as unknown as ModelFindingV2),
             path: NFD_PATH,
             range: { start: 1, end: 1, side: "RIGHT" },
             anchor: "decomposed",
@@ -1343,7 +1346,7 @@ index 5555555..6666666 100644
         {
           path: NFC_PATH,
           fingerprint: findingFingerprint({
-            ...(finding() as unknown as ModelFindingV1),
+            ...(finding() as unknown as ModelFindingV2),
             path: NFC_PATH,
             range: { start: 1, end: 1, side: "RIGHT" },
             anchor: "composed",
@@ -1359,7 +1362,7 @@ index 5555555..6666666 100644
         {
           path: LITERAL_SPACE_PATH,
           fingerprint: findingFingerprint({
-            ...(finding() as unknown as ModelFindingV1),
+            ...(finding() as unknown as ModelFindingV2),
             path: LITERAL_SPACE_PATH,
             range: { start: 1, end: 1, side: "RIGHT" },
             anchor: "literal space",
@@ -1386,8 +1389,8 @@ index 5555555..6666666 100644
   it("rejects malformed envelopes and nonempty all-invalid output", async () => {
     for (const value of [
       "not json",
-      '{"version":2,"findings":[]}',
-      '{"version":1,"findings":[],"summary":"clean"}',
+      '{"version":1,"findings":[]}',
+      '{"version":2,"findings":[],"summary":"clean"}',
       output([finding({ priority: "P9" })]),
     ]) {
       // Keep each rejection isolated for clear case attribution.

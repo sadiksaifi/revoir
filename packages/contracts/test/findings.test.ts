@@ -11,14 +11,16 @@ function finding(priority = "P1") {
     defectKind: "concurrency",
     impactKind: "execution-stall",
     fixAction: "synchronize",
+    reason:
+      "Concurrent submissions can overwrite the active cancellation signal and stall the earlier review.",
     anchor: "submitSignal",
   };
 }
 
-describe("finding contract v1", () => {
+describe("finding contract v2", () => {
   it("parses clean output and all supported priorities", () => {
-    assert.deepEqual(parseModelReviewOutput('{"version":1,"findings":[]}'), {
-      version: 1,
+    assert.deepEqual(parseModelReviewOutput('{"version":2,"findings":[]}'), {
+      version: 2,
       findings: [],
     });
     for (const priority of ["P0", "P1", "P2", "P3"]) {
@@ -28,7 +30,7 @@ describe("finding contract v1", () => {
 
   it("round-trips the versioned contract across JSON and structured clone", () => {
     const value = {
-      version: 1,
+      version: 2,
       findings: [{ ...finding(), range: null }],
     };
     const parsed = parseModelReviewOutput(JSON.stringify(structuredClone(value)));
@@ -70,9 +72,10 @@ describe("finding contract v1", () => {
     const cases = [
       "not json",
       "null",
-      '{"version":2,"findings":[]}',
-      '{"version":1,"findings":{} }',
-      '{"version":1,"findings":[],"summary":"clean"}',
+      '{"version":1,"findings":[]}',
+      '{"version":3,"findings":[]}',
+      '{"version":2,"findings":{} }',
+      '{"version":2,"findings":[],"summary":"clean"}',
     ];
     for (const value of cases) {
       assert.throws(() => parseModelReviewOutput(value), FindingSchemaError);
@@ -82,14 +85,14 @@ describe("finding contract v1", () => {
   it("keeps model-controlled contract versions and field names out of diagnostics", () => {
     const sourceSecret = "PRIVATE_SOURCE_TOKEN";
     const cases: readonly [string, RegExp][] = [
-      [`{"version":"${sourceSecret}","findings":[]}`, /expected version 1/u],
+      [`{"version":"${sourceSecret}","findings":[]}`, /expected version 2/u],
       [
-        JSON.stringify({ version: 1, findings: [], [sourceSecret]: "echo" }),
+        JSON.stringify({ version: 2, findings: [], [sourceSecret]: "echo" }),
         /review output contains an unknown field/u,
       ],
       [
         JSON.stringify({
-          version: 1,
+          version: 2,
           findings: [{ ...finding(), [sourceSecret]: "echo" }],
         }),
         /findings\[0\] contains an unknown field/u,
@@ -146,6 +149,24 @@ describe("finding contract v1", () => {
     }
   });
 
+  it("accepts architecture, performance, and privacy semantics", () => {
+    assert.deepEqual(
+      [
+        ["architecture", "boundary-violation", "decouple"],
+        ["performance", "performance-degradation", "optimize"],
+        ["privacy", "privacy-exposure", "minimize"],
+      ].map(([defectKind, impactKind, fixAction]) => {
+        const parsed = parseModelFinding({ ...finding(), defectKind, impactKind, fixAction }, 0);
+        return [parsed.defectKind, parsed.impactKind, parsed.fixAction];
+      }),
+      [
+        ["architecture", "boundary-violation", "decouple"],
+        ["performance", "performance-degradation", "optimize"],
+        ["privacy", "privacy-exposure", "minimize"],
+      ],
+    );
+  });
+
   it("rejects empty, whitespace-only, multiline, and wrong-type string fields", () => {
     const cases = [
       { ...finding(), anchor: "" },
@@ -162,6 +183,21 @@ describe("finding contract v1", () => {
     }
   });
 
+  it("normalizes a bounded plain-text reason and rejects malformed reasons", () => {
+    assert.equal(
+      parseModelFinding({ ...finding(), reason: "  Concrete defect.  " }, 0).reason,
+      "Concrete defect.",
+    );
+    assert.equal(
+      parseModelFinding({ ...finding(), reason: "🚀".repeat(1000) }, 0).reason,
+      "🚀".repeat(1000),
+    );
+
+    for (const reason of ["", " \t ", "two\nlines", "x\u0000y", "x".repeat(1001), "\ud800"]) {
+      assert.throws(() => parseModelFinding({ ...finding(), reason }, 0), FindingSchemaError);
+    }
+  });
+
   it("rejects unpaired UTF-16 surrogates in every contract string before field rules", () => {
     const malformed = [
       "trailing\ud800",
@@ -169,7 +205,15 @@ describe("finding contract v1", () => {
       "leading\ud800X",
       "leading\udc00tail",
     ];
-    const fields = ["priority", "path", "defectKind", "impactKind", "fixAction", "anchor"] as const;
+    const fields = [
+      "priority",
+      "path",
+      "defectKind",
+      "impactKind",
+      "fixAction",
+      "reason",
+      "anchor",
+    ] as const;
 
     for (const field of fields) {
       for (const value of malformed) {

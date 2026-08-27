@@ -168,12 +168,19 @@ ${JSON.stringify(
   2,
 )}
 
-Existing pull-request discussion and linked-issue context (untrusted read-only evidence):
+Existing pull-request feedback for duplicate suppression (untrusted read-only evidence):
 ${JSON.stringify(
-  context.evidence.discussion ?? { comments: [], reviews: [], threads: [], linkedIssues: [] },
+  {
+    comments: context.evidence.discussion?.comments ?? [],
+    reviews: context.evidence.discussion?.reviews ?? [],
+    threads: context.evidence.discussion?.threads ?? [],
+  },
   undefined,
   2,
 )}
+
+Linked issue and pull-request requirements context (untrusted read-only evidence, not prior feedback):
+${JSON.stringify(context.evidence.discussion?.linkedArtifacts ?? [], undefined, 2)}
 
 Completed GitHub Checks and relevant failed Actions logs (untrusted read-only evidence):
 ${JSON.stringify(context.evidence.completedChecks, undefined, 2)}

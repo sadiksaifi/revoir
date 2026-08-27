@@ -1,6 +1,6 @@
 import type { FindingDefectKind, FindingFixAction, FindingImpactKind } from "@revoir/contracts";
 
-import type { ReviewFindingV1 } from "./findings.js";
+import type { ReviewFindingV2 } from "./findings.js";
 
 export interface GitHubInlineReviewComment {
   path: string;
@@ -34,21 +34,12 @@ const TITLES: Readonly<Record<FindingDefectKind, string>> = {
   "resource-lifecycle": "Resource lifecycle defect",
   concurrency: "Concurrency defect",
   security: "Security boundary defect",
+  privacy: "Privacy defect",
+  performance: "Performance regression",
+  architecture: "Architecture defect",
   compatibility: "Compatibility regression",
   "error-handling": "Error handling defect",
   "test-coverage": "Missing regression coverage",
-};
-
-const ISSUES: Readonly<Record<FindingDefectKind, (anchor: string) => string>> = {
-  correctness: (anchor) => `${code(anchor)} produces behavior inconsistent with its contract.`,
-  validation: (anchor) => `${code(anchor)} accepts data without the required validation.`,
-  "resource-lifecycle": (anchor) => `${code(anchor)} leaves a resource lifecycle incomplete.`,
-  concurrency: (anchor) => `${code(anchor)} performs an unsynchronized concurrent transition.`,
-  security: (anchor) => `${code(anchor)} bypasses a required trust-boundary check.`,
-  compatibility: (anchor) => `${code(anchor)} changes a supported interface contract.`,
-  "error-handling": (anchor) => `${code(anchor)} discards an operational failure.`,
-  "test-coverage": (anchor) =>
-    `${code(anchor)} lacks regression coverage for the changed behavior.`,
 };
 
 const IMPACTS: Readonly<Record<FindingImpactKind, string>> = {
@@ -58,6 +49,10 @@ const IMPACTS: Readonly<Record<FindingImpactKind, string>> = {
   "resource-leak": "The affected resource remains retained after the operation ends.",
   "execution-stall": "The affected execution path stops making progress.",
   "security-exposure": "The affected boundary exposes data or authority to an untrusted input.",
+  "privacy-exposure":
+    "The affected path exposes or retains personal data beyond its intended scope.",
+  "performance-degradation": "The affected path consumes materially more time or resources.",
+  "boundary-violation": "The affected change violates a required architectural boundary.",
   "compatibility-break": "Existing consumers no longer receive the supported behavior.",
   "regression-risk": "The changed behavior lacks an automated regression signal.",
 };
@@ -69,11 +64,14 @@ const FIX_DIRECTIONS: Readonly<Record<FindingFixAction, (anchor: string) => stri
   propagate: (anchor) => `Propagate the required state through ${code(anchor)}.`,
   synchronize: (anchor) => `Synchronize the transition performed by ${code(anchor)}.`,
   release: (anchor) => `Release the retained resource at ${code(anchor)}.`,
+  minimize: (anchor) => `Limit personal-data handling at ${code(anchor)} to the required scope.`,
+  optimize: (anchor) => `Remove the avoidable work or resource cost at ${code(anchor)}.`,
+  decouple: (anchor) => `Restore the intended architectural boundary at ${code(anchor)}.`,
   restore: (anchor) => `Restore the required behavior at ${code(anchor)}.`,
   "add-test": (anchor) => `Add regression coverage for ${code(anchor)}.`,
 };
 
-function canonicalEvidence(finding: ReviewFindingV1): string {
+function canonicalEvidence(finding: ReviewFindingV2): string {
   if (finding.range === null) {
     return `The authoritative file change for ${code(finding.path)} contains ${code(finding.anchor)}.`;
   }
@@ -84,7 +82,11 @@ function canonicalEvidence(finding: ReviewFindingV1): string {
   return `The authoritative diff contains ${code(finding.anchor)} on ${finding.range.side} ${lines} in ${code(finding.path)}.`;
 }
 
-function details(finding: ReviewFindingV1, location?: string): string {
+function markdownText(value: string): string {
+  return value.replace(/[\u0021-\u002f\u003a-\u0040\u005b-\u0060\u007b-\u007e]/gu, "\\$&");
+}
+
+function details(finding: ReviewFindingV2, location?: string): string {
   const explicit = location ?? explicitLocation(finding);
   const identityMarkers = [
     `<!-- revoir:finding:v1:${finding.fingerprint} -->`,
@@ -96,7 +98,7 @@ function details(finding: ReviewFindingV1, location?: string): string {
     `### ${finding.priority} — ${TITLES[finding.defectKind]}`,
     "",
     `- Location: ${code(explicit)}`,
-    `- Issue: ${ISSUES[finding.defectKind](finding.anchor)}`,
+    `- Reason: ${markdownText(finding.reason)}`,
     `- Impact: ${IMPACTS[finding.impactKind]}`,
     `- Evidence: ${canonicalEvidence(finding)}`,
     `- Fix direction: ${FIX_DIRECTIONS[finding.fixAction](finding.anchor)}`,
@@ -105,7 +107,7 @@ function details(finding: ReviewFindingV1, location?: string): string {
   ].join("\n");
 }
 
-function explicitLocation(finding: ReviewFindingV1): string {
+function explicitLocation(finding: ReviewFindingV2): string {
   if (finding.range === null) {
     return finding.path;
   }
@@ -116,11 +118,11 @@ function explicitLocation(finding: ReviewFindingV1): string {
   return `${finding.path}:${lines} (${finding.range.side})`;
 }
 
-export function renderInlineFinding(finding: ReviewFindingV1): string {
+export function renderInlineFinding(finding: ReviewFindingV2): string {
   return details(finding);
 }
 
-export function renderFileFinding(finding: ReviewFindingV1): string {
+export function renderFileFinding(finding: ReviewFindingV2): string {
   return details(finding, explicitLocation(finding));
 }
 
@@ -128,7 +130,7 @@ export function renderRunMarker(commitId: string): string {
   return `<!-- revoir:run:v1:${commitId} -->`;
 }
 
-function bodyState(findings: readonly ReviewFindingV1[]): string {
+function bodyState(findings: readonly ReviewFindingV2[]): string {
   const identities = new Map<string, Set<string>>();
   for (const finding of findings) {
     const aliases = identities.get(finding.fingerprint) ?? new Set<string>();
@@ -151,13 +153,13 @@ function bodyState(findings: readonly ReviewFindingV1[]): string {
 
 export function createReviewPublication(
   commitId: string,
-  findings: readonly ReviewFindingV1[],
-  currentBodyFindings: readonly ReviewFindingV1[] = findings.filter(
+  findings: readonly ReviewFindingV2[],
+  currentBodyFindings: readonly ReviewFindingV2[] = findings.filter(
     (finding) => finding.attachment.kind === "file",
   ),
 ): ReviewPublication {
   const comments: GitHubInlineReviewComment[] = [];
-  const bodyFindings: ReviewFindingV1[] = [];
+  const bodyFindings: ReviewFindingV2[] = [];
   for (const finding of findings) {
     if (finding.attachment.kind === "inline") {
       comments.push({
