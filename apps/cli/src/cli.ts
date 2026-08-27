@@ -244,6 +244,28 @@ function createHiddenPrompt(io: CliIo): (message: string) => Promise<string> {
   };
 }
 
+function createCloudflareAccountSelector(io: CliIo) {
+  return async (accounts: readonly { id: string; name: string }[]): Promise<string> => {
+    write(
+      io.stdout,
+      `Choose the Cloudflare account for Revoir:\n${accounts
+        .map((account, index) => `  ${index + 1}. ${account.name} (${account.id})`)
+        .join("\n")}\n`,
+    );
+    const prompt = createInterface({ input: io.stdin, output: io.stdout });
+    try {
+      const answer = (await prompt.question("Account number: ")).trim();
+      const index = Number(answer) - 1;
+      if (!Number.isInteger(index) || accounts[index] === undefined) {
+        throw new Error("Cloudflare account selection is invalid.");
+      }
+      return accounts[index].id;
+    } finally {
+      prompt.close();
+    }
+  };
+}
+
 function createBrowserOpener(processRunner: ChildProcessSetupRunner) {
   return {
     async open(url: string): Promise<void> {
@@ -478,6 +500,7 @@ export async function runCli(
           browser,
           process: processRunner,
           secretPrompt: createHiddenPrompt(io),
+          selectCloudflareAccount: createCloudflareAccountSelector(io),
           async installService(configuration) {
             await getSetupServiceManager(configuration).install();
           },

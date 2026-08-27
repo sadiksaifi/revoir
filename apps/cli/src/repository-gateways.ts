@@ -307,10 +307,14 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
   }
 
   async ensureAuthenticated(): Promise<void> {
+    const options = {
+      environment: { CLOUDFLARE_ACCOUNT_ID: this.#configuration.accountId },
+    };
     try {
-      await this.#process.run("wrangler", ["whoami"]);
+      await this.#process.run("wrangler", ["whoami", "--json"], options);
     } catch {
       await this.#process.run("wrangler", ["login"], { interactive: true });
+      await this.#process.run("wrangler", ["whoami", "--json"], options);
     }
   }
 
@@ -327,6 +331,7 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
         "--text",
       ],
       {
+        environment: { CLOUDFLARE_ACCOUNT_ID: this.#configuration.accountId },
         ...(signal === undefined ? {} : { signal }),
         timeoutMs: this.#shellCommandMs,
       },
@@ -335,15 +340,19 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
   }
 
   async writeCloud(policy: RevoirPolicy): Promise<void> {
-    await this.#process.run("wrangler", [
-      "kv",
-      "key",
-      "put",
-      `--namespace-id=${this.#configuration.kvNamespaceId}`,
-      REVOIR_POLICY_KV_KEY,
-      JSON.stringify(parseRevoirPolicy(policy)),
-      "--remote",
-    ]);
+    await this.#process.run(
+      "wrangler",
+      [
+        "kv",
+        "key",
+        "put",
+        `--namespace-id=${this.#configuration.kvNamespaceId}`,
+        REVOIR_POLICY_KV_KEY,
+        JSON.stringify(parseRevoirPolicy(policy)),
+        "--remote",
+      ],
+      { environment: { CLOUDFLARE_ACCOUNT_ID: this.#configuration.accountId } },
+    );
   }
 
   async verifyCloud(policy: RevoirPolicy): Promise<void> {

@@ -74,9 +74,9 @@ function platform(
       return { accountId: "account" };
     },
     async ensurePiAuthentication() {},
-    async ensureCloudflareResources(_accountId, _setupId, _existing, persist) {
+    async ensureCloudflareResources(accountId, _setupId, _existing, persist) {
       const resources = await stage("cloudflare-resources", {
-        accountId: "account",
+        accountId,
         kvNamespaceId: "kv",
         queueId: "queue",
         queueName: "revoir-review-jobs",
@@ -189,6 +189,32 @@ describe("greenfield end-to-end setup", () => {
       "service-installed",
       "diagnostics",
     ]);
+  });
+
+  it("checkpoints a selected Cloudflare account before another prerequisite is interrupted", async () => {
+    const state = new MemorySetupState();
+    const interrupted = platform(state);
+    interrupted.ensureWranglerAuthentication = async (options) => {
+      const selected = { accountId: "selected-account" };
+      await options?.persist?.(selected);
+      return selected;
+    };
+    interrupted.ensurePiAuthentication = async () => {
+      throw new Error("Pi authentication interrupted");
+    };
+
+    await assert.rejects(setup(state, interrupted).run(), /prerequisites/u);
+    assert.equal(state.checkpoint?.resources.cloudflareAccountId, "selected-account");
+    assert.deepEqual(state.checkpoint?.completedStages, []);
+
+    const resumed = platform(state);
+    resumed.ensureWranglerAuthentication = async (options) => {
+      assert.equal(options?.accountId, "selected-account");
+      return { accountId: "selected-account" };
+    };
+    const result = await setup(state, resumed).run();
+    assert.equal(result.resumed, true);
+    assert.equal(result.configuration.cloudflare.accountId, "selected-account");
   });
 
   it("resumes after an interruption at every persisted stage boundary", async () => {

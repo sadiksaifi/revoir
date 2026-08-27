@@ -24,7 +24,10 @@ export interface SetupGitHubApp {
 
 export interface SetupPlatform {
   ensureGitHubAuthentication(): Promise<{ userId: number; login: string }>;
-  ensureWranglerAuthentication(): Promise<{ accountId: string }>;
+  ensureWranglerAuthentication(options?: {
+    accountId?: string;
+    persist?(account: { accountId: string }): Promise<void>;
+  }): Promise<{ accountId: string }>;
   ensurePiAuthentication(modelId: string, reasoning: string): Promise<void>;
   ensureCloudflareResources(
     accountId: string,
@@ -188,7 +191,7 @@ export class EndToEndSetup {
       const [githubIdentity, cloudflareIdentity] = await reconcile("prerequisites", () =>
         Promise.all([
           this.#platform.ensureGitHubAuthentication(),
-          this.#platform.ensureWranglerAuthentication(),
+          this.#platform.ensureWranglerAuthentication({ accountId: resources.accountId }),
           this.#platform.ensurePiAuthentication(
             finalState.configuration.model.id,
             finalState.configuration.model.reasoning,
@@ -257,14 +260,26 @@ export class EndToEndSetup {
     let account: { accountId: string } | undefined;
     const prerequisitesCompletedAtStart = hasStage(checkpoint, "prerequisites");
     await execute("prerequisites", async () => {
-      const [githubIdentity, cloudflareAccount] = await Promise.all([
-        this.#platform.ensureGitHubAuthentication(),
-        this.#platform.ensureWranglerAuthentication(),
-        this.#platform.ensurePiAuthentication(
-          this.#defaults.model.id,
-          this.#defaults.model.reasoning,
-        ),
-      ]);
+      const githubIdentity = await this.#platform.ensureGitHubAuthentication();
+      const cloudflareAccount = await this.#platform.ensureWranglerAuthentication({
+        ...(checkpoint.resources.cloudflareAccountId === undefined
+          ? {}
+          : { accountId: checkpoint.resources.cloudflareAccountId }),
+        async persist(selected) {
+          checkpoint = {
+            ...checkpoint,
+            resources: {
+              ...checkpoint.resources,
+              cloudflareAccountId: selected.accountId,
+            },
+          };
+          await writeCheckpoint(checkpoint);
+        },
+      });
+      await this.#platform.ensurePiAuthentication(
+        this.#defaults.model.id,
+        this.#defaults.model.reasoning,
+      );
       identity = githubIdentity;
       account = cloudflareAccount;
       checkpoint = {
@@ -292,7 +307,7 @@ export class EndToEndSetup {
     if (prerequisitesCompletedAtStart) {
       const [verifiedGitHub, verifiedCloudflare] = await Promise.all([
         this.#platform.ensureGitHubAuthentication(),
-        this.#platform.ensureWranglerAuthentication(),
+        this.#platform.ensureWranglerAuthentication({ accountId: account.accountId }),
         this.#platform.ensurePiAuthentication(
           this.#defaults.model.id,
           this.#defaults.model.reasoning,

@@ -117,7 +117,13 @@ describe("Wrangler policy propagation", () => {
   it("passes cancellation and the shell timeout to Wrangler policy reads", async () => {
     const expected = createEmptyPolicy(42);
     const controller = new AbortController();
-    let options: { signal?: AbortSignal; timeoutMs?: number } | undefined;
+    let options:
+      | {
+          environment?: Readonly<Record<string, string>>;
+          signal?: AbortSignal;
+          timeoutMs?: number;
+        }
+      | undefined;
     const store = new LocalAndWranglerPolicyStore({
       cloudflare: configuration.cloudflare,
       policyFile: "/unused/policy.json",
@@ -133,6 +139,7 @@ describe("Wrangler policy propagation", () => {
     await (store.loadCloud as (signal?: AbortSignal) => Promise<unknown>)(controller.signal);
     assert.equal(options?.signal, controller.signal);
     assert.equal(options?.timeoutMs, 123);
+    assert.equal(options?.environment?.CLOUDFLARE_ACCOUNT_ID, configuration.cloudflare.accountId);
   });
 
   it("revalidates a current policy after the KV propagation window", async () => {

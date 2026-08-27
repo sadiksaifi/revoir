@@ -13,7 +13,12 @@ import {
 import { createTestConfiguration } from "./helpers.js";
 
 class FakeProcess implements SetupProcessRunner {
-  readonly calls: { command: string; arguments: readonly string[]; input?: string }[] = [];
+  readonly calls: {
+    command: string;
+    arguments: readonly string[];
+    environment?: Readonly<Record<string, string>>;
+    input?: string;
+  }[] = [];
   readonly #handle: (
     command: string,
     arguments_: readonly string[],
@@ -31,11 +36,12 @@ class FakeProcess implements SetupProcessRunner {
   async run(
     command: string,
     arguments_: readonly string[],
-    options: { input?: string } = {},
+    options: { environment?: Readonly<Record<string, string>>; input?: string } = {},
   ): Promise<ProcessResult> {
     this.calls.push({
       command,
       arguments: arguments_,
+      ...(options.environment === undefined ? {} : { environment: options.environment }),
       ...(options.input === undefined ? {} : { input: options.input }),
     });
     return this.#handle(command, arguments_);
@@ -48,12 +54,16 @@ function platform(input: {
   now?: () => number;
   opened?: string[];
   sleep?: (milliseconds: number) => Promise<void>;
+  selectCloudflareAccount?: (accounts: readonly { id: string; name: string }[]) => Promise<string>;
 }) {
   return new DefaultSetupPlatform({
     process: input.process,
     ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
     ...(input.now === undefined ? {} : { now: input.now }),
     ...(input.sleep === undefined ? {} : { sleep: input.sleep }),
+    ...(input.selectCloudflareAccount === undefined
+      ? {}
+      : { selectCloudflareAccount: input.selectCloudflareAccount }),
     browser: {
       async open(url) {
         input.opened?.push(url);
@@ -101,9 +111,21 @@ describe("default greenfield setup platform", () => {
 
   it("authenticates Wrangler and creates KV, Queue, and its HTTP pull consumer", async () => {
     const accountId = "a".repeat(32);
+    const otherAccountId = "b".repeat(32);
     const process = new FakeProcess((_command, arguments_) => {
       const joined = arguments_.join(" ");
-      if (joined === "whoami") return { stdout: `Account ID: ${accountId}\n`, stderr: "" };
+      if (joined === "whoami --json") {
+        return {
+          stdout: JSON.stringify({
+            loggedIn: true,
+            accounts: [
+              { id: otherAccountId, name: "Other" },
+              { id: accountId, name: "Personal" },
+            ],
+          }),
+          stderr: "",
+        };
+      }
       if (joined.startsWith("kv namespace create")) {
         return { stdout: '{"id":"kv-immutable-id"}', stderr: "" };
       }
@@ -113,7 +135,16 @@ describe("default greenfield setup platform", () => {
       }
       return { stdout: "", stderr: "" };
     });
-    const setup = platform({ process });
+    const setup = platform({
+      process,
+      async selectCloudflareAccount(accounts) {
+        assert.deepEqual(accounts, [
+          { id: otherAccountId, name: "Other" },
+          { id: accountId, name: "Personal" },
+        ]);
+        return accountId;
+      },
+    });
 
     assert.deepEqual(await setup.ensureWranglerAuthentication(), { accountId });
     const partials: unknown[] = [];
@@ -128,6 +159,16 @@ describe("default greenfield setup platform", () => {
       },
     );
     assert.equal(partials.length, 2);
+    assert.equal(
+      process.calls
+        .filter(({ command }) => command === "wrangler")
+        .every(
+          ({ arguments: arguments_, environment }) =>
+            arguments_.join(" ") === "whoami --json" ||
+            environment?.CLOUDFLARE_ACCOUNT_ID === accountId,
+        ),
+      true,
+    );
     assert.equal(
       process.calls.some(({ arguments: arguments_ }) =>
         arguments_.join(" ").startsWith(`queues consumer http add revoir-review-jobs-${SETUP_ID}`),
@@ -204,6 +245,7 @@ describe("default greenfield setup platform", () => {
       "https://revoir-relay.example.workers.dev/github/webhook",
     );
     await setup.configureRelaySecret(RESOURCES, "webhook-secret");
+    assert.equal(generatedConfiguration?.account_id, RESOURCES.accountId);
     assert.deepEqual(generatedConfiguration?.kv_namespaces, [
       { binding: "POLICY_KV", id: "kv-immutable-id" },
     ]);
@@ -218,6 +260,12 @@ describe("default greenfield setup platform", () => {
     assert.equal(
       process.calls.find(({ arguments: arguments_ }) => arguments_[0] === "secret")?.input,
       "webhook-secret\n",
+    );
+    assert.equal(
+      process.calls.every(
+        ({ environment }) => environment?.CLOUDFLARE_ACCOUNT_ID === RESOURCES.accountId,
+      ),
+      true,
     );
   });
 

@@ -8,10 +8,7 @@ import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY, REVOIR_WEBHOOK_PATH } from "@r
 import type { RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import { EMBEDDED_RELAY_SHA256, EMBEDDED_RELAY_SOURCE } from "../generated/relay-artifact.js";
-import {
-  githubInstallationSettingsUrl,
-  parseGitHubInstallation,
-} from "../github-installation.js";
+import { githubInstallationSettingsUrl, parseGitHubInstallation } from "../github-installation.js";
 import { createGitHubAppJwt } from "../review/github.js";
 import {
   GitHubManifestFlow,
@@ -34,6 +31,7 @@ export interface ProcessResult {
 }
 
 export interface SetupProcessOptions {
+  environment?: Readonly<Record<string, string>>;
   input?: string;
   interactive?: boolean;
   signal?: AbortSignal;
@@ -64,6 +62,7 @@ export class ChildProcessSetupRunner implements SetupProcessRunner {
             ? options.signal
             : AbortSignal.any([options.signal, timeoutSignal]);
       const child = spawn(command, [...arguments_], {
+        env: { ...process.env, ...options.environment },
         stdio: options.interactive ? "inherit" : ["pipe", "pipe", "pipe"],
         ...(operationSignal === undefined ? {} : { signal: operationSignal }),
       });
@@ -163,6 +162,9 @@ export class DefaultSetupPlatform implements SetupPlatform {
   readonly #manifest: GitHubManifestFlow;
   readonly #process: SetupProcessRunner;
   readonly #secretPrompt: (message: string) => Promise<string>;
+  readonly #selectCloudflareAccount: (
+    accounts: readonly { id: string; name: string }[],
+  ) => Promise<string>;
   readonly #fetch: typeof fetch;
   readonly #now: () => number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
@@ -172,6 +174,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     diagnostics: (configuration: RevoirConfiguration, policy: RevoirPolicy) => Promise<void>;
     installService(configuration: RevoirConfiguration): Promise<void>;
     secretPrompt(message: string): Promise<string>;
+    selectCloudflareAccount?(accounts: readonly { id: string; name: string }[]): Promise<string>;
     process?: SetupProcessRunner;
     manifest?: GitHubManifestFlow;
     fetch?: typeof fetch;
@@ -184,6 +187,11 @@ export class DefaultSetupPlatform implements SetupPlatform {
     this.#process = input.process ?? new ChildProcessSetupRunner();
     this.#manifest = input.manifest ?? new GitHubManifestFlow(input.browser);
     this.#secretPrompt = input.secretPrompt;
+    this.#selectCloudflareAccount =
+      input.selectCloudflareAccount ??
+      (async () => {
+        throw new Error("Select a Cloudflare account to continue setup.");
+      });
     this.#fetch = input.fetch ?? fetch;
     this.#now = input.now ?? Date.now;
     this.#sleep =
@@ -214,14 +222,19 @@ export class DefaultSetupPlatform implements SetupPlatform {
     return { userId: positiveInteger(response.id, "GitHub CLI"), login: response.login };
   }
 
-  async ensureWranglerAuthentication(): Promise<{ accountId: string }> {
+  async ensureWranglerAuthentication(
+    options: {
+      accountId?: string;
+      persist?(account: { accountId: string }): Promise<void>;
+    } = {},
+  ): Promise<{ accountId: string }> {
     let output: string;
     try {
       try {
-        output = (await this.#process.run("wrangler", ["whoami"])).stdout;
+        output = (await this.#process.run("wrangler", ["whoami", "--json"])).stdout;
       } catch {
         await this.#process.run("wrangler", ["login"], { interactive: true });
-        output = (await this.#process.run("wrangler", ["whoami"])).stdout;
+        output = (await this.#process.run("wrangler", ["whoami", "--json"])).stdout;
       }
     } catch (error) {
       throw new Error(
@@ -229,13 +242,47 @@ export class DefaultSetupPlatform implements SetupPlatform {
         { cause: error },
       );
     }
-    const accountIds = [...new Set(output.match(/\b[0-9a-f]{32}\b/giu) ?? [])];
-    if (accountIds.length !== 1 || accountIds[0] === undefined) {
-      throw new Error(
-        "Wrangler authentication did not report exactly one usable Cloudflare account id.",
-      );
+    const identity = parseJsonRecord(output, "Wrangler authentication");
+    if (identity.loggedIn !== true || !Array.isArray(identity.accounts)) {
+      throw new Error("Wrangler authentication did not return an authenticated account list.");
     }
-    return { accountId: accountIds[0] };
+    const accounts = identity.accounts.map((candidate) => {
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+        throw new Error("Wrangler authentication returned an invalid account entry.");
+      }
+      const account = candidate as Record<string, unknown>;
+      if (
+        typeof account.id !== "string" ||
+        !/^[0-9a-f]{32}$/iu.test(account.id) ||
+        typeof account.name !== "string" ||
+        account.name.trim() === ""
+      ) {
+        throw new Error("Wrangler authentication returned an invalid account entry.");
+      }
+      return { id: account.id, name: account.name };
+    });
+    if (accounts.length === 0) {
+      throw new Error("Wrangler authentication did not return a usable Cloudflare account.");
+    }
+    let accountId = options.accountId;
+    if (accountId !== undefined && !accounts.some(({ id }) => id === accountId)) {
+      throw new Error("The checkpointed Cloudflare account is not available to Wrangler.");
+    }
+    accountId ??=
+      accounts.length === 1 ? accounts[0]!.id : await this.#selectCloudflareAccount(accounts);
+    if (!accounts.some(({ id }) => id === accountId)) {
+      throw new Error("Cloudflare account selection did not match an authenticated account.");
+    }
+    const selected = { accountId };
+    await options.persist?.(selected);
+    return selected;
+  }
+
+  #cloudflareOptions(accountId: string, options: SetupProcessOptions = {}): SetupProcessOptions {
+    return {
+      ...options,
+      environment: { ...options.environment, CLOUDFLARE_ACCOUNT_ID: accountId },
+    };
   }
 
   async ensurePiAuthentication(modelId: string, reasoning: string): Promise<void> {
@@ -286,7 +333,11 @@ export class DefaultSetupPlatform implements SetupPlatform {
       throw new Error("Cloudflare resource checkpoint belongs to a different account.");
     }
     const kvName = `${RESOURCE_PREFIX}-policy-${setupId}`;
-    const listed = await this.#process.run("wrangler", ["kv", "namespace", "list"]);
+    const listed = await this.#process.run(
+      "wrangler",
+      ["kv", "namespace", "list"],
+      this.#cloudflareOptions(accountId),
+    );
     let namespaces: unknown;
     try {
       namespaces = JSON.parse(listed.stdout) as unknown;
@@ -308,7 +359,11 @@ export class DefaultSetupPlatform implements SetupPlatform {
           ? matchingNamespace.id
           : undefined;
       if (kvId === undefined) {
-        const created = await this.#process.run("wrangler", ["kv", "namespace", "create", kvName]);
+        const created = await this.#process.run(
+          "wrangler",
+          ["kv", "namespace", "create", kvName],
+          this.#cloudflareOptions(accountId),
+        );
         kvId = resourceId(`${created.stdout}\n${created.stderr}`, "Wrangler KV creation");
       }
       resources = { ...resources, kvNamespaceId: kvId };
@@ -319,14 +374,22 @@ export class DefaultSetupPlatform implements SetupPlatform {
     let queueInfo: ProcessResult | undefined;
     if (resources.queueId === undefined) {
       try {
-        queueInfo = await this.#process.run("wrangler", ["queues", "info", resources.queueName]);
+        queueInfo = await this.#process.run(
+          "wrangler",
+          ["queues", "info", resources.queueName],
+          this.#cloudflareOptions(accountId),
+        );
       } catch {
-        const created = await this.#process.run("wrangler", [
-          "queues",
-          "create",
-          resources.queueName,
-        ]);
-        queueInfo = await this.#process.run("wrangler", ["queues", "info", resources.queueName]);
+        const created = await this.#process.run(
+          "wrangler",
+          ["queues", "create", resources.queueName],
+          this.#cloudflareOptions(accountId),
+        );
+        queueInfo = await this.#process.run(
+          "wrangler",
+          ["queues", "info", resources.queueName],
+          this.#cloudflareOptions(accountId),
+        );
         queueInfo = {
           stdout: `${queueInfo.stdout}\n${created.stdout}`,
           stderr: `${queueInfo.stderr}\n${created.stderr}`,
@@ -338,7 +401,11 @@ export class DefaultSetupPlatform implements SetupPlatform {
       };
       await persist(resources);
     }
-    queueInfo ??= await this.#process.run("wrangler", ["queues", "info", resources.queueName]);
+    queueInfo ??= await this.#process.run(
+      "wrangler",
+      ["queues", "info", resources.queueName],
+      this.#cloudflareOptions(accountId),
+    );
     if (
       resourceId(`${queueInfo.stdout}\n${queueInfo.stderr}`, "Wrangler Queue verification") !==
       resources.queueId
@@ -346,13 +413,11 @@ export class DefaultSetupPlatform implements SetupPlatform {
       throw new Error("Checkpointed Queue no longer matches the owned setup resource.");
     }
     if (!/HTTP Pull Consumer/iu.test(`${queueInfo.stdout}\n${queueInfo.stderr}`)) {
-      await this.#process.run("wrangler", [
-        "queues",
-        "consumer",
-        "http",
-        "add",
-        resources.queueName,
-      ]);
+      await this.#process.run(
+        "wrangler",
+        ["queues", "consumer", "http", "add", resources.queueName],
+        this.#cloudflareOptions(accountId),
+      );
     }
     const kvNamespaceId = resources.kvNamespaceId;
     const queueId = resources.queueId;
@@ -376,6 +441,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
           configFile,
           `${JSON.stringify(
             {
+              account_id: resources.accountId,
               name: resources.workerName,
               main: workerFile,
               compatibility_date: "2026-07-22",
@@ -399,7 +465,11 @@ export class DefaultSetupPlatform implements SetupPlatform {
 
   async deployRelay(resources: SetupCloudflareResources): Promise<string> {
     return this.#withRelayConfiguration(resources, async (configFile) => {
-      const deployment = await this.#process.run("wrangler", ["deploy", "--config", configFile]);
+      const deployment = await this.#process.run(
+        "wrangler",
+        ["deploy", "--config", configFile],
+        this.#cloudflareOptions(resources.accountId),
+      );
       const baseUrl = /https:\/\/[A-Za-z0-9.-]+\.workers\.dev\/?/u.exec(
         `${deployment.stdout}\n${deployment.stderr}`,
       )?.[0];
@@ -418,9 +488,13 @@ export class DefaultSetupPlatform implements SetupPlatform {
       await this.#process.run(
         "wrangler",
         ["secret", "put", "GITHUB_WEBHOOK_SECRET", "--config", configFile],
-        { input: `${webhookSecret}\n` },
+        this.#cloudflareOptions(resources.accountId, { input: `${webhookSecret}\n` }),
       );
-      await this.#process.run("wrangler", ["deploy", "--config", configFile]);
+      await this.#process.run(
+        "wrangler",
+        ["deploy", "--config", configFile],
+        this.#cloudflareOptions(resources.accountId),
+      );
     });
   }
 
@@ -588,15 +662,19 @@ export class DefaultSetupPlatform implements SetupPlatform {
   }
 
   async putCloudPolicy(resources: SetupCloudflareResources, policy: RevoirPolicy): Promise<void> {
-    await this.#process.run("wrangler", [
-      "kv",
-      "key",
-      "put",
-      `--namespace-id=${resources.kvNamespaceId}`,
-      REVOIR_POLICY_KV_KEY,
-      JSON.stringify(parseRevoirPolicy(policy)),
-      "--remote",
-    ]);
+    await this.#process.run(
+      "wrangler",
+      [
+        "kv",
+        "key",
+        "put",
+        `--namespace-id=${resources.kvNamespaceId}`,
+        REVOIR_POLICY_KV_KEY,
+        JSON.stringify(parseRevoirPolicy(policy)),
+        "--remote",
+      ],
+      this.#cloudflareOptions(resources.accountId),
+    );
   }
 
   async verifyCloudPolicy(
@@ -608,15 +686,19 @@ export class DefaultSetupPlatform implements SetupPlatform {
     const deadline = startedAt + KV_ACTIVATION_DEADLINE_MS;
     do {
       // eslint-disable-next-line no-await-in-loop
-      const result = await this.#process.run("wrangler", [
-        "kv",
-        "key",
-        "get",
-        `--namespace-id=${resources.kvNamespaceId}`,
-        REVOIR_POLICY_KV_KEY,
-        "--remote",
-        "--text",
-      ]);
+      const result = await this.#process.run(
+        "wrangler",
+        [
+          "kv",
+          "key",
+          "get",
+          `--namespace-id=${resources.kvNamespaceId}`,
+          REVOIR_POLICY_KV_KEY,
+          "--remote",
+          "--text",
+        ],
+        this.#cloudflareOptions(resources.accountId),
+      );
       try {
         if (
           samePolicy(parseRevoirPolicy(JSON.parse(result.stdout) as unknown), expected) &&
@@ -634,15 +716,19 @@ export class DefaultSetupPlatform implements SetupPlatform {
   }
 
   async getCloudPolicy(resources: SetupCloudflareResources): Promise<RevoirPolicy> {
-    const result = await this.#process.run("wrangler", [
-      "kv",
-      "key",
-      "get",
-      `--namespace-id=${resources.kvNamespaceId}`,
-      REVOIR_POLICY_KV_KEY,
-      "--remote",
-      "--text",
-    ]);
+    const result = await this.#process.run(
+      "wrangler",
+      [
+        "kv",
+        "key",
+        "get",
+        `--namespace-id=${resources.kvNamespaceId}`,
+        REVOIR_POLICY_KV_KEY,
+        "--remote",
+        "--text",
+      ],
+      this.#cloudflareOptions(resources.accountId),
+    );
     return parseRevoirPolicy(JSON.parse(result.stdout) as unknown);
   }
 
