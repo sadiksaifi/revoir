@@ -376,6 +376,18 @@ function currentExecutableArguments(): readonly string[] {
   });
 }
 
+export function resolveServiceExecutablePath(homeDir: string): string {
+  return [
+    join(homeDir, ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ].join(":");
+}
+
 export function createDefaultServiceManager(input: {
   configFile: string;
   homeDir: string;
@@ -397,7 +409,7 @@ export function createDefaultServiceManager(input: {
       configFile: input.configFile,
       executableArguments: currentExecutableArguments(),
       homeDir: input.homeDir,
-      ...(process.env.PATH === undefined ? {} : { executablePath: process.env.PATH }),
+      executablePath: resolveServiceExecutablePath(input.homeDir),
       paths: input.paths,
       uid,
     },

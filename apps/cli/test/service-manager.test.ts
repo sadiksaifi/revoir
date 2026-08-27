@@ -7,6 +7,7 @@ import { afterEach, describe, it } from "node:test";
 import {
   LaunchdServiceManager,
   resolveServiceExecutableArguments,
+  resolveServiceExecutablePath,
   type LaunchctlGateway,
   type LaunchctlInspection,
 } from "../src/service/manager.js";
@@ -201,6 +202,13 @@ describe("launchd service manager", () => {
       detail:
         'launchd reports the service as "running" without a process identifier. Run "revoir stop", then "revoir start"; reinstall if the problem persists.',
     });
+  });
+
+  it("uses a stable service PATH independent of the invoking shell", () => {
+    assert.equal(
+      resolveServiceExecutablePath("/Users/test"),
+      "/Users/test/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    );
   });
 
   it("refuses an unavailable executable before mutating launchd or the plist", async () => {
