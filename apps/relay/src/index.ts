@@ -1,33 +1,28 @@
 import {
+  REVOIR_POLICY_KV_KEY,
   REVIEW_JOB_ACTIONS,
-  parseRequestedReviewJob,
-  parseReviewJob,
-  type RequestedReviewJobV2,
+  parseReviewQueueJob,
+  parseRevoirPolicy,
+  type AutomaticReviewTrigger,
+  type RequestedReviewTrigger,
+  type RevoirPolicyRepository,
+  type RevoirPolicyV1,
   type ReviewJobAction,
   type ReviewQueueJob,
-  type ReviewJobV1,
 } from "@revoir/contracts";
 
 export interface QueueProducer<Body> {
   send(body: Body, options?: { contentType?: "json" }): Promise<unknown>;
 }
 
+export interface PolicyReader {
+  get(key: string): Promise<string | null>;
+}
+
 export interface RelayEnvironment {
   GITHUB_WEBHOOK_SECRET: string;
-  GITHUB_USER_ID: string;
-  GITHUB_REPOSITORIES: string;
+  POLICY_KV: PolicyReader;
   REVIEW_QUEUE: QueueProducer<ReviewQueueJob>;
-}
-
-interface RepositoryPolicy {
-  id: number;
-  owner: string;
-  name: string;
-}
-
-interface RelayPolicy {
-  userId: number;
-  repositories: readonly RepositoryPolicy[];
 }
 
 const SIGNATURE = /^sha256=([0-9a-f]{64})$/u;
@@ -71,43 +66,19 @@ async function verifySignature(
   return crypto.subtle.verify("HMAC", key, lowerHexBytes(match[1]), rawBody);
 }
 
-function parsePolicy(environment: RelayEnvironment): RelayPolicy {
-  const userId = Number(environment.GITHUB_USER_ID);
-  if (!Number.isSafeInteger(userId) || userId <= 0) {
-    throw new Error("GITHUB_USER_ID must be a positive integer.");
+async function loadPolicy(environment: RelayEnvironment): Promise<RevoirPolicyV1> {
+  const value = await environment.POLICY_KV.get(REVOIR_POLICY_KV_KEY);
+  if (value === null) {
+    throw new Error("Revoir policy is unavailable.");
   }
-  let value: unknown;
-  try {
-    value = JSON.parse(environment.GITHUB_REPOSITORIES) as unknown;
-  } catch (error) {
-    throw new Error("GITHUB_REPOSITORIES must be valid JSON.", { cause: error });
-  }
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error("GITHUB_REPOSITORIES must be a non-empty array.");
-  }
-  const repositories = value.map((candidate) => {
-    const repository = record(candidate);
-    const id = positiveInteger(repository?.id);
-    const owner = repository?.owner;
-    const name = repository?.name;
-    if (
-      repository === undefined ||
-      Object.keys(repository).some((key) => !["id", "owner", "name"].includes(key)) ||
-      id === undefined ||
-      typeof owner !== "string" ||
-      typeof name !== "string"
-    ) {
-      throw new Error("GITHUB_REPOSITORIES contains an invalid repository.");
-    }
-    return { id, owner, name };
-  });
-  return { userId, repositories };
+  return parseRevoirPolicy(value);
 }
 
 function repositoryPolicy(
   repository: Record<string, unknown>,
-  policy: RelayPolicy,
-): RepositoryPolicy | undefined {
+  installationId: number,
+  policy: RevoirPolicyV1,
+): RevoirPolicyRepository | undefined {
   const id = positiveInteger(repository.id);
   const owner = record(repository.owner)?.login;
   const name = repository.name;
@@ -120,21 +91,23 @@ function repositoryPolicy(
   ) {
     return undefined;
   }
-  return policy.repositories.find(
-    (candidate) =>
-      candidate.id === id &&
-      candidate.owner.toLowerCase() === owner.toLowerCase() &&
-      candidate.name.toLowerCase() === name.toLowerCase() &&
-      `${candidate.owner}/${candidate.name}`.toLowerCase() === fullName.toLowerCase(),
-  );
+  return policy.installations
+    .find((candidate) => candidate.id === installationId)
+    ?.repositories.find(
+      (candidate) =>
+        candidate.id === id &&
+        candidate.owner.toLowerCase() === owner.toLowerCase() &&
+        candidate.name.toLowerCase() === name.toLowerCase() &&
+        `${candidate.owner}/${candidate.name}`.toLowerCase() === fullName.toLowerCase(),
+    );
 }
 
 function createAutomaticReviewJob(
   payloadValue: unknown,
   deliveryId: string,
-  policy: RelayPolicy,
+  policy: RevoirPolicyV1,
   now: Date,
-): ReviewJobV1 | undefined {
+): ReviewQueueJob | undefined {
   const payload = record(payloadValue);
   const repository = record(payload?.repository);
   const pullRequest = record(payload?.pull_request);
@@ -161,14 +134,18 @@ function createAutomaticReviewJob(
   }
 
   const action = payload.action;
-  if (typeof action !== "string" || !(REVIEW_JOB_ACTIONS as readonly string[]).includes(action)) {
+  const installationId = positiveInteger(installation.id);
+  if (
+    typeof action !== "string" ||
+    !(REVIEW_JOB_ACTIONS as readonly string[]).includes(action) ||
+    installationId === undefined
+  ) {
     return undefined;
   }
-  const configuredRepository = repositoryPolicy(repository, policy);
+  const configuredRepository = repositoryPolicy(repository, installationId, policy);
   const repositoryId = positiveInteger(repository.id);
   const pullRequestNumber = positiveInteger(pullRequest.number);
   const envelopeNumber = positiveInteger(payload.number);
-  const installationId = positiveInteger(installation.id);
   const authorId = positiveInteger(author.id);
   const senderId = positiveInteger(sender.id);
   const baseRepositoryId = positiveInteger(baseRepository.id);
@@ -180,7 +157,6 @@ function createAutomaticReviewJob(
     repositoryId === undefined ||
     pullRequestNumber === undefined ||
     envelopeNumber !== pullRequestNumber ||
-    installationId === undefined ||
     authorId !== policy.userId ||
     senderId !== policy.userId ||
     pullRequest.state !== "open" ||
@@ -196,22 +172,24 @@ function createAutomaticReviewJob(
     return undefined;
   }
 
+  const trigger: AutomaticReviewTrigger = {
+    kind: "automatic",
+    action: action as ReviewJobAction,
+    authorId,
+    senderId,
+    baseRepositoryId,
+    headRepositoryId,
+    baseSha: typeof base.sha === "string" ? base.sha : "",
+    headSha: typeof head.sha === "string" ? head.sha : "",
+  };
   try {
-    return parseReviewJob({
+    return parseReviewQueueJob({
       version: 1,
       deliveryId,
       installationId,
       repository: configuredRepository,
-      pullRequest: {
-        number: pullRequestNumber,
-        authorId,
-        senderId,
-        baseRepositoryId,
-        headRepositoryId,
-        baseSha: base.sha,
-        headSha: head.sha,
-      },
-      action: action as ReviewJobAction,
+      pullRequest: { number: pullRequestNumber },
+      trigger,
       enqueuedAt: now.toISOString(),
     });
   } catch {
@@ -222,9 +200,9 @@ function createAutomaticReviewJob(
 function createRequestedReviewJob(
   payloadValue: unknown,
   deliveryId: string,
-  policy: RelayPolicy,
+  policy: RevoirPolicyV1,
   now: Date,
-): RequestedReviewJobV2 | undefined {
+): ReviewQueueJob | undefined {
   const payload = record(payloadValue);
   const repository = record(payload?.repository);
   const installation = record(payload?.installation);
@@ -246,8 +224,11 @@ function createRequestedReviewJob(
     return undefined;
   }
 
-  const configuredRepository = repositoryPolicy(repository, policy);
   const installationId = positiveInteger(installation.id);
+  if (installationId === undefined) {
+    return undefined;
+  }
+  const configuredRepository = repositoryPolicy(repository, installationId, policy);
   const pullRequestNumber = positiveInteger(issue.number);
   const commentId = positiveInteger(comment.id);
   const senderId = positiveInteger(sender.id);
@@ -255,7 +236,6 @@ function createRequestedReviewJob(
   if (
     payload.action !== "created" ||
     configuredRepository === undefined ||
-    installationId === undefined ||
     pullRequestNumber === undefined ||
     commentId === undefined ||
     senderId !== policy.userId ||
@@ -266,18 +246,20 @@ function createRequestedReviewJob(
     return undefined;
   }
 
+  const trigger: RequestedReviewTrigger = {
+    kind: "requested",
+    source: "issue_comment",
+    commentId,
+    senderId,
+  };
   try {
-    return parseRequestedReviewJob({
-      version: 2,
+    return parseReviewQueueJob({
+      version: 1,
       deliveryId,
       installationId,
       repository: configuredRepository,
       pullRequest: { number: pullRequestNumber },
-      request: {
-        kind: "issue_comment",
-        commentId,
-        senderId,
-      },
+      trigger,
       enqueuedAt: now.toISOString(),
     });
   } catch {
@@ -321,9 +303,9 @@ export function createWebhookRelay(now: () => Date = () => new Date()) {
         return new Response("Bad Request", { status: 400 });
       }
 
-      let policy: RelayPolicy;
+      let policy: RevoirPolicyV1;
       try {
-        policy = parsePolicy(environment);
+        policy = await loadPolicy(environment);
       } catch {
         return new Response("Service Unavailable", { status: 503 });
       }
@@ -348,4 +330,4 @@ export function createWebhookRelay(now: () => Date = () => new Date()) {
   };
 }
 
-export default createWebhookRelay();
+export default createWebhookRelay() satisfies ExportedHandler<Env>;

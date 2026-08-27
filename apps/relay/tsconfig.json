@@ -19,5 +19,6 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
+  "files": ["worker-configuration.d.ts"],
   "include": ["src/**/*.ts"]
 }

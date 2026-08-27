@@ -34,8 +34,8 @@ async function waitForQueuedJobs(namespace: {
 
 describe("Cloudflare local runtime", () => {
   for (const scenario of [
-    { event: "pull_request", expectedVersion: 1 },
-    { event: "issue_comment", expectedVersion: 2 },
+    { event: "pull_request", expectedTrigger: "automatic" },
+    { event: "issue_comment", expectedTrigger: "requested" },
   ] as const) {
     it(`moves one eligible ${scenario.event} webhook through a real Queue binding`, async () => {
       const directory = await mkdtemp(join(tmpdir(), "revoir-relay-"));
@@ -56,11 +56,11 @@ describe("Cloudflare local runtime", () => {
             modulesRoot: directory,
             scriptPath: bundle,
             compatibilityDate: "2026-07-22",
+            compatibilityFlags: ["nodejs_compat"],
             bindings: {
               GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
-              GITHUB_USER_ID: "42",
-              GITHUB_REPOSITORIES: JSON.stringify([{ id: 99, owner: "owner", name: "repository" }]),
             },
+            kvNamespaces: { POLICY_KV: "revoir-local-runtime-policy" },
             queueProducers: {
               REVIEW_QUEUE: { queueName: "revoir-review-jobs" },
             },
@@ -88,6 +88,23 @@ describe("Cloudflare local runtime", () => {
       });
 
       try {
+        const policy = (await miniflare.getKVNamespace("POLICY_KV", "relay")) as unknown as {
+          put(key: string, value: string): Promise<void>;
+        };
+        await policy.put(
+          "policy",
+          JSON.stringify({
+            version: 1,
+            revision: 1,
+            userId: 42,
+            installations: [
+              {
+                id: 8,
+                repositories: [{ id: 99, owner: "owner", name: "repository" }],
+              },
+            ],
+          }),
+        );
         const pullRequestBody = await readFile(
           join(import.meta.dirname, "fixtures/pull-request.synchronize.json"),
           "utf8",
@@ -133,7 +150,8 @@ describe("Cloudflare local runtime", () => {
         assert.equal(jobs.length, 1);
         const job = parseReviewQueueJob(jobs[0]);
         assert.equal(job.deliveryId, "2f5f7475-33ee-4f91-9b68-0f8af72f6640");
-        assert.equal(job.version, scenario.expectedVersion);
+        assert.equal(job.version, 1);
+        assert.equal(job.trigger.kind, scenario.expectedTrigger);
       } finally {
         await miniflare.dispose();
         await rm(directory, { recursive: true, force: true });

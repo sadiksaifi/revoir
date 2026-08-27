@@ -4,12 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import {
-  parseReviewJob,
-  parseReviewQueueJob,
-  type RequestedReviewJobV2,
-  type ReviewJobV1,
-} from "@revoir/contracts";
+import { parseReviewQueueJob, type RevoirPolicyV1, type ReviewQueueJob } from "@revoir/contracts";
 import {
   QueueReviewRunner,
   classifyReviewFailure,
@@ -63,27 +58,22 @@ function memoryRequestCompletionStore(): ReviewRequestCompletionStore {
 }
 
 const configuration: RevoirConfiguration = {
-  version: 2,
+  version: 1,
   model: { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
   github: {
-    userId: 42,
     appId: 7,
+    appSlug: "revoirapp",
     privateKey: "unused by fake review service",
-    installations: [
-      {
-        id: 8,
-        repositories: [{ id: 99, owner: "owner", name: "repository" }],
-      },
-      {
-        id: 9,
-        repositories: [{ id: 100, owner: "other", name: "second" }],
-      },
-    ],
+    webhookSecret: WEBHOOK_SECRET,
   },
   cloudflare: {
     accountId: "account-id",
     queueId: "queue-id",
+    queueName: "revoir-review-jobs",
+    kvNamespaceId: "kv-namespace-id",
+    workerName: "revoir-relay",
     apiToken: "queue-token",
+    relayUrl: "https://relay.example/github/webhook",
   },
   timeouts: {
     reviewMs: 1_200_000,
@@ -95,6 +85,26 @@ const configuration: RevoirConfiguration = {
     dataDir: "/tmp/data",
   },
 };
+
+const PIPELINE_POLICY: RevoirPolicyV1 = {
+  version: 1,
+  revision: 1,
+  userId: 42,
+  installations: [
+    {
+      id: 8,
+      repositories: [{ id: 99, owner: "owner", name: "repository" }],
+    },
+    {
+      id: 9,
+      repositories: [{ id: 100, owner: "other", name: "second" }],
+    },
+  ],
+};
+
+async function loadPipelinePolicy() {
+  return structuredClone(PIPELINE_POLICY);
+}
 
 async function fixture(): Promise<string> {
   return readFile(join(import.meta.dirname, "fixtures/pull-request.synchronize.json"), "utf8");
@@ -146,20 +156,34 @@ function webhookBody(
 
 async function enqueueSignedWebhook(
   deliveryId: string,
-  options: { queued?: ReviewJobV1[]; body?: string } = {},
-): Promise<ReviewJobV1[]> {
+  options: { queued?: ReviewQueueJob[]; body?: string; expectedQueuedDelta?: number } = {},
+): Promise<ReviewQueueJob[]> {
   const queued = options.queued ?? [];
   const queuedBefore = queued.length;
   const environment: RelayEnvironment = {
     GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
-    GITHUB_USER_ID: "42",
-    GITHUB_REPOSITORIES: JSON.stringify([
-      { id: 99, owner: "owner", name: "repository" },
-      { id: 100, owner: "other", name: "second" },
-    ]),
+    POLICY_KV: {
+      async get() {
+        return JSON.stringify({
+          version: 1,
+          revision: 1,
+          userId: 42,
+          installations: [
+            {
+              id: 8,
+              repositories: [{ id: 99, owner: "owner", name: "repository" }],
+            },
+            {
+              id: 9,
+              repositories: [{ id: 100, owner: "other", name: "second" }],
+            },
+          ],
+        });
+      },
+    },
     REVIEW_QUEUE: {
       async send(job) {
-        queued.push(parseReviewJob(job));
+        queued.push(parseReviewQueueJob(job));
       },
     },
   };
@@ -179,12 +203,12 @@ async function enqueueSignedWebhook(
     environment,
   );
   assert.equal(response.status, 202);
-  assert.equal(queued.length, queuedBefore + 1);
+  assert.equal(queued.length, queuedBefore + (options.expectedQueuedDelta ?? 1));
   return queued;
 }
 
-async function enqueueSignedReviewRequest(deliveryId: string): Promise<RequestedReviewJobV2[]> {
-  const queued: RequestedReviewJobV2[] = [];
+async function enqueueSignedReviewRequest(deliveryId: string): Promise<ReviewQueueJob[]> {
+  const queued: ReviewQueueJob[] = [];
   const pullRequest = JSON.parse(await fixture()) as PipelineWebhookPayload;
   const body = JSON.stringify({
     action: "created",
@@ -215,12 +239,25 @@ async function enqueueSignedReviewRequest(deliveryId: string): Promise<Requested
     }),
     {
       GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
-      GITHUB_USER_ID: "42",
-      GITHUB_REPOSITORIES: JSON.stringify([{ id: 99, owner: "owner", name: "repository" }]),
+      POLICY_KV: {
+        async get() {
+          return JSON.stringify({
+            version: 1,
+            revision: 1,
+            userId: 42,
+            installations: [
+              {
+                id: 8,
+                repositories: [{ id: 99, owner: "owner", name: "repository" }],
+              },
+            ],
+          });
+        },
+      },
       REVIEW_QUEUE: {
         async send(job) {
           const parsed = parseReviewQueueJob(job);
-          assert.equal(parsed.version, 2);
+          assert.equal(parsed.trigger.kind, "requested");
           queued.push(parsed);
         },
       },
@@ -266,6 +303,7 @@ describe("webhook-to-review pipeline", () => {
       memoryFailureStore(),
       undefined,
       memoryRequestCompletionStore(),
+      loadPipelinePolicy,
     );
 
     assert.equal(await runner.consumeOne(), "settled");
@@ -331,6 +369,9 @@ describe("webhook-to-review pipeline", () => {
           reviewService,
           silentFailureReporter,
           memoryFailureStore(),
+          undefined,
+          undefined,
+          loadPipelinePolicy,
         ).consumeOne(),
         "settled",
       );
@@ -349,7 +390,7 @@ describe("webhook-to-review pipeline", () => {
     const rawBody = await fixture();
     const firstRepository = { id: 99, owner: "owner", name: "repository" };
     const secondRepository = { id: 100, owner: "other", name: "second" };
-    const queued: ReviewJobV1[] = [];
+    const queued: ReviewQueueJob[] = [];
     await enqueueSignedWebhook("pipeline-installation-8", {
       queued,
       body: webhookBody(rawBody, 8, firstRepository),
@@ -361,8 +402,9 @@ describe("webhook-to-review pipeline", () => {
     await enqueueSignedWebhook("pipeline-cross-match", {
       queued,
       body: webhookBody(rawBody, 9, firstRepository),
+      expectedQueuedDelta: 0,
     });
-    assert.equal(queued.length, 3);
+    assert.equal(queued.length, 2);
 
     const acknowledged: string[] = [];
     const queue: QueueClient = {
@@ -396,9 +438,11 @@ describe("webhook-to-review pipeline", () => {
       reviewService,
       silentFailureReporter,
       memoryFailureStore(),
+      undefined,
+      undefined,
+      loadPipelinePolicy,
     );
 
-    assert.equal(await runner.consumeOne(), "settled");
     assert.equal(await runner.consumeOne(), "settled");
     assert.equal(await runner.consumeOne(), "settled");
     assert.deepEqual(reviews, [
@@ -408,7 +452,6 @@ describe("webhook-to-review pipeline", () => {
     assert.deepEqual(acknowledged, [
       "lease-pipeline-installation-8",
       "lease-pipeline-installation-9",
-      "lease-pipeline-cross-match",
     ]);
     assert.equal(queued.length, 0);
   });
@@ -450,6 +493,9 @@ describe("webhook-to-review pipeline", () => {
         reviewService,
         silentFailureReporter,
         memoryFailureStore(),
+        undefined,
+        undefined,
+        loadPipelinePolicy,
       ).consumeOne(),
       "settled",
     );
@@ -503,6 +549,9 @@ describe("webhook-to-review pipeline", () => {
         reviewService,
         silentFailureReporter,
         memoryFailureStore(),
+        undefined,
+        undefined,
+        loadPipelinePolicy,
       ).consumeOne(),
       "settled",
     );
@@ -547,8 +596,8 @@ describe("webhook-to-review pipeline", () => {
         }
         return {
           status: "clean",
-          reviewedSha: job.pullRequest.headSha,
-          currentSha: job.pullRequest.headSha,
+          reviewedSha: job.trigger.kind === "automatic" ? job.trigger.headSha : "",
+          currentSha: job.trigger.kind === "automatic" ? job.trigger.headSha : "",
         };
       },
     };
@@ -566,6 +615,9 @@ describe("webhook-to-review pipeline", () => {
       reviews,
       reporter,
       memoryFailureStore(states, saves),
+      undefined,
+      undefined,
+      loadPipelinePolicy,
     );
 
     await runner.consumeOne();
@@ -638,6 +690,9 @@ describe("webhook-to-review pipeline", () => {
       reviews,
       reporter,
       memoryFailureStore(states, saves),
+      undefined,
+      undefined,
+      loadPipelinePolicy,
     );
 
     await runner.consumeOne();
@@ -722,6 +777,9 @@ describe("webhook-to-review pipeline", () => {
       reviews,
       reporter,
       memoryFailureStore(states),
+      undefined,
+      undefined,
+      loadPipelinePolicy,
     );
 
     await runner.consumeOne();
