@@ -314,6 +314,14 @@ export class DefaultSetupPlatform implements SetupPlatform {
     };
   }
 
+  #request(input: string | URL, init: RequestInit = {}): Promise<Response> {
+    const timeout = AbortSignal.timeout(this.#shellCommandMs);
+    return this.#fetch(input, {
+      ...init,
+      signal: init.signal == null ? timeout : AbortSignal.any([init.signal, timeout]),
+    });
+  }
+
   async ensurePiAuthentication(modelId: string, reasoning: string): Promise<void> {
     const separator = modelId.indexOf("/");
     const provider = modelId.slice(0, separator);
@@ -572,7 +580,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     }
     const body = "{}";
     const signature = createHmac("sha256", webhookSecret).update(body).digest("hex");
-    const response = await this.#fetch(resources.relayUrl, {
+    const response = await this.#request(resources.relayUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -581,7 +589,6 @@ export class DefaultSetupPlatform implements SetupPlatform {
         "X-Hub-Signature-256": `sha256=${signature}`,
       },
       body,
-      signal: AbortSignal.timeout(this.#shellCommandMs),
     });
     return (
       response.status === 202 &&
@@ -634,7 +641,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
       "User-Agent": "revoir",
       "X-GitHub-Api-Version": "2022-11-28",
     };
-    const response = await this.#fetch("https://api.github.com/app", { headers });
+    const response = await this.#request("https://api.github.com/app", { headers });
     if (!response.ok) {
       throw new Error(`GitHub App reconciliation failed with HTTP ${response.status}.`);
     }
@@ -663,7 +670,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     for (const installation of policy.installations) {
       // Installation permission approval is independent for personal and organization owners.
       // eslint-disable-next-line no-await-in-loop
-      const installationResponse = await this.#fetch(
+      const installationResponse = await this.#request(
         `https://api.github.com/app/installations/${installation.id}/access_tokens`,
         { method: "POST", headers },
       );
@@ -690,7 +697,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
       if (installationDrifted) {
         // GitHub routes personal and organization installation settings differently.
         // eslint-disable-next-line no-await-in-loop
-        const metadataResponse = await this.#fetch(
+        const metadataResponse = await this.#request(
           `https://api.github.com/app/installations/${installation.id}`,
           { headers },
         );
@@ -721,7 +728,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
         `GitHub App webhook activation was not confirmed. Enable Active and save the App at ${appSettingsUrl}, then rerun setup.`,
       );
     }
-    const hook = await this.#fetch("https://api.github.com/app/hook/config", {
+    const hook = await this.#request("https://api.github.com/app/hook/config", {
       method: "PATCH",
       headers,
       body: JSON.stringify({
@@ -756,13 +763,13 @@ export class DefaultSetupPlatform implements SetupPlatform {
   async validateQueueApiToken(resources: SetupCloudflareResources, token: string): Promise<void> {
     const queueUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(resources.accountId)}/queues/${encodeURIComponent(resources.queueId)}`;
     const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
-    const response = await this.#fetch(queueUrl, { headers });
+    const response = await this.#request(queueUrl, { headers });
     if (!response.ok || ((await response.json()) as Record<string, unknown>).success !== true) {
       throw new Error(
         "Cloudflare rejected the Queue token. Grant only Account > Queues > Edit and retry.",
       );
     }
-    const acknowledgement = await this.#fetch(`${queueUrl}/messages/ack`, {
+    const acknowledgement = await this.#request(`${queueUrl}/messages/ack`, {
       method: "POST",
       headers,
       body: JSON.stringify({ acks: [], retries: [] }),

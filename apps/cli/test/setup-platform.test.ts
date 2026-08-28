@@ -509,6 +509,56 @@ describe("default greenfield setup platform", () => {
     assert.equal(requests[3]!.url, "https://api.github.com/app/hook/config");
   });
 
+  it("aborts stalled GitHub and Cloudflare setup requests at the shell deadline", async () => {
+    const configuration = createTestConfiguration({
+      cacheDir: "/tmp/revoir-test-cache",
+      stateDir: "/tmp/revoir-test-state",
+      dataDir: "/tmp/revoir-test-data",
+    });
+    const operations = [
+      {
+        name: "GitHub reconciliation",
+        run: (setup: DefaultSetupPlatform) =>
+          setup.reconcileGitHubApp(configuration, createEmptyPolicy(42)),
+      },
+      {
+        name: "Cloudflare Queue validation",
+        run: (setup: DefaultSetupPlatform) => setup.validateQueueApiToken(RESOURCES, "queue-token"),
+      },
+    ];
+
+    for (const operation of operations) {
+      let requestAborted = false;
+      const setup = platform({
+        process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+        shellCommandMs: 5,
+        fetch: async (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => {
+                requestAborted = true;
+                reject(init.signal?.reason);
+              },
+              { once: true },
+            );
+          }),
+      });
+
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(
+        Promise.race([
+          operation.run(setup),
+          new Promise<never>((_resolve, reject) => {
+            setTimeout(() => reject(new Error(`${operation.name} ignored its deadline`)), 100);
+          }),
+        ]),
+        (error) => error instanceof DOMException && error.name === "TimeoutError",
+      );
+      assert.equal(requestAborted, true, operation.name);
+    }
+  });
+
   it("requires browser-confirmed GitHub App webhook activation before completing reconciliation", async () => {
     const configuration = createTestConfiguration({
       cacheDir: "/tmp/revoir-test-cache",
