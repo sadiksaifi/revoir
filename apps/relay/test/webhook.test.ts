@@ -100,6 +100,7 @@ function environment(
 ): RelayEnvironment {
   return {
     GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
+    REVOIR_RELAY_VERSION: "test-relay-sha",
     POLICY_KV: {
       get: options.readPolicy ?? (async () => options.policy ?? policy()),
     },
@@ -141,6 +142,7 @@ describe("GitHub webhook relay", () => {
     const response = await worker.fetch(signedRequest(await rawFixture()), environment(messages));
 
     assert.equal(response.status, 202);
+    assert.equal(response.headers.get("X-Revoir-Relay-Version"), "test-relay-sha");
     assert.deepEqual(messages, [
       {
         version: 1,

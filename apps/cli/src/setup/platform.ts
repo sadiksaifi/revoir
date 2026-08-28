@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -486,6 +487,30 @@ export class DefaultSetupPlatform implements SetupPlatform {
       }
       return `${baseUrl.replace(/\/$/u, "")}${REVOIR_WEBHOOK_PATH}`;
     });
+  }
+
+  async relayIsCurrent(
+    resources: SetupCloudflareResources,
+    webhookSecret: string,
+  ): Promise<boolean> {
+    if (resources.relayUrl === undefined) return false;
+    const body = "{}";
+    const signature = createHmac("sha256", webhookSecret).update(body).digest("hex");
+    const response = await this.#fetch(resources.relayUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-GitHub-Delivery": randomUUID(),
+        "X-GitHub-Event": "ping",
+        "X-Hub-Signature-256": `sha256=${signature}`,
+      },
+      body,
+      signal: AbortSignal.timeout(this.#shellCommandMs),
+    });
+    return (
+      response.status === 202 &&
+      response.headers.get("X-Revoir-Relay-Version") === EMBEDDED_RELAY_SHA256
+    );
   }
 
   async configureRelaySecret(

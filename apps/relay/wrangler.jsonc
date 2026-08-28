@@ -23,4 +23,7 @@
   "observability": {
     "enabled": true,
   },
+  "vars": {
+    "REVOIR_RELAY_VERSION": "development",
+  },
 }

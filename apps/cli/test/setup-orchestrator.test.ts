@@ -54,8 +54,9 @@ class MemorySetupState implements SetupStateStore {
 function platform(
   state: MemorySetupState,
   failOnce?: SetupStage,
-): SetupPlatform & { calls: SetupStage[] } {
+): SetupPlatform & { calls: SetupStage[]; relayMutations: string[] } {
   const calls: SetupStage[] = [];
+  const relayMutations: string[] = [];
   let failed = false;
   const stage = async <T>(name: SetupStage, value: T): Promise<T> => {
     calls.push(name);
@@ -67,6 +68,7 @@ function platform(
   };
   return {
     calls,
+    relayMutations,
     async ensureGitHubAuthentication() {
       return stage("prerequisites", { userId: 42, login: "test-user" });
     },
@@ -86,9 +88,15 @@ function platform(
       return resources;
     },
     async deployRelay() {
+      relayMutations.push("deploy");
       return stage("relay-deployed", "https://revoir-relay.example.workers.dev/github/webhook");
     },
-    async configureRelaySecret() {},
+    async relayIsCurrent() {
+      return stage("relay-deployed", true);
+    },
+    async configureRelaySecret() {
+      relayMutations.push("secret-and-deploy");
+    },
     async createGitHubApp(input) {
       const app = await stage("github-app", {
         appId: 7,
@@ -331,6 +339,7 @@ describe("greenfield end-to-end setup", () => {
     const result = await setup(state, reconciliation).run();
 
     assert.equal(result.resumed, true);
+    assert.deepEqual(reconciliation.relayMutations, []);
     assert.deepEqual(reconciliation.calls, [
       "prerequisites",
       "relay-deployed",
@@ -338,6 +347,17 @@ describe("greenfield end-to-end setup", () => {
       "service-installed",
       "diagnostics",
     ]);
+  });
+
+  it("repairs a drifted completed relay with only the secret-and-deploy path", async () => {
+    const state = new MemorySetupState();
+    await setup(state, platform(state)).run();
+    const reconciliation = platform(state);
+    reconciliation.relayIsCurrent = async () => false;
+
+    await setup(state, reconciliation).run();
+
+    assert.deepEqual(reconciliation.relayMutations, ["secret-and-deploy"]);
   });
 
   it("repairs completed-installation drift only by revoking trust", async () => {

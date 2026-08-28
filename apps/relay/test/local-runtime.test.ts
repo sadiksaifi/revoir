@@ -74,6 +74,7 @@ describe("Cloudflare local runtime", () => {
             compatibilityFlags: ["nodejs_compat"],
             bindings: {
               GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
+              REVOIR_RELAY_VERSION: "test-relay-sha",
             },
             kvNamespaces: { POLICY_KV: "revoir-local-runtime-policy" },
             queueProducers: {

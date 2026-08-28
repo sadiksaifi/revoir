@@ -36,6 +36,7 @@ export interface SetupPlatform {
     persist: (resources: SetupCloudflareCheckpoint) => Promise<void>,
   ): Promise<SetupCloudflareResources>;
   deployRelay(resources: SetupCloudflareResources): Promise<string>;
+  relayIsCurrent(resources: SetupCloudflareResources, webhookSecret: string): Promise<boolean>;
   configureRelaySecret(resources: SetupCloudflareResources, webhookSecret: string): Promise<void>;
   createGitHubApp(input: {
     relayUrl: string;
@@ -207,12 +208,11 @@ export class EndToEndSetup {
         });
       }
       const relayUrl = await reconcile("relay-deployed", async () => {
-        const deployedUrl = await this.#platform.deployRelay(resources);
-        await this.#platform.configureRelaySecret(
-          resources,
-          finalState.configuration.github.webhookSecret,
-        );
-        return deployedUrl;
+        const webhookSecret = finalState.configuration.github.webhookSecret;
+        if (!(await this.#platform.relayIsCurrent(resources, webhookSecret))) {
+          await this.#platform.configureRelaySecret(resources, webhookSecret);
+        }
+        return resources.relayUrl;
       });
       const configuration = {
         ...finalState.configuration,

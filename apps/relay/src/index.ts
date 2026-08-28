@@ -22,6 +22,7 @@ export interface PolicyReader {
 
 export interface RelayEnvironment {
   GITHUB_WEBHOOK_SECRET: string;
+  REVOIR_RELAY_VERSION: string;
   POLICY_KV: PolicyReader;
   REVIEW_QUEUE: QueueProducer<ReviewQueueJob>;
 }
@@ -271,15 +272,20 @@ function createRequestedReviewJob(
 export function createWebhookRelay(now: () => Date = () => new Date()) {
   return {
     async fetch(request: Request, environment: RelayEnvironment): Promise<Response> {
+      const respond = (body: string, status: number): Response =>
+        new Response(body, {
+          status,
+          headers: { "X-Revoir-Relay-Version": environment.REVOIR_RELAY_VERSION },
+        });
       const url = new URL(request.url);
       if (url.pathname !== REVOIR_WEBHOOK_PATH) {
-        return new Response("Not Found", { status: 404 });
+        return respond("Not Found", 404);
       }
       if (request.method !== "POST") {
-        return new Response("Method Not Allowed", { status: 405 });
+        return respond("Method Not Allowed", 405);
       }
       if (request.headers.get("Content-Type")?.split(";", 1)[0]?.trim() !== "application/json") {
-        return new Response("Unsupported Media Type", { status: 415 });
+        return respond("Unsupported Media Type", 415);
       }
 
       const rawBody = await request.arrayBuffer();
@@ -290,25 +296,25 @@ export function createWebhookRelay(now: () => Date = () => new Date()) {
           environment.GITHUB_WEBHOOK_SECRET,
         ))
       ) {
-        return new Response("Unauthorized", { status: 401 });
+        return respond("Unauthorized", 401);
       }
       const event = request.headers.get("X-GitHub-Event");
       if (event !== "pull_request" && event !== "issue_comment") {
-        return new Response("Accepted", { status: 202 });
+        return respond("Accepted", 202);
       }
 
       let payload: unknown;
       try {
         payload = JSON.parse(new TextDecoder().decode(rawBody)) as unknown;
       } catch {
-        return new Response("Bad Request", { status: 400 });
+        return respond("Bad Request", 400);
       }
 
       let policy: RevoirPolicyV1;
       try {
         policy = await loadPolicy(environment);
       } catch {
-        return new Response("Service Unavailable", { status: 503 });
+        return respond("Service Unavailable", 503);
       }
       const deliveryId = request.headers.get("X-GitHub-Delivery");
       const job =
@@ -318,15 +324,15 @@ export function createWebhookRelay(now: () => Date = () => new Date()) {
             ? createAutomaticReviewJob(payload, deliveryId, policy, now())
             : createRequestedReviewJob(payload, deliveryId, policy, now());
       if (job === undefined) {
-        return new Response("Accepted", { status: 202 });
+        return respond("Accepted", 202);
       }
 
       try {
         await environment.REVIEW_QUEUE.send(job, { contentType: "json" });
       } catch {
-        return new Response("Service Unavailable", { status: 503 });
+        return respond("Service Unavailable", 503);
       }
-      return new Response("Accepted", { status: 202 });
+      return respond("Accepted", 202);
     },
   };
 }

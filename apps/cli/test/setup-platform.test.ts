@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
 import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import type { RevoirConfiguration } from "../src/config/schema.js";
 import { createDefaultDiagnosticGateway } from "../src/diagnostics.js";
+import { EMBEDDED_RELAY_SHA256 } from "../src/generated/relay-artifact.js";
 import { GitHubManifestFlow } from "../src/setup/github-manifest.js";
 import {
   ChildProcessSetupRunner,
@@ -309,6 +311,44 @@ describe("default greenfield setup platform", () => {
         ({ environment }) => environment?.CLOUDFLARE_ACCOUNT_ID === RESOURCES.accountId,
       ),
       true,
+    );
+  });
+
+  it("recognizes only the expected signed relay artifact as current", async () => {
+    const requests: Request[] = [];
+    let deployedVersion = EMBEDDED_RELAY_SHA256;
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        const body = await request.clone().text();
+        assert.equal(body, "{}");
+        assert.equal(
+          request.headers.get("X-Hub-Signature-256"),
+          `sha256=${createHmac("sha256", "webhook-secret").update(body).digest("hex")}`,
+        );
+        return new Response("Accepted", {
+          status: 202,
+          headers: { "X-Revoir-Relay-Version": deployedVersion },
+        });
+      },
+      shellCommandMs: 123,
+    });
+
+    const deployed = {
+      ...RESOURCES,
+      relayUrl: "https://revoir-relay.example.workers.dev/github/webhook",
+    };
+    assert.equal(await setup.relayIsCurrent(deployed, "webhook-secret"), true);
+    deployedVersion = "stale-relay";
+    assert.equal(await setup.relayIsCurrent(deployed, "webhook-secret"), false);
+    assert.deepEqual(
+      requests.map((request) => [request.url, request.method, request.signal.aborted]),
+      [
+        [deployed.relayUrl, "POST", false],
+        [deployed.relayUrl, "POST", false],
+      ],
     );
   });
 

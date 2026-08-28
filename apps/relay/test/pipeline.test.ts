@@ -162,6 +162,7 @@ async function enqueueSignedWebhook(
   const queuedBefore = queued.length;
   const environment: RelayEnvironment = {
     GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
+    REVOIR_RELAY_VERSION: "test-relay-sha",
     POLICY_KV: {
       async get() {
         return JSON.stringify({
@@ -239,6 +240,7 @@ async function enqueueSignedReviewRequest(deliveryId: string): Promise<ReviewQue
     }),
     {
       GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
+      REVOIR_RELAY_VERSION: "test-relay-sha",
       POLICY_KV: {
         async get() {
           return JSON.stringify({
