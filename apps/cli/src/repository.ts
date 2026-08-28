@@ -232,7 +232,20 @@ export class RepositoryManager {
     await this.#authenticate();
     const discovered = await this.#github.discover(reference);
     let installation = discovered.installation;
-    const pendingRemoval = (await this.#pending.load()).find(
+    const pendingOperations = await this.#pending.load();
+    const replacedPendingAdds = pendingOperations.filter(
+      (operation) =>
+        operation.kind === "add" &&
+        operation.repository.id !== discovered.repository.id &&
+        operation.repository.owner.toLowerCase() === discovered.repository.owner.toLowerCase() &&
+        operation.repository.name.toLowerCase() === discovered.repository.name.toLowerCase(),
+    );
+    for (const operation of replacedPendingAdds) {
+      // Each removal reads and atomically rewrites the shared pending-operation file.
+      // eslint-disable-next-line no-await-in-loop
+      await this.#pending.remove("add", operation.repository.id);
+    }
+    const pendingRemoval = pendingOperations.find(
       (operation) =>
         operation.kind === "remove" && operation.repository.id === discovered.repository.id,
     );

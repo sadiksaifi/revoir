@@ -374,6 +374,28 @@ describe("repository authorization", () => {
     ]);
   });
 
+  it("clears a stale pending add when the same repository name resolves to a new immutable id", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    await pending.upsert({
+      version: 1,
+      kind: "add",
+      repository: { ...REPOSITORY, id: 98 },
+      installationId: 8,
+      settingsUrl: "https://github.com/settings/installations/8",
+      createdAt: "2026-08-27T00:00:00.000Z",
+    });
+    const manager = new RepositoryManager({ github: fakeGitHub(), policies, pending });
+
+    assert.equal((await manager.add({ owner: "Owner", name: "repository" })).status, "authorized");
+
+    assert.deepEqual(pending.values, []);
+    assert.deepEqual(
+      (await manager.list()).map(({ repository, status }) => ({ id: repository.id, status })),
+      [{ id: REPOSITORY.id, status: "authorized" }],
+    );
+  });
+
   it("persists non-authorizing installation approval before opening GitHub", async () => {
     const policies = new MemoryPolicies();
     const pending = pendingStore();
