@@ -24,6 +24,7 @@ import type {
 } from "./orchestrator.js";
 
 const RESOURCE_PREFIX = "revoir";
+const GITHUB_APP_MACHINE_NAME_MAX_LENGTH = 18;
 
 export interface ProcessResult {
   stdout: string;
@@ -159,6 +160,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     policy: RevoirPolicy,
   ) => Promise<void>;
   readonly #installService: (configuration: RevoirConfiguration) => Promise<void>;
+  readonly #hostname: () => string;
   readonly #manifest: GitHubManifestFlow;
   readonly #process: SetupProcessRunner;
   readonly #secretPrompt: (message: string) => Promise<string>;
@@ -172,6 +174,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
   constructor(input: {
     browser: GitHubManifestBrowser;
     diagnostics: (configuration: RevoirConfiguration, policy: RevoirPolicy) => Promise<void>;
+    hostname?: () => string;
     installService(configuration: RevoirConfiguration): Promise<void>;
     secretPrompt(message: string): Promise<string>;
     selectCloudflareAccount?(accounts: readonly { id: string; name: string }[]): Promise<string>;
@@ -183,6 +186,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
   }) {
     this.#browser = input.browser;
     this.#diagnostics = input.diagnostics;
+    this.#hostname = input.hostname ?? hostname;
     this.#installService = input.installService;
     this.#process = input.process ?? new ChildProcessSetupRunner();
     this.#manifest = input.manifest ?? new GitHubManifestFlow(input.browser);
@@ -504,9 +508,9 @@ export class DefaultSetupPlatform implements SetupPlatform {
     persist: (app: SetupGitHubApp) => Promise<void>;
   }): Promise<SetupGitHubApp> {
     const machine =
-      hostname()
+      this.#hostname()
         .replaceAll(/[^A-Za-z0-9-]/gu, "-")
-        .slice(0, 24) || "mac";
+        .slice(0, GITHUB_APP_MACHINE_NAME_MAX_LENGTH) || "mac";
     return this.#manifest.create({
       ...input,
       appName: `Revoir ${machine} ${input.state.slice(0, 8)}`,

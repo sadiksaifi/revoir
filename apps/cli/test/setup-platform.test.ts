@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import type { RevoirConfiguration } from "../src/config/schema.js";
 import { createDefaultDiagnosticGateway } from "../src/diagnostics.js";
+import { GitHubManifestFlow } from "../src/setup/github-manifest.js";
 import {
   ChildProcessSetupRunner,
   DefaultSetupPlatform,
@@ -109,6 +110,38 @@ describe("default greenfield setup platform", () => {
       ]),
       (error) => error instanceof Error && !/ignored its timeout/u.test(error.message),
     );
+  });
+
+  it("bounds generated GitHub App names for long machine hostnames", async () => {
+    let appName: string | undefined;
+    const manifest = new GitHubManifestFlow({ async open() {} });
+    manifest.create = async (input) => {
+      appName = input.appName;
+      return {
+        appId: 7,
+        appSlug: "revoir-test",
+        privateKey: "private-key",
+        webhookSecret: "webhook-secret",
+      };
+    };
+    const setup = new DefaultSetupPlatform({
+      browser: { async open() {} },
+      diagnostics: async () => {},
+      hostname: () => "personal-development-machine-with-a-long-hostname",
+      installService: async () => {},
+      manifest,
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      secretPrompt: async () => "queue-token",
+    });
+
+    await setup.createGitHubApp({
+      relayUrl: "https://relay.example.workers.dev/github/webhook",
+      state: "0123456789abcdef",
+      persist: async () => {},
+    });
+
+    assert.equal(appName, "Revoir personal-developme 01234567");
+    assert.equal(appName.length, 34);
   });
 
   it("authenticates Wrangler and creates KV, Queue, and its HTTP pull consumer", async () => {
