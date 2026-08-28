@@ -260,6 +260,22 @@ export class EndToEndSetup {
         this.#platform.reconcileGitHubApp(configuration, effectivePolicy, persistGitHubIdentity),
       );
       await reconcile("github-app", () => persistGitHubIdentity(githubIdentity));
+      await reconcile("queue-token", async () => {
+        try {
+          await this.#platform.validateQueueApiToken(
+            configuration.cloudflare,
+            configuration.cloudflare.apiToken,
+          );
+        } catch {
+          const apiToken = await this.#platform.requestQueueApiToken(configuration.cloudflare);
+          configuration = {
+            ...configuration,
+            cloudflare: { ...configuration.cloudflare, apiToken },
+          };
+          await this.#state.writeFinal(configuration, effectivePolicy);
+          await this.#platform.validateQueueApiToken(configuration.cloudflare, apiToken);
+        }
+      });
       await reconcile("service-installed", () => this.#platform.installService(configuration));
       await reconcile("diagnostics", () =>
         this.#platform.runDiagnostics(configuration, effectivePolicy),

@@ -442,6 +442,29 @@ describe("greenfield end-to-end setup", () => {
     assert.deepEqual(reconciliation.relayMutations, ["secret-and-deploy"]);
   });
 
+  it("refreshes a revoked Queue token during completed setup reconciliation", async () => {
+    const state = new MemorySetupState();
+    await setup(state, platform(state)).run();
+    const reconciliation = platform(state);
+    let requested = 0;
+    reconciliation.validateQueueApiToken = async (_resources, token) => {
+      if (token !== "refreshed-queue-token") throw new Error("Queue token revoked");
+    };
+    reconciliation.requestQueueApiToken = async () => {
+      requested += 1;
+      return "refreshed-queue-token";
+    };
+    reconciliation.runDiagnostics = async (configuration) => {
+      assert.equal(configuration.cloudflare.apiToken, "refreshed-queue-token");
+    };
+
+    const result = await setup(state, reconciliation).run();
+
+    assert.equal(requested, 1);
+    assert.equal(result.configuration.cloudflare.apiToken, "refreshed-queue-token");
+    assert.equal(state.finalConfiguration?.cloudflare.apiToken, "refreshed-queue-token");
+  });
+
   it("checkpoints a live renamed App slug before reconciliation can be interrupted", async () => {
     const state = new MemorySetupState();
     await setup(state, platform(state)).run();
