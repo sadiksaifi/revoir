@@ -8,7 +8,12 @@
   "env": {
     "builtin": true
   },
-  "ignorePatterns": ["**/coverage/**", "**/dist/**"],
+  "ignorePatterns": [
+    "**/coverage/**",
+    "**/dist/**",
+    "apps/cli/src/generated/relay-artifact.ts",
+    "apps/relay/worker-configuration.d.ts"
+  ],
   "options": {
     "denyWarnings": true,
     "reportUnusedDisableDirectives": "error"

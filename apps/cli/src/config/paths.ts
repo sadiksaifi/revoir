@@ -1,9 +1,12 @@
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export interface ApplicationPaths {
   configDir: string;
   configFile: string;
+  policyFile: string;
+  setupCheckpointFile: string;
+  commandLockFile: string;
   cacheDir: string;
   stateDir: string;
   dataDir: string;
@@ -42,6 +45,9 @@ export function resolveApplicationPaths(
   return {
     configDir,
     configFile: join(configDir, "config.json"),
+    policyFile: join(configDir, "policy.json"),
+    setupCheckpointFile: join(configDir, "setup-checkpoint.json"),
+    commandLockFile: join(configDir, "command.lock"),
     cacheDir: join(
       resolveXdgBase(environment, "XDG_CACHE_HOME", join(userHome, ".cache")),
       "revoir",
@@ -54,5 +60,20 @@ export function resolveApplicationPaths(
       resolveXdgBase(environment, "XDG_DATA_HOME", join(userHome, ".local", "share")),
       "revoir",
     ),
+  };
+}
+
+export function scopeApplicationPathsToConfig(
+  paths: ApplicationPaths,
+  configFile: string,
+): ApplicationPaths {
+  if (configFile === paths.configFile) return paths;
+  return {
+    ...paths,
+    configDir: dirname(configFile),
+    configFile,
+    policyFile: `${configFile}.policy.json`,
+    setupCheckpointFile: `${configFile}.setup-checkpoint.json`,
+    commandLockFile: `${configFile}.command.lock`,
   };
 }

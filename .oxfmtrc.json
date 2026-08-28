@@ -1,6 +1,11 @@
 {
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
-  "ignorePatterns": ["**/coverage/**", "**/dist/**"],
+  "ignorePatterns": [
+    "**/coverage/**",
+    "**/dist/**",
+    "apps/cli/src/generated/relay-artifact.ts",
+    "apps/relay/worker-configuration.d.ts"
+  ],
   "sortImports": true,
   "sortPackageJson": {
     "sortScripts": false

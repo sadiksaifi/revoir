@@ -1,7 +1,9 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { sign } from "node:crypto";
+import { createHmac, sign } from "node:crypto";
 
+import { configuredRepositories, type RevoirPolicy } from "./config/policy.js";
 import type { RevoirConfiguration } from "./config/schema.js";
+import type { RepositoryListEntry } from "./repository.js";
 
 const GITHUB_API = "https://api.github.com";
 const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
@@ -17,16 +19,33 @@ const REQUIRED_GITHUB_PERMISSIONS = {
 } as const;
 const REQUIRED_GITHUB_EVENTS = ["pull_request", "issue_comment"] as const;
 
-function execFile(
+export interface DiagnosticProcessOptions {
+  environment?: Readonly<Record<string, string>>;
+  maxBuffer: number;
+  timeout: number;
+}
+
+export type DiagnosticProcess = (
   executable: string,
   arguments_: readonly string[],
-  options: { timeout: number; maxBuffer: number },
-): Promise<{ stdout: string; stderr: string }> {
+  options: DiagnosticProcessOptions,
+) => Promise<{ stdout: string; stderr: string }>;
+
+const execFile: DiagnosticProcess = (
+  executable: string,
+  arguments_: readonly string[],
+  options: DiagnosticProcessOptions,
+): Promise<{ stdout: string; stderr: string }> => {
   return new Promise((resolve, reject) => {
     execFileCallback(
       executable,
       [...arguments_],
-      { ...options, encoding: "utf8" },
+      {
+        timeout: options.timeout,
+        maxBuffer: options.maxBuffer,
+        encoding: "utf8",
+        env: { ...process.env, ...options.environment },
+      },
       (error, stdout, stderr) => {
         if (error !== null) {
           reject(error);
@@ -36,12 +55,22 @@ function execFile(
       },
     );
   });
-}
+};
 
 export type DiagnosticStatus = "passed" | "failed";
 
 export interface DiagnosticResult {
-  id: "runtime" | "git" | "pi-auth" | "github" | "repositories" | "cloudflare";
+  id:
+    | "runtime"
+    | "git"
+    | "pi-auth"
+    | "github"
+    | "repositories"
+    | "cloudflare"
+    | "relay"
+    | "policy"
+    | "authorization"
+    | "service";
   label: string;
   status: DiagnosticStatus;
   detail: string;
@@ -54,8 +83,18 @@ export interface DiagnosticGateway {
   checkPi(modelId: string, reasoning: string): Promise<string>;
   checkGitHub(
     configuration: RevoirConfiguration["github"],
+    policy: RevoirPolicy,
+    timeoutMs?: number,
   ): Promise<{ app: string; repositories: string }>;
-  checkCloudflare(configuration: RevoirConfiguration["cloudflare"]): Promise<string>;
+  checkCloudflare(
+    configuration: RevoirConfiguration["cloudflare"],
+    timeoutMs?: number,
+  ): Promise<string>;
+  checkRelay(relayUrl: string, webhookSecret: string, timeoutMs: number): Promise<string>;
+  checkPolicy(
+    configuration: RevoirConfiguration["cloudflare"],
+    policy: RevoirPolicy,
+  ): Promise<string>;
 }
 
 export function validateNodeRuntime(version: string, runtimeName: string): string {
@@ -81,6 +120,7 @@ type FetchFunction = (
     method?: string;
     headers?: Readonly<Record<string, string>>;
     body?: string;
+    signal?: AbortSignal;
   },
 ) => Promise<JsonResponse>;
 
@@ -129,18 +169,22 @@ function validateGitHubPermissions(value: unknown): void {
   const invalidPermissions = Object.entries(REQUIRED_GITHUB_PERMISSIONS).filter(
     ([permission, requiredGrant]) => permissions[permission] !== requiredGrant,
   );
-  if (invalidPermissions.length === 0) {
+  const unexpectedPermissions = Object.keys(permissions).filter(
+    (permission) => !(permission in REQUIRED_GITHUB_PERMISSIONS),
+  );
+  if (invalidPermissions.length === 0 && unexpectedPermissions.length === 0) {
     return;
   }
 
-  const detail = invalidPermissions
-    .map(([permission, requiredGrant]) => {
+  const detail = [
+    ...invalidPermissions.map(([permission, requiredGrant]) => {
       const configuredGrant = permissions[permission];
       return `${permission} must be "${requiredGrant}" (found ${
         typeof configuredGrant === "string" ? `"${configuredGrant}"` : "missing"
       })`;
-    })
-    .join("; ");
+    }),
+    ...unexpectedPermissions.map((permission) => `${permission} must be absent`),
+  ].join("; ");
   throw new Error(
     `GitHub installation permissions are invalid: ${detail}. Update the repository permissions in the GitHub App settings, approve the permission change for this installation, and rerun diagnostics.`,
   );
@@ -151,15 +195,26 @@ function validateGitHubEvents(value: unknown): void {
     throw new Error("GitHub App webhook subscriptions are invalid: events are unavailable.");
   }
   const missingEvents = REQUIRED_GITHUB_EVENTS.filter((event) => !value.includes(event));
-  if (missingEvents.length > 0) {
+  const unexpectedEvents = value.filter(
+    (event) => !(REQUIRED_GITHUB_EVENTS as readonly string[]).includes(event),
+  );
+  if (missingEvents.length > 0 || unexpectedEvents.length > 0) {
     throw new Error(
-      `GitHub App webhook subscriptions are invalid: missing ${missingEvents.join(", ")}. Subscribe to the Pull request and Issue comment events in the GitHub App settings, then rerun diagnostics.`,
+      `GitHub App webhook subscriptions are invalid: ${[
+        missingEvents.length === 0 ? undefined : `missing ${missingEvents.join(", ")}`,
+        unexpectedEvents.length === 0 ? undefined : `unexpected ${unexpectedEvents.join(", ")}`,
+      ]
+        .filter((detail): detail is string => detail !== undefined)
+        .join(
+          "; ",
+        )}. Subscribe only to the Pull request and Issue comment events in the GitHub App settings, then rerun diagnostics.`,
     );
   }
 }
 
 export function createDefaultDiagnosticGateway(
   fetchImplementation: FetchFunction = fetch,
+  processRunner: DiagnosticProcess = execFile,
 ): DiagnosticGateway {
   return {
     async checkRuntime() {
@@ -168,7 +223,7 @@ export function createDefaultDiagnosticGateway(
 
     async checkGit(timeoutMs) {
       try {
-        const { stdout } = await execFile("git", ["--version"], {
+        const { stdout } = await processRunner("git", ["--version"], {
           timeout: timeoutMs,
           maxBuffer: 64 * 1024,
         });
@@ -203,15 +258,18 @@ export function createDefaultDiagnosticGateway(
       const authCheck = await modelRuntime.checkAuth(providerId);
       if (auth === undefined || authCheck?.type !== "oauth") {
         throw new Error(
-          'Pi OpenAI Codex login is unavailable. Run "pi", then use "/login" and select OpenAI Codex.',
+          'Pi OpenAI Codex login is unavailable. Rerun "revoir setup" to complete browser authentication.',
         );
       }
       return `${modelId} (${reasoning} reasoning), OpenAI Codex OAuth`;
     },
 
-    async checkGitHub(configuration) {
+    async checkGitHub(configuration, policy, timeoutMs = 120_000) {
+      const signal = AbortSignal.timeout(timeoutMs);
+      const boundedFetch: FetchFunction = (input, init) =>
+        fetchImplementation(input, { ...init, signal });
       const appJwt = createGitHubAppJwt(configuration.appId, configuration.privateKey);
-      const app = await requestJson(fetchImplementation, "GitHub App", `${GITHUB_API}/app`, {
+      const app = await requestJson(boundedFetch, "GitHub App", `${GITHUB_API}/app`, {
         headers: githubHeaders(appJwt),
       });
       if (app.id !== configuration.appId) {
@@ -222,9 +280,9 @@ export function createDefaultDiagnosticGateway(
       validateGitHubEvents(app.events);
 
       const installationResults = await Promise.all(
-        configuration.installations.map(async (installation) => {
+        policy.installations.map(async (installation) => {
           const tokenResponse = await requestJson(
-            fetchImplementation,
+            boundedFetch,
             `GitHub installation ${installation.id}`,
             `${GITHUB_API}/app/installations/${installation.id}/access_tokens`,
             { method: "POST", headers: githubHeaders(appJwt) },
@@ -238,21 +296,21 @@ export function createDefaultDiagnosticGateway(
           const installationToken = tokenResponse.token;
 
           const user = await requestJson(
-            fetchImplementation,
+            boundedFetch,
             "GitHub user identity",
-            `${GITHUB_API}/user/${configuration.userId}`,
+            `${GITHUB_API}/user/${policy.userId}`,
             { headers: githubHeaders(installationToken) },
           );
-          if (user.id !== configuration.userId) {
+          if (user.id !== policy.userId) {
             throw new Error(
-              `GitHub user id ${String(user.id)} does not match configured user id ${configuration.userId}.`,
+              `GitHub user id ${String(user.id)} does not match configured user id ${policy.userId}.`,
             );
           }
 
           await Promise.all(
             installation.repositories.map(async (repository) => {
               const response = await requestJson(
-                fetchImplementation,
+                boundedFetch,
                 "GitHub repository",
                 `${GITHUB_API}/repositories/${repository.id}`,
                 { headers: githubHeaders(installationToken) },
@@ -274,7 +332,7 @@ export function createDefaultDiagnosticGateway(
             login:
               typeof user.login === "string" && user.login !== ""
                 ? user.login
-                : `user ${configuration.userId}`,
+                : `user ${policy.userId}`,
             repositories: installation.repositories.map(
               (repository) =>
                 `${repository.owner}/${repository.name} (installation ${installation.id})`,
@@ -285,20 +343,23 @@ export function createDefaultDiagnosticGateway(
 
       const appName =
         typeof app.slug === "string" && app.slug !== "" ? app.slug : `app ${configuration.appId}`;
-      const login = installationResults[0]?.login ?? `user ${configuration.userId}`;
+      const login = installationResults[0]?.login ?? `user ${policy.userId}`;
       return {
-        app: `${appName}, author ${login} (${configuration.userId})`,
+        app: `${appName}, author ${login} (${policy.userId})`,
         repositories: installationResults.flatMap((result) => result.repositories).join(", "),
       };
     },
 
-    async checkCloudflare(configuration) {
+    async checkCloudflare(configuration, timeoutMs = 120_000) {
+      const signal = AbortSignal.timeout(timeoutMs);
+      const boundedFetch: FetchFunction = (input, init) =>
+        fetchImplementation(input, { ...init, signal });
       const headers = {
         Authorization: `Bearer ${configuration.apiToken}`,
         "Content-Type": "application/json",
       };
       const queueUrl = `${CLOUDFLARE_API}/accounts/${encodeURIComponent(configuration.accountId)}/queues/${encodeURIComponent(configuration.queueId)}`;
-      const response = await requestJson(fetchImplementation, "Cloudflare Queue", queueUrl, {
+      const response = await requestJson(boundedFetch, "Cloudflare Queue", queueUrl, {
         headers,
       });
       if (response.success !== true) {
@@ -321,7 +382,7 @@ export function createDefaultDiagnosticGateway(
       }
 
       const consumerResponse = await requestJson(
-        fetchImplementation,
+        boundedFetch,
         "Cloudflare Queue consumers",
         `${queueUrl}/consumers`,
         { headers },
@@ -347,7 +408,7 @@ export function createDefaultDiagnosticGateway(
         // Empty lists exercise the pull consumer's write-only acknowledgement endpoint
         // without pulling, leasing, acknowledging, or retrying a real message.
         acknowledgementResponse = await requestJson(
-          fetchImplementation,
+          boundedFetch,
           "Cloudflare Queue pull acknowledgement",
           `${queueUrl}/messages/ack`,
           {
@@ -375,6 +436,61 @@ export function createDefaultDiagnosticGateway(
           : "configured";
       return `queue ${queueName}, HTTP pull consumer ${consumerId}; token and pull acknowledgement access verified without leasing messages.`;
     },
+
+    async checkRelay(relayUrl, webhookSecret, timeoutMs) {
+      const body = "{}";
+      const signature = `sha256=${createHmac("sha256", webhookSecret).update(body).digest("hex")}`;
+      const response = await fetchImplementation(relayUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-GitHub-Delivery": "revoir-diagnostic",
+          "X-GitHub-Event": "pull_request",
+          "X-Hub-Signature-256": signature,
+        },
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (response.status !== 202) {
+        throw new Error(
+          `Relay signed policy-path check expected HTTP 202, received ${response.status}.`,
+        );
+      }
+      return `relay signature and policy path verified at ${new URL(relayUrl).host}`;
+    },
+
+    async checkPolicy(configuration, policy) {
+      const { stdout } = await processRunner(
+        "wrangler",
+        [
+          "kv",
+          "key",
+          "get",
+          `--namespace-id=${configuration.kvNamespaceId}`,
+          "policy",
+          "--remote",
+          "--text",
+        ],
+        {
+          environment: { CLOUDFLARE_ACCOUNT_ID: configuration.accountId },
+          timeout: 30_000,
+          maxBuffer: 1024 * 1024,
+        },
+      );
+      let cloud: RevoirPolicy;
+      try {
+        const { parseRevoirPolicy } = await import("@revoir/contracts");
+        cloud = parseRevoirPolicy(JSON.parse(stdout) as unknown);
+      } catch (error) {
+        throw new Error("Cloudflare KV policy is missing or invalid.", { cause: error });
+      }
+      if (JSON.stringify(cloud) !== JSON.stringify(policy)) {
+        throw new Error(
+          "Local and Cloudflare KV policies have drifted. Revocations may be repaired safely, but additions require an explicit repository add command.",
+        );
+      }
+      return `policy revision ${policy.revision}, ${configuredRepositories(policy).length} authorized repositories`;
+    },
   };
 }
 
@@ -398,9 +514,12 @@ async function capture(
 
 export async function runDiagnostics(
   configuration: RevoirConfiguration,
+  policy: RevoirPolicy,
   gateway: DiagnosticGateway = createDefaultDiagnosticGateway(),
+  authorizationEntries?: readonly RepositoryListEntry[],
+  checkService?: () => Promise<string>,
 ): Promise<DiagnosticResult[]> {
-  const [runtime, git, pi, github, cloudflare] = await Promise.all([
+  const [runtime, git, pi, github, cloudflare, relay, cloudPolicy] = await Promise.all([
     capture("runtime", "Node runtime", () => gateway.checkRuntime()),
     capture("git", "System Git", () => gateway.checkGit(configuration.timeouts.shellCommandMs)),
     capture("pi-auth", "Pi Codex authentication", () =>
@@ -408,7 +527,11 @@ export async function runDiagnostics(
     ),
     (async () => {
       try {
-        const result = await gateway.checkGitHub(configuration.github);
+        const result = await gateway.checkGitHub(
+          configuration.github,
+          policy,
+          configuration.timeouts.shellCommandMs,
+        );
         return [
           {
             id: "github",
@@ -443,11 +566,57 @@ export async function runDiagnostics(
       }
     })(),
     capture("cloudflare", "Cloudflare Queue", () =>
-      gateway.checkCloudflare(configuration.cloudflare),
+      gateway.checkCloudflare(configuration.cloudflare, configuration.timeouts.shellCommandMs),
+    ),
+    capture("relay", "Webhook relay", () =>
+      gateway.checkRelay(
+        configuration.cloudflare.relayUrl,
+        configuration.github.webhookSecret,
+        configuration.timeouts.shellCommandMs,
+      ),
+    ),
+    capture("policy", "Repository policy", () =>
+      gateway.checkPolicy(configuration.cloudflare, policy),
     ),
   ]);
 
-  return [runtime, git, pi, ...github, cloudflare];
+  const results = [runtime, git, pi, ...github, cloudflare, relay, cloudPolicy];
+  if (authorizationEntries !== undefined) {
+    results.push(repositoryAuthorizationDiagnostic(authorizationEntries));
+  }
+  if (checkService !== undefined) {
+    results.push(await capture("service", "macOS service", checkService));
+  }
+  return results;
+}
+
+export function repositoryAuthorizationDiagnostic(
+  entries: readonly RepositoryListEntry[],
+): DiagnosticResult {
+  if (entries.length === 0) {
+    return {
+      id: "authorization",
+      label: "Repository authorization",
+      status: "passed",
+      detail: "No repositories are authorized; the service is healthy and inert.",
+    };
+  }
+  const groups = new Map<string, string[]>();
+  for (const entry of entries) {
+    const names = groups.get(entry.status) ?? [];
+    names.push(`${entry.repository.owner}/${entry.repository.name}`);
+    groups.set(entry.status, names);
+  }
+  const detail = [...groups.entries()]
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(([status, names]) => `${status}: ${names.toSorted().join(", ")}`)
+    .join("; ");
+  return {
+    id: "authorization",
+    label: "Repository authorization",
+    status: entries.every(({ status }) => status === "authorized") ? "passed" : "failed",
+    detail,
+  };
 }
 
 export function diagnosticsPassed(results: readonly DiagnosticResult[]): boolean {

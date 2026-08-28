@@ -37,9 +37,13 @@ describe("launchd service definition", () => {
       executableArguments: ["/Users/test & tools/.local/bin/revoir"],
       configFile: "/Users/test & tools/.config/revoir/config.json",
       homeDir: "/Users/test & tools",
+      executablePath: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
       paths: {
         configDir: "/Users/test & tools/.config/revoir",
         configFile: "/Users/test & tools/.config/revoir/config.json",
+        policyFile: "/Users/test & tools/.config/revoir/policy.json",
+        setupCheckpointFile: "/Users/test & tools/.config/revoir/setup-checkpoint.json",
+        commandLockFile: "/Users/test & tools/.config/revoir/command.lock",
         cacheDir: "/Users/test & tools/.cache/revoir",
         stateDir: "/Users/test & tools/.local/state/revoir",
         dataDir: "/Users/test & tools/.local/share/revoir",
@@ -57,6 +61,7 @@ describe("launchd service definition", () => {
     ]);
     assert.deepEqual(definition.environment, {
       HOME: "/Users/test & tools",
+      PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
       XDG_CACHE_HOME: "/Users/test & tools/.cache",
       XDG_CONFIG_HOME: "/Users/test & tools/.config",
       XDG_DATA_HOME: "/Users/test & tools/.local/share",

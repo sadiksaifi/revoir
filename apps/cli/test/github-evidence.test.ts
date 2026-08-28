@@ -166,7 +166,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const pullRequest = await session.getPullRequest(reference, new AbortController().signal);
     const evidence = await session.getReviewEvidence(
       reference,
@@ -276,7 +281,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const evidence = await session.getReviewEvidence(
       reference,
       "2".repeat(40),
@@ -366,7 +376,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const evidence = await session.getReviewEvidence(
       reference,
       "2".repeat(40),
@@ -475,7 +490,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const evidence = await session.getReviewEvidence(
       reference,
       "2".repeat(40),
@@ -646,7 +666,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     const evidence = await session.getReviewEvidence(
       reference,
@@ -838,7 +863,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     const evidence = await session.getReviewEvidence(
       reference,
@@ -933,7 +963,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     const artifacts = (
       await session.getReviewEvidence(reference, "2".repeat(40), new AbortController().signal)
@@ -991,7 +1026,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     const artifacts = (
       await session.getReviewEvidence(reference, "2".repeat(40), new AbortController().signal)
@@ -1019,7 +1059,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await assert.rejects(
       () => session.getReviewEvidence(reference, "2".repeat(40), new AbortController().signal),
@@ -1075,7 +1120,12 @@ describe("GitHub review evidence", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const controller = new AbortController();
     const evidence = session.getReviewEvidence(reference, "2".repeat(40), controller.signal);
     const cancellation = new Error("cancel optional evidence");

@@ -872,7 +872,6 @@ index 1111111..3333333 100644
 
     assert.deepEqual(
       planFindingReconciliation(secondRun.findings, {
-        activeFingerprints: [peerFingerprint, survivingFingerprint],
         ownedOpenThreads: [
           {
             id: "THREAD_PEER",
@@ -946,7 +945,6 @@ index 1111111..3333333 100644
 
     assert.deepEqual(
       planFindingReconciliation(secondRun.findings, {
-        activeFingerprints: [survivingThread.fingerprint],
         ownedOpenThreads: [
           {
             id: "THREAD_SURVIVOR",
@@ -1016,7 +1014,6 @@ index 1111111..3333333 100644
 
     assert.deepEqual(
       planFindingReconciliation(secondRun.findings, {
-        activeFingerprints: firstRun.findings.map(({ fingerprint }) => fingerprint),
         ownedOpenThreads: firstRun.findings.map(({ fingerprint, fingerprintAliases }, index) => ({
           id: index === 0 ? "THREAD_RETAINED" : "THREAD_REMOVED",
           fingerprint,
@@ -1166,7 +1163,6 @@ index 1111111..3333333 100644
       for (const ownedOpenThreads of [threads, threads.toReversed()]) {
         assert.deepEqual(
           planFindingReconciliation(findings, {
-            activeFingerprints: firstRun.findings.map(({ fingerprint }) => fingerprint),
             ownedOpenThreads,
             runHeadShas: ["1".repeat(40)],
           }),

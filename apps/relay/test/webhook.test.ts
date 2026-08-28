@@ -4,12 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import {
-  parseReviewJob,
-  parseReviewQueueJob,
-  type ReviewJobV1,
-  type ReviewQueueJob,
-} from "@revoir/contracts";
+import { parseReviewQueueJob, type ReviewQueueJob } from "@revoir/contracts";
 
 import { createWebhookRelay, type RelayEnvironment } from "../src/index.js";
 
@@ -53,6 +48,7 @@ function signedRequest(
     signatureBody?: string;
     signatureHeader?: string | null;
     contentType?: string;
+    path?: string;
   } = {},
 ): Request {
   const signature = createHmac("sha256", WEBHOOK_SECRET)
@@ -72,39 +68,48 @@ function signedRequest(
   if (signatureHeader !== null) {
     headers.set("X-Hub-Signature-256", signatureHeader);
   }
-  const init: RequestInit = {
-    method: options.method ?? "POST",
-    headers,
-  };
+  const init: RequestInit = { method: options.method ?? "POST", headers };
   if (options.method !== "GET") {
     init.body = body;
   }
-  return new Request("https://relay.example/github/webhook", init);
+  return new Request(`https://relay.example${options.path ?? "/github/webhook"}`, init);
+}
+
+function policy(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    version: 1,
+    revision: 1,
+    userId: 42,
+    installations: [
+      {
+        id: 8,
+        repositories: [{ id: 99, owner: "owner", name: "repository" }],
+      },
+    ],
+    ...overrides,
+  });
 }
 
 function environment(
-  messages: ReviewJobV1[],
-  send: RelayEnvironment["REVIEW_QUEUE"]["send"] = async (body) => {
-    messages.push(parseReviewJob(body));
-  },
+  messages: ReviewQueueJob[],
+  options: {
+    policy?: string | null;
+    readPolicy?: RelayEnvironment["POLICY_KV"]["get"];
+    send?: RelayEnvironment["REVIEW_QUEUE"]["send"];
+  } = {},
 ): RelayEnvironment {
   return {
     GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
-    GITHUB_USER_ID: "42",
-    GITHUB_REPOSITORIES: JSON.stringify([{ id: 99, owner: "owner", name: "repository" }]),
-    REVIEW_QUEUE: { send },
-  };
-}
-
-function requestedReviewEnvironment(messages: ReviewQueueJob[]): RelayEnvironment {
-  return {
-    GITHUB_WEBHOOK_SECRET: WEBHOOK_SECRET,
-    GITHUB_USER_ID: "42",
-    GITHUB_REPOSITORIES: JSON.stringify([{ id: 99, owner: "owner", name: "repository" }]),
+    REVOIR_RELAY_VERSION: "test-relay-sha",
+    POLICY_KV: {
+      get: options.readPolicy ?? (async () => options.policy ?? policy()),
+    },
     REVIEW_QUEUE: {
-      async send(body) {
-        messages.push(parseReviewQueueJob(body));
-      },
+      send:
+        options.send ??
+        (async (body) => {
+          messages.push(parseReviewQueueJob(body));
+        }),
     },
   };
 }
@@ -130,39 +135,71 @@ async function issueCommentPayload(overrides: Record<string, unknown> = {}) {
 }
 
 describe("GitHub webhook relay", () => {
-  it("durably enqueues one versioned job for an eligible signed delivery", async () => {
-    const messages: ReviewJobV1[] = [];
+  it("durably enqueues one unified automatic job for an eligible signed delivery", async () => {
+    const messages: ReviewQueueJob[] = [];
     const worker = createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z"));
 
     const response = await worker.fetch(signedRequest(await rawFixture()), environment(messages));
 
     assert.equal(response.status, 202);
-    assert.equal(messages.length, 1);
-    assert.deepEqual(messages[0], {
-      version: 1,
-      deliveryId: "2f5f7475-33ee-4f91-9b68-0f8af72f6640",
-      installationId: 8,
-      repository: {
-        id: 99,
-        owner: "owner",
-        name: "repository",
+    assert.equal(response.headers.get("X-Revoir-Relay-Version"), "test-relay-sha");
+    assert.deepEqual(messages, [
+      {
+        version: 1,
+        deliveryId: "2f5f7475-33ee-4f91-9b68-0f8af72f6640",
+        installationId: 8,
+        repository: { id: 99, owner: "owner", name: "repository" },
+        pullRequest: { number: 17 },
+        trigger: {
+          kind: "automatic",
+          action: "synchronize",
+          authorId: 42,
+          senderId: 42,
+          baseRepositoryId: 99,
+          headRepositoryId: 99,
+          baseSha: "1".repeat(40),
+          headSha: "2".repeat(40),
+        },
+        enqueuedAt: "2026-07-29T00:00:00.000Z",
       },
-      pullRequest: {
-        number: 17,
-        authorId: 42,
-        senderId: 42,
-        baseRepositoryId: 99,
-        headRepositoryId: 99,
-        baseSha: "1".repeat(40),
-        headSha: "2".repeat(40),
-      },
-      action: "synchronize",
-      enqueuedAt: "2026-07-29T00:00:00.000Z",
-    });
+    ]);
   });
 
-  it("verifies the signature over the untouched bytes before parsing", async () => {
-    const messages: ReviewJobV1[] = [];
+  it("enqueues an authorized requested trigger using the same queue contract", async () => {
+    const messages: ReviewQueueJob[] = [];
+    const worker = createWebhookRelay(() => new Date("2026-08-05T00:00:00.000Z"));
+    const body = JSON.stringify(await issueCommentPayload());
+
+    const response = await worker.fetch(
+      signedRequest(body, {
+        deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
+        event: "issue_comment",
+      }),
+      environment(messages),
+    );
+
+    assert.equal(response.status, 202);
+    assert.deepEqual(messages, [
+      {
+        version: 1,
+        deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
+        installationId: 8,
+        repository: { id: 99, owner: "owner", name: "repository" },
+        pullRequest: { number: 17 },
+        trigger: {
+          kind: "requested",
+          source: "issue_comment",
+          commentId: 123456789,
+          senderId: 42,
+        },
+        enqueuedAt: "2026-08-05T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("verifies the signature over untouched bytes before policy reads or JSON parsing", async () => {
+    const messages: ReviewQueueJob[] = [];
+    let policyReads = 0;
     const worker = createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z"));
     const raw = await rawFixture();
     const cases = [
@@ -176,13 +213,78 @@ describe("GitHub webhook relay", () => {
     for (const request of cases) {
       // Keep each single-use request and its assertion together.
       // eslint-disable-next-line no-await-in-loop
-      assert.equal((await worker.fetch(request, environment(messages))).status, 401);
+      const response = await worker.fetch(
+        request,
+        environment(messages, {
+          readPolicy: async () => {
+            policyReads += 1;
+            return policy();
+          },
+        }),
+      );
+      assert.equal(response.status, 401);
     }
+    assert.equal(policyReads, 0);
     assert.deepEqual(messages, []);
   });
 
-  it("accepts every supported action and ignores unsupported request shapes", async () => {
-    const messages: ReviewJobV1[] = [];
+  it("reads and validates the KV policy for every eligible delivery", async () => {
+    const worker = createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z"));
+    const body = await rawFixture();
+    let policyReads = 0;
+    const messages: ReviewQueueJob[] = [];
+    const env = environment(messages, {
+      readPolicy: async (key) => {
+        assert.equal(key, "policy");
+        policyReads += 1;
+        return policy({ revision: policyReads });
+      },
+    });
+
+    assert.equal((await worker.fetch(signedRequest(body), env)).status, 202);
+    assert.equal((await worker.fetch(signedRequest(body), env)).status, 202);
+    assert.equal(policyReads, 2);
+    assert.equal(messages.length, 2);
+  });
+
+  it("fails closed when the KV policy is missing, invalid, or unavailable", async () => {
+    const worker = createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z"));
+    const body = await rawFixture();
+    const cases: RelayEnvironment["POLICY_KV"]["get"][] = [
+      async () => null,
+      async () => "not json",
+      async () => JSON.stringify({ version: 2 }),
+      async () => {
+        throw new Error("KV unavailable");
+      },
+    ];
+
+    for (const readPolicy of cases) {
+      const messages: ReviewQueueJob[] = [];
+      // Exercise one independent fail-closed policy read.
+      // eslint-disable-next-line no-await-in-loop
+      const response = await worker.fetch(
+        signedRequest(body),
+        environment(messages, { readPolicy }),
+      );
+      assert.equal(response.status, 503);
+      assert.deepEqual(messages, []);
+    }
+  });
+
+  it("keeps a valid empty policy inert and healthy", async () => {
+    const messages: ReviewQueueJob[] = [];
+    const worker = createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z"));
+    const response = await worker.fetch(
+      signedRequest(await rawFixture()),
+      environment(messages, { policy: policy({ installations: [] }) }),
+    );
+    assert.equal(response.status, 202);
+    assert.deepEqual(messages, []);
+  });
+
+  it("accepts every automatic action and ignores unsupported request shapes", async () => {
+    const messages: ReviewQueueJob[] = [];
     const worker = createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z"));
     const payload = await fixture();
     for (const action of ["opened", "reopened", "ready_for_review", "synchronize"]) {
@@ -195,7 +297,9 @@ describe("GitHub webhook relay", () => {
       assert.equal(response.status, 202);
     }
     assert.deepEqual(
-      messages.map((message) => message.action),
+      messages.map((message) =>
+        message.trigger.kind === "automatic" ? message.trigger.action : undefined,
+      ),
       ["opened", "reopened", "ready_for_review", "synchronize"],
     );
 
@@ -205,7 +309,7 @@ describe("GitHub webhook relay", () => {
       signedRequest(JSON.stringify(payload), { deliveryId: null }),
       signedRequest(JSON.stringify(payload), { contentType: "text/plain" }),
       signedRequest(JSON.stringify(payload), { method: "GET" }),
-      new Request("https://relay.example/other", { method: "POST" }),
+      signedRequest(JSON.stringify(payload), { path: "/other" }),
     ];
     for (const request of ignored) {
       // Consume each single-use request against the same observed queue.
@@ -215,38 +319,7 @@ describe("GitHub webhook relay", () => {
     assert.equal(messages.length, 4);
   });
 
-  it("enqueues an authorized ad hoc review request from a pull-request comment", async () => {
-    const messages: ReviewQueueJob[] = [];
-    const worker = createWebhookRelay(() => new Date("2026-08-05T00:00:00.000Z"));
-    const body = JSON.stringify(await issueCommentPayload());
-
-    const response = await worker.fetch(
-      signedRequest(body, {
-        deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
-        event: "issue_comment",
-      }),
-      requestedReviewEnvironment(messages),
-    );
-
-    assert.equal(response.status, 202);
-    assert.deepEqual(messages, [
-      {
-        version: 2,
-        deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
-        installationId: 8,
-        repository: { id: 99, owner: "owner", name: "repository" },
-        pullRequest: { number: 17 },
-        request: {
-          kind: "issue_comment",
-          commentId: 123456789,
-          senderId: 42,
-        },
-        enqueuedAt: "2026-08-05T00:00:00.000Z",
-      },
-    ]);
-  });
-
-  it("ignores issue-comment requests that are not exact, authorized, created PR commands", async () => {
+  it("ignores requested triggers that are not exact, authorized, created PR commands", async () => {
     const worker = createWebhookRelay(() => new Date("2026-08-05T00:00:00.000Z"));
     const original = await issueCommentPayload();
     const cases = [
@@ -266,38 +339,24 @@ describe("GitHub webhook relay", () => {
       // eslint-disable-next-line no-await-in-loop
       const response = await worker.fetch(
         signedRequest(JSON.stringify(payload), { event: "issue_comment" }),
-        requestedReviewEnvironment(messages),
+        environment(messages),
       );
       assert.equal(response.status, 202);
       assert.deepEqual(messages, []);
     }
   });
 
-  it("rejects every configured identity and repository policy violation", async () => {
+  it("rejects identity, installation, repository, draft, state, and fork violations", async () => {
     const worker = createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z"));
     const original = await fixture();
     const rejected = [
+      { ...original, installation: { id: 9 } },
       { ...original, sender: { id: 43 } },
-      {
-        ...original,
-        pull_request: { ...original.pull_request, user: { id: 43 } },
-      },
-      {
-        ...original,
-        pull_request: { ...original.pull_request, draft: true },
-      },
-      {
-        ...original,
-        pull_request: { ...original.pull_request, state: "closed" },
-      },
-      {
-        ...original,
-        repository: { ...original.repository, id: 100 },
-      },
-      {
-        ...original,
-        repository: { ...original.repository, full_name: "other/repository" },
-      },
+      { ...original, pull_request: { ...original.pull_request, user: { id: 43 } } },
+      { ...original, pull_request: { ...original.pull_request, draft: true } },
+      { ...original, pull_request: { ...original.pull_request, state: "closed" } },
+      { ...original, repository: { ...original.repository, id: 100 } },
+      { ...original, repository: { ...original.repository, full_name: "other/repository" } },
       {
         ...original,
         pull_request: {
@@ -312,16 +371,13 @@ describe("GitHub webhook relay", () => {
         ...original,
         pull_request: {
           ...original.pull_request,
-          head: {
-            ...original.pull_request.head,
-            repo: { id: 100, full_name: "fork/repository" },
-          },
+          head: { ...original.pull_request.head, repo: { id: 100, full_name: "fork/repository" } },
         },
       },
     ];
 
     for (const payload of rejected) {
-      const messages: ReviewJobV1[] = [];
+      const messages: ReviewQueueJob[] = [];
       // Isolate one policy violation per request and queue.
       // eslint-disable-next-line no-await-in-loop
       const response = await worker.fetch(
@@ -334,7 +390,7 @@ describe("GitHub webhook relay", () => {
   });
 
   it("acknowledges an eligible delivery only after durable publication", async () => {
-    const messages: ReviewJobV1[] = [];
+    const messages: ReviewQueueJob[] = [];
     const worker = createWebhookRelay(() => new Date("2026-07-29T00:00:00.000Z"));
     let release!: () => void;
     const published = new Promise<void>((resolve) => {
@@ -344,9 +400,11 @@ describe("GitHub webhook relay", () => {
     const response = worker
       .fetch(
         signedRequest(await rawFixture()),
-        environment(messages, async (body) => {
-          messages.push(parseReviewJob(body));
-          await published;
+        environment(messages, {
+          send: async (body) => {
+            messages.push(parseReviewQueueJob(body));
+            await published;
+          },
         }),
       )
       .then((value) => {
@@ -365,8 +423,10 @@ describe("GitHub webhook relay", () => {
       (
         await worker.fetch(
           signedRequest(await rawFixture()),
-          environment(messages, async () => {
-            throw new Error("queue unavailable");
+          environment(messages, {
+            send: async () => {
+              throw new Error("queue unavailable");
+            },
           }),
         )
       ).status,

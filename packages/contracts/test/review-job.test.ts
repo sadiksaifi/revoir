@@ -4,23 +4,19 @@ import { describe, it } from "node:test";
 import {
   REVIEW_JOB_ACTIONS,
   ReviewJobSchemaError,
-  parseRequestedReviewJob,
-  parseReviewJob,
   parseReviewQueueJob,
 } from "../src/review-job.js";
 
-function reviewJob() {
+function automaticReviewJob() {
   return {
     version: 1,
     deliveryId: "2f5f7475-33ee-4f91-9b68-0f8af72f6640",
     installationId: 8,
-    repository: {
-      id: 99,
-      owner: "owner",
-      name: "repository",
-    },
-    pullRequest: {
-      number: 17,
+    repository: { id: 99, owner: "owner", name: "repository" },
+    pullRequest: { number: 17 },
+    trigger: {
+      kind: "automatic",
+      action: "synchronize",
       authorId: 42,
       senderId: 42,
       baseRepositoryId: 99,
@@ -28,26 +24,20 @@ function reviewJob() {
       baseSha: "1".repeat(40),
       headSha: "2".repeat(40),
     },
-    action: "synchronize",
     enqueuedAt: "2026-07-29T00:00:00.000Z",
   };
 }
 
 function requestedReviewJob() {
   return {
-    version: 2,
+    version: 1,
     deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
     installationId: 8,
-    repository: {
-      id: 99,
-      owner: "owner",
-      name: "repository",
-    },
-    pullRequest: {
-      number: 17,
-    },
-    request: {
-      kind: "issue_comment",
+    repository: { id: 99, owner: "owner", name: "repository" },
+    pullRequest: { number: 17 },
+    trigger: {
+      kind: "requested",
+      source: "issue_comment",
       commentId: 123456789,
       senderId: 42,
     },
@@ -55,136 +45,145 @@ function requestedReviewJob() {
   };
 }
 
-describe("review job contract v1", () => {
-  it("round-trips a complete job across JSON and structured clone", () => {
-    const value = reviewJob();
-
-    assert.deepEqual(parseReviewJob(JSON.stringify(structuredClone(value))), value);
+describe("review queue job contract v1", () => {
+  it("round-trips automatic and requested triggers across JSON and structured clone", () => {
+    for (const value of [automaticReviewJob(), requestedReviewJob()]) {
+      assert.deepEqual(parseReviewQueueJob(JSON.stringify(structuredClone(value))), value);
+    }
   });
 
-  it("accepts exactly the supported pull-request trigger actions", () => {
+  it("accepts exactly the supported automatic actions", () => {
     for (const action of REVIEW_JOB_ACTIONS) {
-      assert.equal(parseReviewJob({ ...reviewJob(), action }).action, action);
+      const value = automaticReviewJob();
+      value.trigger.action = action;
+      assert.equal(parseReviewQueueJob(value).trigger.kind, "automatic");
     }
-    assert.throws(() => parseReviewJob({ ...reviewJob(), action: "closed" }), ReviewJobSchemaError);
+    const unsupported = automaticReviewJob();
+    unsupported.trigger.action = "closed";
+    assert.throws(() => parseReviewQueueJob(unsupported), ReviewJobSchemaError);
   });
 
-  it("requires every field and rejects unknown contract fields", () => {
-    for (const field of Object.keys(reviewJob())) {
-      const candidate = structuredClone(reviewJob()) as Record<string, unknown>;
-      delete candidate[field];
-      assert.throws(() => parseReviewJob(candidate), ReviewJobSchemaError);
-    }
-    for (const field of Object.keys(reviewJob().repository)) {
-      const candidate = structuredClone(reviewJob());
-      delete (candidate.repository as Record<string, unknown>)[field];
-      assert.throws(() => parseReviewJob(candidate), ReviewJobSchemaError);
-    }
-    for (const field of Object.keys(reviewJob().pullRequest)) {
-      const candidate = structuredClone(reviewJob());
-      delete (candidate.pullRequest as Record<string, unknown>)[field];
-      assert.throws(() => parseReviewJob(candidate), ReviewJobSchemaError);
+  it("requires every common and trigger field and rejects unknown fields", () => {
+    for (const value of [automaticReviewJob(), requestedReviewJob()]) {
+      for (const field of Object.keys(value)) {
+        const candidate = structuredClone(value) as Record<string, unknown>;
+        delete candidate[field];
+        assert.throws(() => parseReviewQueueJob(candidate), ReviewJobSchemaError);
+      }
+      for (const field of Object.keys(value.repository)) {
+        const candidate = structuredClone(value);
+        delete (candidate.repository as Record<string, unknown>)[field];
+        assert.throws(() => parseReviewQueueJob(candidate), ReviewJobSchemaError);
+      }
+      for (const field of Object.keys(value.pullRequest)) {
+        const candidate = structuredClone(value);
+        delete (candidate.pullRequest as Record<string, unknown>)[field];
+        assert.throws(() => parseReviewQueueJob(candidate), ReviewJobSchemaError);
+      }
+      for (const field of Object.keys(value.trigger)) {
+        const candidate = structuredClone(value);
+        delete (candidate.trigger as Record<string, unknown>)[field];
+        assert.throws(() => parseReviewQueueJob(candidate), ReviewJobSchemaError);
+      }
     }
 
-    assert.throws(() => parseReviewJob({ ...reviewJob(), retryCount: 1 }), ReviewJobSchemaError);
     assert.throws(
-      () =>
-        parseReviewJob({
-          ...reviewJob(),
-          repository: { ...reviewJob().repository, fullName: "owner/repository" },
-        }),
+      () => parseReviewQueueJob({ ...automaticReviewJob(), retryCount: 1 }),
       ReviewJobSchemaError,
     );
     assert.throws(
       () =>
-        parseReviewJob({
-          ...reviewJob(),
-          pullRequest: { ...reviewJob().pullRequest, draft: false },
+        parseReviewQueueJob({
+          ...automaticReviewJob(),
+          trigger: { ...automaticReviewJob().trigger, source: "issue_comment" },
         }),
       ReviewJobSchemaError,
     );
   });
 
-  it("rejects malformed versions, identities, revisions, names, delivery IDs, and timestamps", () => {
+  it("rejects malformed common identities, names, delivery IDs, and timestamps", () => {
     const cases = [
       "not json",
       null,
-      { ...reviewJob(), version: 2 },
-      { ...reviewJob(), deliveryId: "bad delivery" },
-      { ...reviewJob(), installationId: 0 },
-      { ...reviewJob(), repository: { ...reviewJob().repository, id: 1.5 } },
-      { ...reviewJob(), repository: { ...reviewJob().repository, owner: "bad owner" } },
-      { ...reviewJob(), repository: { ...reviewJob().repository, name: "bad/name" } },
-      { ...reviewJob(), pullRequest: { ...reviewJob().pullRequest, number: -1 } },
-      { ...reviewJob(), pullRequest: { ...reviewJob().pullRequest, authorId: "42" } },
-      { ...reviewJob(), pullRequest: { ...reviewJob().pullRequest, senderId: 0 } },
+      { ...automaticReviewJob(), version: 2 },
+      { ...automaticReviewJob(), deliveryId: "bad delivery" },
+      { ...automaticReviewJob(), installationId: 0 },
+      { ...automaticReviewJob(), repository: { ...automaticReviewJob().repository, id: 1.5 } },
       {
-        ...reviewJob(),
-        pullRequest: { ...reviewJob().pullRequest, baseRepositoryId: 100 },
+        ...automaticReviewJob(),
+        repository: { ...automaticReviewJob().repository, owner: "bad owner" },
       },
       {
-        ...reviewJob(),
-        pullRequest: { ...reviewJob().pullRequest, headRepositoryId: 100 },
+        ...automaticReviewJob(),
+        repository: { ...automaticReviewJob().repository, name: "bad/name" },
       },
-      { ...reviewJob(), pullRequest: { ...reviewJob().pullRequest, baseSha: "ABC" } },
-      { ...reviewJob(), pullRequest: { ...reviewJob().pullRequest, headSha: "A".repeat(40) } },
-      { ...reviewJob(), enqueuedAt: "yesterday" },
-      { ...reviewJob(), enqueuedAt: "2026-07-29T00:00:00Z" },
+      { ...automaticReviewJob(), pullRequest: { number: -1 } },
+      { ...automaticReviewJob(), enqueuedAt: "yesterday" },
+      { ...automaticReviewJob(), enqueuedAt: "2026-07-29T00:00:00Z" },
     ];
 
     for (const candidate of cases) {
-      assert.throws(() => parseReviewJob(candidate), ReviewJobSchemaError);
+      assert.throws(() => parseReviewQueueJob(candidate), ReviewJobSchemaError);
     }
   });
-});
 
-describe("requested review job contract v2", () => {
-  it("round-trips an issue-comment request and dispatches both contract versions", () => {
-    const requested = requestedReviewJob();
-
-    assert.deepEqual(
-      parseRequestedReviewJob(JSON.stringify(structuredClone(requested))),
-      requested,
-    );
-    assert.deepEqual(parseReviewQueueJob(requested), requested);
-    assert.deepEqual(parseReviewQueueJob(reviewJob()), reviewJob());
-  });
-
-  it("requires every field and rejects unknown or malformed request fields", () => {
-    for (const field of Object.keys(requestedReviewJob())) {
-      const candidate = structuredClone(requestedReviewJob()) as Record<string, unknown>;
-      delete candidate[field];
-      assert.throws(() => parseRequestedReviewJob(candidate), ReviewJobSchemaError);
-    }
-    for (const field of Object.keys(requestedReviewJob().request)) {
-      const candidate = structuredClone(requestedReviewJob());
-      delete (candidate.request as Record<string, unknown>)[field];
-      assert.throws(() => parseRequestedReviewJob(candidate), ReviewJobSchemaError);
-    }
-
+  it("rejects malformed automatic trigger identities and revisions", () => {
     const cases = [
-      { ...requestedReviewJob(), version: 1 },
-      { ...requestedReviewJob(), retryCount: 1 },
-      {
-        ...requestedReviewJob(),
-        pullRequest: { ...requestedReviewJob().pullRequest, headSha: "2".repeat(40) },
-      },
-      {
-        ...requestedReviewJob(),
-        request: { ...requestedReviewJob().request, kind: "pull_request_review" },
-      },
-      {
-        ...requestedReviewJob(),
-        request: { ...requestedReviewJob().request, commentId: 0 },
-      },
-      {
-        ...requestedReviewJob(),
-        request: { ...requestedReviewJob().request, senderId: "42" },
-      },
+      { ...automaticReviewJob().trigger, authorId: "42" },
+      { ...automaticReviewJob().trigger, senderId: 0 },
+      { ...automaticReviewJob().trigger, baseRepositoryId: 100 },
+      { ...automaticReviewJob().trigger, headRepositoryId: 100 },
+      { ...automaticReviewJob().trigger, baseSha: "ABC" },
+      { ...automaticReviewJob().trigger, headSha: "A".repeat(40) },
     ];
-    for (const candidate of cases) {
-      assert.throws(() => parseRequestedReviewJob(candidate), ReviewJobSchemaError);
+    for (const trigger of cases) {
+      assert.throws(
+        () => parseReviewQueueJob({ ...automaticReviewJob(), trigger }),
+        ReviewJobSchemaError,
+      );
     }
-    assert.throws(() => parseReviewQueueJob({ ...reviewJob(), version: 3 }), ReviewJobSchemaError);
+  });
+
+  it("rejects malformed requested trigger fields", () => {
+    const cases = [
+      { ...requestedReviewJob().trigger, source: "pull_request_review" },
+      { ...requestedReviewJob().trigger, commentId: 0 },
+      { ...requestedReviewJob().trigger, senderId: "42" },
+    ];
+    for (const trigger of cases) {
+      assert.throws(
+        () => parseReviewQueueJob({ ...requestedReviewJob(), trigger }),
+        ReviewJobSchemaError,
+      );
+    }
+  });
+
+  it("rejects both legacy queue schemas", () => {
+    const automatic = automaticReviewJob();
+    const requested = requestedReviewJob();
+    assert.throws(
+      () =>
+        parseReviewQueueJob({
+          ...automatic,
+          pullRequest: { ...automatic.pullRequest, ...automatic.trigger },
+          action: automatic.trigger.action,
+          trigger: undefined,
+        }),
+      ReviewJobSchemaError,
+    );
+    assert.throws(
+      () =>
+        parseReviewQueueJob({
+          ...requested,
+          version: 2,
+          request: {
+            kind: requested.trigger.source,
+            commentId: requested.trigger.commentId,
+            senderId: requested.trigger.senderId,
+          },
+          trigger: undefined,
+        }),
+      ReviewJobSchemaError,
+    );
   });
 });

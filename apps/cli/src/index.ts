@@ -1,22 +1,38 @@
 export {
   createConfiguration,
-  configuredRepositories,
   DEFAULT_MODEL,
   DEFAULT_REASONING,
-  installationForRepository,
+  type CloudflareConfiguration,
   type GitHubConfiguration,
-  type GitHubInstallation,
   type ReasoningLevel,
-  type RepositoryIdentity,
   type RevoirConfiguration,
   validateConfiguration,
 } from "./config/schema.js";
+export {
+  configuredRepositories,
+  createEmptyPolicy,
+  installationForRepository,
+  intersectPolicies,
+  loadPolicy,
+  repositoryInPolicy,
+  type GitHubInstallationPolicy,
+  type RepositoryIdentity,
+  type RevoirPolicy,
+  withRepository,
+  withoutRepository,
+  writePolicy,
+} from "./config/policy.js";
 export {
   assertConfigurationPermissions,
   loadConfiguration,
   writeConfiguration,
 } from "./config/store.js";
 export { type ApplicationPaths, resolveApplicationPaths } from "./config/paths.js";
+export {
+  acquireCommandLock,
+  ConcurrentCommandError,
+  withCommandLock,
+} from "./config/command-lock.js";
 export {
   createDefaultDiagnosticGateway,
   type DiagnosticGateway,
@@ -26,6 +42,13 @@ export {
   validateNodeRuntime,
 } from "./diagnostics.js";
 export { SecretRedactor } from "./redaction.js";
+export {
+  FilePendingRepositoryStore,
+  inferCurrentRepository,
+  parseGitHubRemote,
+  parseRepositoryReference,
+  RepositoryManager,
+} from "./repository.js";
 export { CloudflareQueueClient, type QueueDelivery } from "./queue/client.js";
 export {
   FileReviewRequestCompletionStore,

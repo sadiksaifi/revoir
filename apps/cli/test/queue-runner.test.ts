@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
 import type { QueueDelivery } from "../src/queue/client.js";
 import type {
@@ -20,25 +21,21 @@ import { WorkspacePreparationError } from "../src/review/workspace.js";
 import { TEST_PRIVATE_KEY } from "./helpers.js";
 
 function configuration(timeouts?: { reviewMs?: number; shellCommandMs?: number }) {
-  return createConfiguration({
+  const value = createConfiguration({
+    service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
     github: {
-      userId: 42,
       appId: 7,
+      appSlug: "revoir-test",
       privateKey: TEST_PRIVATE_KEY,
-      installations: [
-        {
-          id: 8,
-          repositories: [{ id: 99, owner: "owner", name: "repository" }],
-        },
-        {
-          id: 9,
-          repositories: [{ id: 100, owner: "other", name: "second" }],
-        },
-      ],
+      webhookSecret: "test-webhook-secret",
     },
     cloudflare: {
       accountId: "account-id",
       queueId: "queue-id",
+      queueName: "revoir-review-jobs",
+      kvNamespaceId: "kv-namespace",
+      workerName: "revoir-relay",
+      relayUrl: "https://revoir-relay.example.workers.dev/github/webhook",
       apiToken: "queue-token",
     },
     paths: {
@@ -48,6 +45,14 @@ function configuration(timeouts?: { reviewMs?: number; shellCommandMs?: number }
     },
     ...(timeouts === undefined ? {} : { timeouts }),
   });
+  const first = withRepository({ version: 1, revision: 0, userId: 42, installations: [] }, 8, {
+    id: 99,
+    owner: "owner",
+    name: "repository",
+  });
+  return Object.assign(value, {
+    policy: withRepository(first, 9, { id: 100, owner: "other", name: "second" }),
+  });
 }
 
 function reviewJob(overrides: Record<string, unknown> = {}) {
@@ -56,8 +61,10 @@ function reviewJob(overrides: Record<string, unknown> = {}) {
     deliveryId: "2f5f7475-33ee-4f91-9b68-0f8af72f6640",
     installationId: 8,
     repository: { id: 99, owner: "owner", name: "repository" },
-    pullRequest: {
-      number: 17,
+    pullRequest: { number: 17 },
+    trigger: {
+      kind: "automatic",
+      action: "synchronize",
       authorId: 42,
       senderId: 42,
       baseRepositoryId: 99,
@@ -65,7 +72,6 @@ function reviewJob(overrides: Record<string, unknown> = {}) {
       baseSha: "1".repeat(40),
       headSha: "2".repeat(40),
     },
-    action: "synchronize",
     enqueuedAt: "2026-07-29T00:00:00.000Z",
     ...overrides,
   };
@@ -73,13 +79,14 @@ function reviewJob(overrides: Record<string, unknown> = {}) {
 
 function requestedReviewJob(overrides: Record<string, unknown> = {}) {
   return {
-    version: 2,
+    version: 1,
     deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
     installationId: 8,
     repository: { id: 99, owner: "owner", name: "repository" },
     pullRequest: { number: 17 },
-    request: {
-      kind: "issue_comment",
+    trigger: {
+      kind: "requested",
+      source: "issue_comment",
       commentId: 123456789,
       senderId: 42,
     },
@@ -144,6 +151,38 @@ class MemoryReviewRequestCompletionStore implements ReviewRequestCompletionStore
 }
 
 describe("queue review runner", () => {
+  it("rejects a queued job after current cloud policy revokes it", async () => {
+    let reviewed = false;
+    let acknowledged = false;
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return delivery("cloud-revoked", reviewJob());
+        },
+        async acknowledge() {
+          acknowledged = true;
+        },
+        async retry() {},
+      },
+      {
+        async review() {
+          reviewed = true;
+          throw new Error("A cloud-revoked job must not start review work.");
+        },
+      },
+      silentFailureReporter,
+      new MemoryOperationalFailureStore(),
+      undefined,
+      new MemoryReviewRequestCompletionStore(),
+      async () => createEmptyPolicy(42),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(acknowledged, true);
+    assert.equal(reviewed, false);
+  });
+
   it("reviews an authorized issue-comment request at the latest eligible head", async () => {
     const deliveries = [
       delivery("requested", requestedReviewJob()),
@@ -157,8 +196,8 @@ describe("queue review runner", () => {
         "unauthorized",
         requestedReviewJob({
           deliveryId: "5c8efc84-c42f-47e1-91c2-bd64a36ec817",
-          request: {
-            ...requestedReviewJob().request,
+          trigger: {
+            ...requestedReviewJob().trigger,
             senderId: 43,
           },
         }),
@@ -651,8 +690,8 @@ describe("queue review runner", () => {
           deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
           installationId: 9,
           repository: { id: 100, owner: "other", name: "second" },
-          pullRequest: {
-            ...reviewJob().pullRequest,
+          trigger: {
+            ...reviewJob().trigger,
             baseRepositoryId: 100,
             headRepositoryId: 100,
           },
@@ -845,6 +884,62 @@ describe("queue review runner", () => {
     );
   });
 
+  it("bounds repeated policy-load failures and acknowledges the third delivery", async () => {
+    const deliveries = [1, 2, 3].map((attempt) =>
+      delivery(`lease-policy-${attempt}`, reviewJob(), attempt),
+    );
+    const acknowledgements: string[] = [];
+    const retries: Array<{ leaseId: string; delaySeconds: number }> = [];
+    const queue: QueueClient = {
+      async pullOne() {
+        return deliveries.shift();
+      },
+      async acknowledge(leaseId) {
+        acknowledgements.push(leaseId);
+      },
+      async retry(leaseId, delaySeconds) {
+        retries.push({ leaseId, delaySeconds });
+      },
+    };
+    const reviews: ManualReviewService = {
+      async review() {
+        assert.fail("An unavailable policy must not start a review.");
+      },
+    };
+    const reportedAttempts: number[] = [];
+    const reporter: ReviewFailureReporter = {
+      async report(_reference, _error, attempt) {
+        reportedAttempts.push(attempt);
+        throw new Error("policy is still unavailable to failure reporting");
+      },
+    };
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviews,
+      reporter,
+      failures,
+      undefined,
+      undefined,
+      async () => {
+        throw new Error("cloud policy unavailable");
+      },
+    );
+
+    await runner.consumeOne();
+    await runner.consumeOne();
+    await runner.consumeOne();
+
+    assert.deepEqual(retries, [
+      { leaseId: "lease-policy-1", delaySeconds: 30 },
+      { leaseId: "lease-policy-2", delaySeconds: 120 },
+    ]);
+    assert.deepEqual(acknowledgements, ["lease-policy-3"]);
+    assert.deepEqual(reportedAttempts, [1, 2, 3]);
+    assert.equal(failures.failures.size, 0);
+  });
+
   it("acknowledges a successful third attempt after two reported operational failures", async () => {
     const deliveries = [1, 2, 3].map((attempt) =>
       delivery(`lease-${attempt}`, reviewJob(), attempt),
@@ -999,6 +1094,61 @@ describe("queue review runner", () => {
     controller.abort(cancellation);
 
     await assert.rejects(consumption, cancellation);
+  });
+
+  it("propagates daemon cancellation while effective policy is loading", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("daemon stopped during policy loading");
+    let markPolicyStarted: (() => void) | undefined;
+    const policyStarted = new Promise<void>((resolve) => {
+      markPolicyStarted = resolve;
+    });
+    let policySignal: AbortSignal | undefined;
+    const queue: QueueClient = {
+      async pullOne() {
+        return delivery("lease-policy-cancelled", reviewJob());
+      },
+      async acknowledge() {
+        assert.fail("Cancellation must leave policy loading unsettled for redelivery.");
+      },
+      async retry() {
+        assert.fail("Cancellation must not consume a policy-load retry.");
+      },
+    };
+    const reviews: ManualReviewService = {
+      async review() {
+        assert.fail("A cancelled policy load must not begin a review.");
+      },
+    };
+    const reporter: ReviewFailureReporter = {
+      async report() {
+        assert.fail("Daemon cancellation is not a policy-load failure.");
+      },
+    };
+    const consumption = new QueueReviewRunner(
+      configuration(),
+      queue,
+      reviews,
+      reporter,
+      new MemoryOperationalFailureStore(),
+      undefined,
+      undefined,
+      async (signal?: AbortSignal) => {
+        policySignal = signal;
+        markPolicyStarted?.();
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    ).consumeOne(controller.signal);
+    await policyStarted;
+    controller.abort(cancellation);
+
+    await assert.rejects(
+      settleWithin(consumption, "daemon cancellation did not stop policy loading"),
+      cancellation,
+    );
+    assert.equal(policySignal, controller.signal);
   });
 
   it("does not let transport redeliveries consume the operational failure budget", async () => {

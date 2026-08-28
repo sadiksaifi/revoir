@@ -19,9 +19,7 @@ export interface OwnedFindingThread extends PriorFindingIdentity {
 }
 
 export interface PriorReviewState {
-  readonly activeFingerprints: readonly string[];
   readonly bodyFindings?: readonly PriorFindingIdentity[];
-  readonly bodyStateMigrationRequired?: boolean;
   readonly ownedOpenThreads: readonly OwnedFindingThread[];
   readonly runHeadShas: readonly string[];
 }
@@ -125,7 +123,7 @@ function identitySnapshot(identities: readonly PriorFindingIdentity[]): string {
 }
 
 interface MatchablePriorIdentity extends PriorFindingIdentity {
-  readonly source: "body" | "thread" | "legacy";
+  readonly source: "body" | "thread";
   readonly threadId?: string;
 }
 
@@ -145,23 +143,12 @@ function priorFindingIdentities(prior: PriorReviewState): MatchablePriorIdentity
         : { fingerprint, aliases, source: "thread", threadId: id },
     );
   }
-  for (const fingerprint of prior.activeFingerprints) {
-    if (identities.some((identity) => identity.fingerprint === fingerprint)) {
-      continue;
-    }
-    identities.push({ fingerprint, source: "legacy" });
-  }
   return identities;
 }
 
 interface IndexedIdentity<T extends PriorFindingIdentity> {
   readonly index: number;
   readonly identity: T;
-}
-
-function identitiesIntersect(left: PriorFindingIdentity, right: PriorFindingIdentity): boolean {
-  const rightFingerprints = identityFingerprints(right);
-  return [...identityFingerprints(left)].some((fingerprint) => rightFingerprints.has(fingerprint));
 }
 
 function compareCurrentIdentity(
@@ -327,16 +314,13 @@ function matchFindingIdentities(
   const semanticFingerprints = [...currentGroups.keys()].toSorted();
   for (const [index, identity] of prior.entries()) {
     const tokens = identityFingerprints(identity);
-    // A prior identity may participate only when its persisted aliases identify one semantic
-    // group. Legacy records without that alias can still migrate through one unique token overlap.
-    let possibleGroups = semanticFingerprints.filter((fingerprint) => tokens.has(fingerprint));
-    if (possibleGroups.length === 0) {
-      possibleGroups = semanticFingerprints.filter((fingerprint) =>
+    const possibleGroups = semanticFingerprints.filter(
+      (fingerprint) =>
+        tokens.has(fingerprint) ||
         currentGroups
           .get(fingerprint)!
-          .some(({ identity: currentIdentity }) => identitiesIntersect(currentIdentity, identity)),
-      );
-    }
+          .some(({ identity: currentIdentity }) => tokens.has(currentIdentity.fingerprint)),
+    );
     if (possibleGroups.length !== 1) {
       continue;
     }
@@ -490,9 +474,8 @@ export function planFindingReconciliation(
     ...(fingerprintAliases === undefined ? {} : { aliases: fingerprintAliases }),
   }));
   const bodyStateChanged =
-    prior.bodyStateMigrationRequired === true ||
-    (prior.bodyFindings !== undefined &&
-      identitySnapshot(currentBodyState) !== identitySnapshot(priorBodyFindings));
+    prior.bodyFindings !== undefined &&
+    identitySnapshot(currentBodyState) !== identitySnapshot(priorBodyFindings);
 
   return {
     netNewFindings: findings.filter((_finding, index) => !matches.currentMatches.has(index)),

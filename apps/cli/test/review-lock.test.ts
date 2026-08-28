@@ -144,12 +144,12 @@ describe("manual review process lock", () => {
     await lease.release();
   });
 
-  it("keeps legacy and unverified lock owners when their PID is still live", async () => {
+  it("keeps an unverified lock owner when its PID is still live", async () => {
     const stateDirectory = await temporaryStateDirectory();
     const lockPath = join(stateDirectory, "manual-review.lock");
-    const legacyOwner = { pid: process.pid, owner: "legacy-live-owner" };
+    const unverifiedOwner = { pid: process.pid, owner: "unverified-live-owner" };
     await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-    await writeFile(lockPath, `${JSON.stringify(legacyOwner)}\n`, { mode: 0o600 });
+    await writeFile(lockPath, `${JSON.stringify(unverifiedOwner)}\n`, { mode: 0o600 });
 
     const liveWithoutBirth = new Map<number, ProcessIdentity>([
       [process.pid, { kind: "alive", processBirth: undefined }],
@@ -158,7 +158,7 @@ describe("manual review process lock", () => {
       () => deterministicLock(stateDirectory, liveWithoutBirth).acquire(),
       ReviewInProgressError,
     );
-    assert.deepEqual(JSON.parse(await readFile(lockPath, "utf8")), legacyOwner);
+    assert.deepEqual(JSON.parse(await readFile(lockPath, "utf8")), unverifiedOwner);
 
     await writeFile(
       lockPath,

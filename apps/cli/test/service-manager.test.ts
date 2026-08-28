@@ -7,6 +7,7 @@ import { afterEach, describe, it } from "node:test";
 import {
   LaunchdServiceManager,
   resolveServiceExecutableArguments,
+  resolveServiceExecutablePath,
   type LaunchctlGateway,
   type LaunchctlInspection,
 } from "../src/service/manager.js";
@@ -75,6 +76,9 @@ async function createFixture(): Promise<{
       paths: {
         configDir: join(homeDir, ".config", "revoir"),
         configFile,
+        policyFile: join(homeDir, ".config", "revoir", "policy.json"),
+        setupCheckpointFile: join(homeDir, ".config", "revoir", "setup-checkpoint.json"),
+        commandLockFile: join(homeDir, ".config", "revoir", "command.lock"),
         cacheDir: join(homeDir, ".cache", "revoir"),
         stateDir: join(homeDir, ".local", "state", "revoir"),
         dataDir: join(homeDir, ".local", "share", "revoir"),
@@ -198,6 +202,16 @@ describe("launchd service manager", () => {
       detail:
         'launchd reports the service as "running" without a process identifier. Run "revoir stop", then "revoir start"; reinstall if the problem persists.',
     });
+  });
+
+  it("preserves the setup PATH while appending deterministic service fallbacks", () => {
+    assert.equal(
+      resolveServiceExecutablePath(
+        "/Users/test",
+        "/Users/test/.local/share/mise/shims:/custom/wrangler/bin:/usr/bin",
+      ),
+      "/Users/test/.local/share/mise/shims:/custom/wrangler/bin:/usr/bin:/Users/test/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/sbin:/sbin",
+    );
   });
 
   it("refuses an unavailable executable before mutating launchd or the plist", async () => {

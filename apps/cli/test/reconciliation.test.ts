@@ -37,10 +37,13 @@ describe("finding reconciliation", () => {
 
     assert.deepEqual(
       planFindingReconciliation([unchanged, changed], {
-        activeFingerprints: ["a".repeat(64)],
         ownedOpenThreads: [
           { id: "THREAD_Z", fingerprint: "c".repeat(64) },
-          { id: "THREAD_A", fingerprint: "a".repeat(64) },
+          {
+            id: "THREAD_A",
+            fingerprint: "a".repeat(64),
+            aliases: [findingFingerprint(unchanged)],
+          },
           { id: "THREAD_B", fingerprint: "d".repeat(64) },
         ],
         runHeadShas: ["1".repeat(40)],
@@ -48,6 +51,26 @@ describe("finding reconciliation", () => {
       {
         netNewFindings: [changed],
         obsoleteThreadIds: ["THREAD_B", "THREAD_Z"],
+        currentBodyFindings: [],
+        bodyStateChanged: false,
+      },
+    );
+  });
+
+  it("does not migrate an aliasless prior finding through token overlap", () => {
+    const current = {
+      ...finding(token("a"), 40),
+      fingerprintAliases: [token("b")],
+    };
+
+    assert.deepEqual(
+      planFindingReconciliation([current], {
+        ownedOpenThreads: [{ id: "THREAD_OLD", fingerprint: token("b") }],
+        runHeadShas: [],
+      }),
+      {
+        netNewFindings: [current],
+        obsoleteThreadIds: ["THREAD_OLD"],
         currentBodyFindings: [],
         bodyStateChanged: false,
       },
@@ -84,7 +107,6 @@ describe("finding reconciliation", () => {
         [removedThread, retainedThread],
       ]) {
         const plan = planFindingReconciliation(findings, {
-          activeFingerprints: [token("a"), token("b")],
           ownedOpenThreads,
           runHeadShas: ["1".repeat(40)],
         });
@@ -110,7 +132,6 @@ describe("finding reconciliation", () => {
 
     assert.deepEqual(
       planFindingReconciliation([contextual, exact, stable], {
-        activeFingerprints: [token("a"), token("b"), token("d")],
         bodyFindings: [
           {
             fingerprint: token("b"),
@@ -145,7 +166,6 @@ describe("finding reconciliation", () => {
     const second = finding(token("b"), 5);
     const semantic = findingFingerprint(first);
     const oneToMany = planFindingReconciliation([second, first], {
-      activeFingerprints: [token("d")],
       ownedOpenThreads: [
         {
           id: "THREAD_SINGLE",
@@ -159,7 +179,6 @@ describe("finding reconciliation", () => {
     assert.deepEqual(oneToMany.obsoleteThreadIds, []);
 
     const manyToOne = planFindingReconciliation([finding(token("c"), 8)], {
-      activeFingerprints: [token("d"), token("e")],
       ownedOpenThreads: [
         {
           id: "THREAD_HIGHER",
@@ -185,7 +204,6 @@ describe("finding reconciliation", () => {
 
     assert.deepEqual(
       planFindingReconciliation([second, first], {
-        activeFingerprints: [token("c"), token("d")],
         ownedOpenThreads: [
           { id: "THREAD_D", fingerprint: token("d"), aliases: [semantic] },
           { id: "THREAD_C", fingerprint: token("c"), aliases: [semantic] },
@@ -242,7 +260,6 @@ describe("finding reconciliation", () => {
         [priorE, priorD],
       ]) {
         const expansion = planFindingReconciliation(findings, {
-          activeFingerprints: [token("d"), token("e")],
           ownedOpenThreads,
           runHeadShas: ["1".repeat(40)],
         });
@@ -252,7 +269,6 @@ describe("finding reconciliation", () => {
     }
 
     const contraction = planFindingReconciliation([currentB, currentA], {
-      activeFingerprints: [token("d"), token("e"), token("f")],
       ownedOpenThreads: [priorF, priorD, priorE],
       runHeadShas: ["2".repeat(40)],
     });
@@ -265,7 +281,6 @@ describe("finding reconciliation", () => {
         { ...currentB, fingerprintAliases: [changedContext] },
       ],
       {
-        activeFingerprints: [token("d"), token("e")],
         ownedOpenThreads: [priorD, priorE],
         runHeadShas: ["3".repeat(40)],
       },
@@ -313,7 +328,6 @@ describe("finding reconciliation", () => {
     for (const findings of [current, current.toReversed()]) {
       for (const ownedOpenThreads of [prior, prior.toReversed()]) {
         const plan = planFindingReconciliation(findings, {
-          activeFingerprints: prior.map(({ fingerprint }) => fingerprint),
           ownedOpenThreads,
           runHeadShas: ["1".repeat(40)],
         });
@@ -333,7 +347,6 @@ describe("finding reconciliation", () => {
       },
     ];
     const crossSignaturePlan = planFindingReconciliation(crossSignatureCurrent, {
-      activeFingerprints: prior.map(({ fingerprint }) => fingerprint),
       ownedOpenThreads: prior,
       runHeadShas: ["2".repeat(40)],
     });
@@ -392,7 +405,6 @@ describe("finding reconciliation", () => {
     ]) {
       for (const ownedOpenThreads of [threads, threads.toReversed()]) {
         const plan = planFindingReconciliation(findings, {
-          activeFingerprints: [token("a"), token("f"), token("g"), token("h")],
           bodyFindings: [
             {
               fingerprint: token("f"),
@@ -410,11 +422,11 @@ describe("finding reconciliation", () => {
     }
   });
 
-  it("preserves legacy aliases, body migration, and thread identities within one group", () => {
-    const legacyToken = token("1");
-    const legacy = {
+  it("does not infer prior state from unversioned review-body markers", () => {
+    const unversionedToken = token("1");
+    const unversioned = {
       ...finding(token("a"), 2),
-      fingerprintAliases: [legacyToken],
+      fingerprintAliases: [unversionedToken],
     };
     const body = {
       ...finding(token("b"), 5),
@@ -426,13 +438,11 @@ describe("finding reconciliation", () => {
       ...finding(token("c"), 8),
       fingerprintAliases: [token("3")],
     };
-    const semantic = findingFingerprint(legacy);
+    const semantic = findingFingerprint(unversioned);
 
     assert.deepEqual(
-      planFindingReconciliation([thread, body, legacy], {
-        activeFingerprints: [legacyToken, token("b"), token("4")],
+      planFindingReconciliation([thread, body, unversioned], {
         bodyFindings: [{ fingerprint: token("b"), aliases: [token("2")] }],
-        bodyStateMigrationRequired: true,
         ownedOpenThreads: [
           {
             id: "THREAD_CURRENT",
@@ -443,10 +453,10 @@ describe("finding reconciliation", () => {
         runHeadShas: ["1".repeat(40)],
       }),
       {
-        netNewFindings: [],
+        netNewFindings: [unversioned],
         obsoleteThreadIds: [],
         currentBodyFindings: [body],
-        bodyStateChanged: true,
+        bodyStateChanged: false,
       },
     );
   });
@@ -455,7 +465,6 @@ describe("finding reconciliation", () => {
     const current = finding("e".repeat(64), 7);
     assert.deepEqual(
       planFindingReconciliation([current], {
-        activeFingerprints: ["e".repeat(64), "e".repeat(64)],
         ownedOpenThreads: [
           { id: "THREAD_2", fingerprint: "f".repeat(64) },
           { id: "THREAD_1", fingerprint: "f".repeat(64) },
@@ -464,7 +473,7 @@ describe("finding reconciliation", () => {
         runHeadShas: [],
       }),
       {
-        netNewFindings: [],
+        netNewFindings: [current],
         obsoleteThreadIds: ["THREAD_1", "THREAD_2"],
         currentBodyFindings: [],
         bodyStateChanged: false,
@@ -484,7 +493,6 @@ describe("finding reconciliation", () => {
       anchor: "otherValue",
     };
     const deltaPlan = planFindingReconciliation([retained, netNew], {
-      activeFingerprints: [retained.fingerprint],
       bodyFindings: [{ fingerprint: retained.fingerprint }],
       ownedOpenThreads: [],
       runHeadShas: ["1".repeat(40)],
@@ -495,7 +503,6 @@ describe("finding reconciliation", () => {
 
     const unchangedInline = finding("c".repeat(64), 9);
     const retirementPlan = planFindingReconciliation([unchangedInline], {
-      activeFingerprints: [retained.fingerprint, unchangedInline.fingerprint],
       bodyFindings: [{ fingerprint: retained.fingerprint }],
       ownedOpenThreads: [{ id: "THREAD_CURRENT", fingerprint: unchangedInline.fingerprint }],
       runHeadShas: ["2".repeat(40)],
@@ -505,7 +512,6 @@ describe("finding reconciliation", () => {
     assert.equal(retirementPlan.bodyStateChanged, true);
 
     const returnPlan = planFindingReconciliation([retained], {
-      activeFingerprints: [],
       bodyFindings: [],
       ownedOpenThreads: [],
       runHeadShas: ["3".repeat(40)],
@@ -519,14 +525,17 @@ describe("finding reconciliation", () => {
     const contextB = "c".repeat(64);
     const movedBodyFinding = {
       ...finding(primary, 7),
-      fingerprintAliases: [contextB],
       range: null,
       attachment: { kind: "file", path: "source.ts" } as const,
     };
+    const semantic = findingFingerprint(movedBodyFinding);
+    const currentMovedBodyFinding = {
+      ...movedBodyFinding,
+      fingerprintAliases: [semantic, contextB],
+    };
 
-    const aliasRefresh = planFindingReconciliation([movedBodyFinding], {
-      activeFingerprints: [primary],
-      bodyFindings: [{ fingerprint: primary, aliases: [contextA] }],
+    const aliasRefresh = planFindingReconciliation([currentMovedBodyFinding], {
+      bodyFindings: [{ fingerprint: primary, aliases: [semantic, contextA] }],
       ownedOpenThreads: [],
       runHeadShas: ["1".repeat(40)],
     });
@@ -534,18 +543,17 @@ describe("finding reconciliation", () => {
     assert.equal(aliasRefresh.bodyStateChanged, true);
 
     const survivor = {
-      ...movedBodyFinding,
+      ...currentMovedBodyFinding,
       fingerprint: "d".repeat(64),
-      fingerprintAliases: [primary, contextB],
+      fingerprintAliases: [semantic, primary, contextB],
     };
     const addedPeer = {
-      ...movedBodyFinding,
+      ...currentMovedBodyFinding,
       fingerprint: "e".repeat(64),
-      fingerprintAliases: [primary, contextA],
+      fingerprintAliases: [semantic, primary, contextA],
     };
     const peerPlan = planFindingReconciliation([survivor, addedPeer], {
-      activeFingerprints: [primary],
-      bodyFindings: [{ fingerprint: primary, aliases: [contextB] }],
+      bodyFindings: [{ fingerprint: primary, aliases: [semantic, contextB] }],
       ownedOpenThreads: [],
       runHeadShas: ["2".repeat(40)],
     });

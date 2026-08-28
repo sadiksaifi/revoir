@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 
-import { installationForRepository, type RevoirConfiguration } from "../config/schema.js";
+import { installationForRepository, type RevoirPolicy } from "../config/policy.js";
+import type { RevoirConfiguration } from "../config/schema.js";
 import { SecretRedactor } from "../redaction.js";
 import type {
   CompletedCheckEvidence,
@@ -115,6 +116,7 @@ export interface GitHubReviewSession {
 export interface GitHubReviewGateway {
   authenticate(
     configuration: RevoirConfiguration["github"],
+    policy: RevoirPolicy,
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<GitHubReviewSession>;
@@ -1665,11 +1667,8 @@ class InstallationSession implements GitHubReviewSession {
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<PriorReviewState> {
-    const activeFingerprints = new Set<string>();
     const runHeadShas = new Set<string>();
     let latestBodyFindings: readonly PriorFindingIdentity[] = [];
-    let bodyStateMigrationRequired = false;
-    let foundExplicitBodyState = false;
     let reviewPage = 1;
     for (;;) {
       throwIfAborted(signal);
@@ -1697,11 +1696,6 @@ class InstallationSession implements GitHubReviewSession {
           const bodyState = bodyStateFindingIdentities(review.body);
           if (bodyState !== undefined) {
             latestBodyFindings = bodyState;
-            bodyStateMigrationRequired = false;
-            foundExplicitBodyState = true;
-          } else if (!foundExplicitBodyState) {
-            latestBodyFindings = findingMarkerIdentities(review.body);
-            bodyStateMigrationRequired = true;
           }
         }
       }
@@ -1712,13 +1706,8 @@ class InstallationSession implements GitHubReviewSession {
       // eslint-disable-next-line no-await-in-loop
       await yieldToEventLoop(signal);
     }
-    if (!this.#priorRunWasClean) {
-      for (const finding of latestBodyFindings) {
-        activeFingerprints.add(finding.fingerprint);
-      }
-    } else {
+    if (this.#priorRunWasClean) {
       latestBodyFindings = [];
-      bodyStateMigrationRequired = false;
     }
 
     const ownedOpenThreads: Array<{
@@ -1790,7 +1779,6 @@ class InstallationSession implements GitHubReviewSession {
           findingIdentities.length === 1
         ) {
           const findingIdentity = findingIdentities[0]!;
-          activeFingerprints.add(findingIdentity.fingerprint);
           ownedOpenThreads.push({
             id,
             fingerprint: findingIdentity.fingerprint,
@@ -1815,9 +1803,7 @@ class InstallationSession implements GitHubReviewSession {
     );
     this.#ownedOpenThreadIds = new Set(sortedThreads.map(({ id }) => id));
     return {
-      activeFingerprints: [...activeFingerprints].toSorted(),
       bodyFindings: latestBodyFindings,
-      ...(bodyStateMigrationRequired ? { bodyStateMigrationRequired: true } : {}),
       ownedOpenThreads: sortedThreads,
       runHeadShas: [...runHeadShas].toSorted(),
     };
@@ -2225,11 +2211,12 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
 
   async authenticate(
     configuration: RevoirConfiguration["github"],
+    policy: RevoirPolicy,
     reference: PullRequestReference,
     signal: AbortSignal,
   ): Promise<GitHubReviewSession> {
     const configuredInstallation = installationForRepository(
-      configuration,
+      policy,
       reference.owner,
       reference.repository,
     );
@@ -2261,9 +2248,7 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
             {
               method: "POST",
               body: JSON.stringify({
-                repository_ids: configuredInstallation.repositories
-                  .map(({ id }) => id)
-                  .toSorted((left, right) => left - right),
+                repository_ids: [configuredRepository.id],
               }),
               headers: { ...headers, "Content-Type": "application/json" },
               signal,

@@ -95,7 +95,7 @@ function ownReview(id: number, body: string | null, state = "COMMENTED") {
   };
 }
 
-function legacyReviewBody(candidate: ReviewFindingV2): string {
+function unversionedReviewBody(candidate: ReviewFindingV2): string {
   return renderFileFinding(candidate);
 }
 
@@ -131,14 +131,15 @@ describe("GitHub App review gateway", () => {
     );
   });
 
-  it("mints the token for every configured repository in the owning installation", async () => {
+  it("authenticates one repository while a sibling awaits installation access", async () => {
     const requestedUrls: string[] = [];
     let tokenRequestBody: unknown;
     const secondReference = parsePullRequestUrl("https://github.com/other/second/pull/18");
-    const github = {
-      ...configuration.github,
+    const github = configuration.github;
+    const policy = {
+      ...configuration.policy,
       installations: [
-        ...configuration.github.installations,
+        ...configuration.policy.installations,
         {
           id: 9,
           repositories: [
@@ -154,14 +155,16 @@ describe("GitHub App review gateway", () => {
         requestedUrls.push(url);
         if (url.endsWith("/access_tokens")) {
           tokenRequestBody = JSON.parse(String(init?.body));
+          const repositoryIds = (tokenRequestBody as { repository_ids: number[] }).repository_ids;
+          return repositoryIds.includes(101)
+            ? json({ message: "Repository is not accessible to this installation" }, 422)
+            : json({ token: "installation-9-secret" });
         }
-        return url.endsWith("/app")
-          ? json({ slug: "revoir-test" })
-          : json({ token: "installation-9-secret" });
+        return json({ slug: "revoir-test" });
       },
       "https://api.test",
       () => 1_000,
-    ).authenticate(github, secondReference, new AbortController().signal);
+    ).authenticate(github, policy, secondReference, new AbortController().signal);
 
     assert.equal(session.installationToken, "installation-9-secret");
     assert.equal(
@@ -172,7 +175,7 @@ describe("GitHub App review gateway", () => {
       requestedUrls.some((url) => url.endsWith("/app/installations/8/access_tokens")),
       false,
     );
-    assert.deepEqual(tokenRequestBody, { repository_ids: [100, 101] });
+    assert.deepEqual(tokenRequestBody, { repository_ids: [100] });
   });
 
   it("uses an installation token for PR lookup and exact reaction reconciliation", async () => {
@@ -229,6 +232,7 @@ describe("GitHub App review gateway", () => {
     );
     const session = await gateway.authenticate(
       configuration.github,
+      configuration.policy,
       reference,
       abortController.signal,
     );
@@ -328,7 +332,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     const check = await session.startReviewCheck(reference, headSha, new AbortController().signal);
     assert.equal(check.id, 80);
@@ -435,7 +444,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const first = "<!-- revoir:failure:v1 --> first failure";
     const second = "<!-- revoir:failure:v1 --> second failure";
 
@@ -505,7 +519,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const candidate: ReviewFindingV2 = {
       version: 2,
       fingerprint: "a".repeat(64),
@@ -578,7 +597,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnPendingReview(reference, new AbortController().signal);
     assert.deepEqual(deleted, [71]);
@@ -719,12 +743,15 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     assert.deepEqual(await session.getPriorReviewState(reference, new AbortController().signal), {
-      activeFingerprints: [ownBodyFingerprint, ownThreadFingerprint],
-      bodyFindings: [{ fingerprint: ownBodyFingerprint }],
-      bodyStateMigrationRequired: true,
+      bodyFindings: [],
       ownedOpenThreads: [
         {
           id: "THREAD_OWN_OPEN",
@@ -813,7 +840,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const signal = new AbortController().signal;
     await session.getPriorReviewState(reference, signal);
 
@@ -843,7 +875,7 @@ describe("GitHub App review gateway", () => {
     assert.deepEqual(mutations, ["THREAD_A"]);
   });
 
-  it("migrates the latest legacy body-marker review until a versioned snapshot exists", async () => {
+  it("ignores unversioned body-marker reviews", async () => {
     const olderFingerprint = "a".repeat(64);
     const latestFingerprint = "b".repeat(64);
     const ignoredFingerprint = "c".repeat(64);
@@ -860,7 +892,7 @@ describe("GitHub App review gateway", () => {
       anchor: "source.ts",
       attachment: { kind: "file", path: "source.ts" },
     };
-    const legacyBody = (fingerprint: string): string =>
+    const unversionedBody = (fingerprint: string): string =>
       renderFileFinding({ ...latestFinding, fingerprint });
 
     for (const hasVersionedSnapshot of [false, true]) {
@@ -877,13 +909,13 @@ describe("GitHub App review gateway", () => {
             {
               id: 201,
               state: "COMMENTED",
-              body: legacyBody(olderFingerprint),
+              body: unversionedBody(olderFingerprint),
               user: { login: "revoir-test[bot]" },
             },
             {
               id: 202,
               state: "COMMENTED",
-              body: legacyBody(latestFingerprint),
+              body: unversionedBody(latestFingerprint),
               user: { login: "revoir-test[bot]" },
             },
             ...(hasVersionedSnapshot
@@ -897,7 +929,7 @@ describe("GitHub App review gateway", () => {
                   {
                     id: 204,
                     state: "COMMENTED",
-                    body: legacyBody(ignoredFingerprint),
+                    body: unversionedBody(ignoredFingerprint),
                     user: { login: "revoir-test[bot]" },
                   },
                 ]
@@ -926,19 +958,19 @@ describe("GitHub App review gateway", () => {
         fetchImplementation,
         "https://api.test",
         () => 1_000,
-      ).authenticate(configuration.github, reference, new AbortController().signal);
+      ).authenticate(
+        configuration.github,
+        configuration.policy,
+        reference,
+        new AbortController().signal,
+      );
       // eslint-disable-next-line no-await-in-loop
       const prior = await session.getPriorReviewState(reference, new AbortController().signal);
 
-      assert.deepEqual(
-        prior.bodyFindings,
-        hasVersionedSnapshot ? [] : [{ fingerprint: latestFingerprint }],
-      );
-      assert.equal(prior.bodyStateMigrationRequired === true, !hasVersionedSnapshot);
-      assert.deepEqual(
-        planFindingReconciliation([latestFinding], prior).netNewFindings,
-        hasVersionedSnapshot ? [latestFinding] : [],
-      );
+      assert.deepEqual(prior.bodyFindings, []);
+      assert.deepEqual(planFindingReconciliation([latestFinding], prior).netNewFindings, [
+        latestFinding,
+      ]);
       assert.equal(planFindingReconciliation([latestFinding], prior).bodyStateChanged, true);
     }
   });
@@ -958,46 +990,42 @@ describe("GitHub App review gateway", () => {
     };
     const scenarios = [
       {
-        name: "latest legacy marker set",
+        name: "latest unversioned marker set",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.older)),
-          ownReview(202, legacyReviewBody(findings.latest)),
+          ownReview(201, unversionedReviewBody(findings.older)),
+          ownReview(202, unversionedReviewBody(findings.latest)),
         ],
-        expectedBodyFingerprints: [fingerprints.latest],
-        migrationRequired: true,
+        expectedBodyFingerprints: [],
         candidate: findings.latest,
-        expectedNetNew: [],
+        expectedNetNew: [fingerprints.latest],
         bodyStateChanged: true,
         runHeadShas: [],
       },
       {
-        name: "empty legacy body",
-        reviews: [ownReview(201, legacyReviewBody(findings.older)), ownReview(202, "")],
+        name: "empty unversioned body",
+        reviews: [ownReview(201, unversionedReviewBody(findings.older)), ownReview(202, "")],
         expectedBodyFingerprints: [],
-        migrationRequired: true,
         candidate: findings.older,
         expectedNetNew: [fingerprints.older],
         bodyStateChanged: true,
         runHeadShas: [],
       },
       {
-        name: "null inline-only legacy body",
-        reviews: [ownReview(201, legacyReviewBody(findings.older)), ownReview(202, null)],
+        name: "null inline-only unversioned body",
+        reviews: [ownReview(201, unversionedReviewBody(findings.older)), ownReview(202, null)],
         expectedBodyFingerprints: [],
-        migrationRequired: true,
         candidate: findings.older,
         expectedNetNew: [fingerprints.older],
         bodyStateChanged: true,
         runHeadShas: [],
       },
       {
-        name: "run-only legacy body",
+        name: "run-only unversioned body",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(201, unversionedReviewBody(findings.older)),
           ownReview(202, `<!-- revoir:run:v1:${"3".repeat(40)} -->`),
         ],
         expectedBodyFingerprints: [],
-        migrationRequired: true,
         candidate: findings.older,
         expectedNetNew: [fingerprints.older],
         bodyStateChanged: true,
@@ -1006,31 +1034,29 @@ describe("GitHub App review gateway", () => {
       {
         name: "pending and non-App reviews are ignored",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.latest)),
-          ownReview(202, legacyReviewBody(findings.ignored), "PENDING"),
+          ownReview(201, unversionedReviewBody(findings.latest)),
+          ownReview(202, unversionedReviewBody(findings.ignored), "PENDING"),
           {
             id: 203,
             state: "COMMENTED",
-            body: legacyReviewBody(findings.other),
+            body: unversionedReviewBody(findings.other),
             user: { login: "human" },
           },
         ],
-        expectedBodyFingerprints: [fingerprints.latest],
-        migrationRequired: true,
+        expectedBodyFingerprints: [],
         candidate: findings.latest,
-        expectedNetNew: [],
+        expectedNetNew: [fingerprints.latest],
         bodyStateChanged: true,
         runHeadShas: [],
       },
       {
-        name: "legacy cannot override an explicit snapshot",
+        name: "unversioned state cannot override an explicit snapshot",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(201, unversionedReviewBody(findings.older)),
           ownReview(202, explicitReviewBody([findings.latest])),
-          ownReview(203, legacyReviewBody(findings.ignored)),
+          ownReview(203, unversionedReviewBody(findings.ignored)),
         ],
         expectedBodyFingerprints: [fingerprints.latest],
-        migrationRequired: false,
         candidate: findings.latest,
         expectedNetNew: [],
         bodyStateChanged: false,
@@ -1039,12 +1065,11 @@ describe("GitHub App review gateway", () => {
       {
         name: "explicit state without a run marker remains authoritative",
         reviews: [
-          ownReview(201, legacyReviewBody(findings.older)),
+          ownReview(201, unversionedReviewBody(findings.older)),
           ownReview(202, markerOnlyExplicitReviewBody(findings.latest)),
-          ownReview(203, legacyReviewBody(findings.ignored)),
+          ownReview(203, unversionedReviewBody(findings.ignored)),
         ],
         expectedBodyFingerprints: [fingerprints.latest],
-        migrationRequired: false,
         candidate: findings.latest,
         expectedNetNew: [],
         bodyStateChanged: false,
@@ -1055,10 +1080,9 @@ describe("GitHub App review gateway", () => {
         reviews: [
           ownReview(201, explicitReviewBody([findings.latest])),
           ownReview(202, explicitReviewBody([])),
-          ownReview(203, legacyReviewBody(findings.ignored)),
+          ownReview(203, unversionedReviewBody(findings.ignored)),
         ],
         expectedBodyFingerprints: [],
-        migrationRequired: false,
         candidate: findings.latest,
         expectedNetNew: [fingerprints.latest],
         bodyStateChanged: true,
@@ -1099,18 +1123,18 @@ describe("GitHub App review gateway", () => {
           fetchImplementation,
           "https://api.test",
           () => 1_000,
-        ).authenticate(configuration.github, reference, new AbortController().signal);
+        ).authenticate(
+          configuration.github,
+          configuration.policy,
+          reference,
+          new AbortController().signal,
+        );
         const prior = await session.getPriorReviewState(reference, new AbortController().signal);
         const plan = planFindingReconciliation([scenario.candidate], prior);
 
         assert.deepEqual(
           prior.bodyFindings?.map(({ fingerprint }) => fingerprint),
           scenario.expectedBodyFingerprints,
-          scenario.name,
-        );
-        assert.equal(
-          prior.bodyStateMigrationRequired === true,
-          scenario.migrationRequired,
           scenario.name,
         );
         assert.deepEqual(
@@ -1124,7 +1148,7 @@ describe("GitHub App review gateway", () => {
     );
   });
 
-  it("folds legacy snapshots across a review-page boundary and unions open App threads", async () => {
+  it("ignores unversioned snapshots across a review-page boundary", async () => {
     const retiredFingerprint = "a".repeat(64);
     const threadFingerprint = "b".repeat(64);
     const ignoredFingerprint = "c".repeat(64);
@@ -1191,13 +1215,16 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const prior = await session.getPriorReviewState(reference, new AbortController().signal);
     const plan = planFindingReconciliation([retiredFinding, threadFinding], prior);
 
     assert.deepEqual(prior.bodyFindings, []);
-    assert.equal(prior.bodyStateMigrationRequired, true);
-    assert.deepEqual(prior.activeFingerprints, [threadFingerprint]);
     assert.deepEqual(prior.ownedOpenThreads, [
       { id: "THREAD_OPEN", fingerprint: threadFingerprint },
     ]);
@@ -1323,14 +1350,15 @@ describe("GitHub App review gateway", () => {
             fetchImplementation,
             "https://api.test",
             () => 1_000,
-          ).authenticate(configuration.github, reference, new AbortController().signal);
+          ).authenticate(
+            configuration.github,
+            configuration.policy,
+            reference,
+            new AbortController().signal,
+          );
 
           await session.removeOwnCompletionReaction(reference, new AbortController().signal);
           const prior = await session.getPriorReviewState(reference, new AbortController().signal);
-          assert.deepEqual(
-            prior.activeFingerprints,
-            priorRun === "findings" ? [historicalFingerprint, latestFingerprint] : [],
-          );
           assert.deepEqual(
             planFindingReconciliation([returnedFinding], prior).netNewFindings,
             priorRun === "findings" ? [] : [returnedFinding],
@@ -1376,7 +1404,12 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
       5,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnPendingReview(reference, new AbortController().signal);
     assert.deepEqual(events, ["DELETE 1", "GET PENDING", "DELETE 2"]);
@@ -1407,7 +1440,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: {
         commit_id: "2".repeat(40),
@@ -1464,7 +1502,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1518,7 +1561,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1569,7 +1617,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1623,7 +1676,12 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
       5,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1684,7 +1742,12 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
       5,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1724,7 +1787,12 @@ describe("GitHub App review gateway", () => {
       "https://api.test",
       () => 1_000,
       2,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
       fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
@@ -1772,7 +1840,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     for (const status of statuses) {
       // Every unexpected status, including otherwise-successful 2xx responses, is a failure.
@@ -1813,7 +1886,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.deleteReaction(reference, 91, new AbortController().signal);
     await assert.rejects(
@@ -1845,7 +1923,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnReaction(reference, "eyes", new AbortController().signal);
   });
@@ -1894,7 +1977,12 @@ describe("GitHub App review gateway", () => {
           fetchImplementation,
           "https://api.test",
           () => 1_000,
-        ).authenticate(configuration.github, reference, new AbortController().signal);
+        ).authenticate(
+          configuration.github,
+          configuration.policy,
+          reference,
+          new AbortController().signal,
+        );
 
         await assert.rejects(() =>
           session.addReaction(reference, reaction, new AbortController().signal),
@@ -1945,7 +2033,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnCompletionReaction(reference, new AbortController().signal);
 
@@ -1992,7 +2085,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await session.removeOwnReaction(reference, "eyes", new AbortController().signal);
 
@@ -2031,7 +2129,12 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, new AbortController().signal);
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
 
     await assert.rejects(() =>
       session.removeOwnCompletionReaction(reference, new AbortController().signal),
@@ -2067,7 +2170,7 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, abortController.signal);
+    ).authenticate(configuration.github, configuration.policy, reference, abortController.signal);
     const reconciliation = session.removeOwnReaction(reference, "eyes", abortController.signal);
     setTimeout(() => {
       abortController.abort(new Error("stop pagination"));
@@ -2099,6 +2202,7 @@ describe("GitHub App review gateway", () => {
     const cancellation = new Error("cancel HTTP");
     const authentication = gateway.authenticate(
       configuration.github,
+      configuration.policy,
       reference,
       abortController.signal,
     );
@@ -2153,7 +2257,7 @@ describe("GitHub App review gateway", () => {
     const cancellation = new Error("cancel response body");
     let settled = false;
     const authentication = gateway
-      .authenticate(configuration.github, reference, abortController.signal)
+      .authenticate(configuration.github, configuration.policy, reference, abortController.signal)
       .finally(() => {
         settled = true;
       });
@@ -2197,7 +2301,7 @@ describe("GitHub App review gateway", () => {
       fetchImplementation,
       "https://api.test",
       () => 1_000,
-    ).authenticate(configuration.github, reference, abortController.signal);
+    ).authenticate(configuration.github, configuration.policy, reference, abortController.signal);
     let settled = false;
     const reconciliation = session
       .removeOwnReaction(reference, "eyes", abortController.signal)
@@ -2241,6 +2345,7 @@ describe("GitHub App review gateway", () => {
       () =>
         gateway.authenticate(
           configuration.github,
+          configuration.policy,
           parsePullRequestUrl("https://github.com/owner/other/pull/17"),
           new AbortController().signal,
         ),
@@ -2257,7 +2362,13 @@ describe("GitHub App review gateway", () => {
       return json({ token: "server-secret" }, 403);
     });
     await assert.rejects(
-      () => gateway.authenticate(configuration.github, reference, new AbortController().signal),
+      () =>
+        gateway.authenticate(
+          configuration.github,
+          configuration.policy,
+          reference,
+          new AbortController().signal,
+        ),
       (error: unknown) => {
         assert.match(String(error), /HTTP 403/u);
         assert.doesNotMatch(String(error), /server-secret|PRIVATE KEY/u);

@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { afterEach, describe, it } from "node:test";
 
-import { CLI_VERSION, runCli, type CliIo } from "../src/cli.js";
+import { CLI_VERSION, createBrowserOpener, runCli, type CliIo } from "../src/cli.js";
 import { resolveApplicationPaths } from "../src/config/paths.js";
-import { loadConfiguration } from "../src/config/store.js";
+import { writePolicy } from "../src/config/policy.js";
+import { writeConfiguration } from "../src/config/store.js";
 import { createDefaultDiagnosticGateway, type DiagnosticGateway } from "../src/diagnostics.js";
 import type { QueueRunService } from "../src/queue/runner.js";
 import { FindingContractError, validateModelReviewOutput } from "../src/review/findings.js";
@@ -15,7 +16,7 @@ import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
 import type { ServiceLogger } from "../src/service/logging.js";
 import type { ServiceManager, ServiceStatus } from "../src/service/manager.js";
-import { passingGateway, TEST_PRIVATE_KEY } from "./helpers.js";
+import { createTestConfiguration, passingGateway, TEST_PRIVATE_KEY } from "./helpers.js";
 
 class CapturingWritable extends Writable {
   output = "";
@@ -82,33 +83,46 @@ async function writeCredentials(root: string): Promise<{
     writeFile(privateKeyFile, TEST_PRIVATE_KEY),
     writeFile(tokenFile, "cli-cloudflare-secret"),
   ]);
+  const paths = resolveApplicationPaths(
+    {
+      XDG_CONFIG_HOME: join(root, "config"),
+      XDG_CACHE_HOME: join(root, "cache"),
+      XDG_STATE_HOME: join(root, "state"),
+      XDG_DATA_HOME: join(root, "data"),
+    },
+    root,
+  );
+  const configuration = createTestConfiguration(paths, { apiToken: "cli-cloudflare-secret" });
+  const { policy, ...staticConfiguration } = configuration;
+  await Promise.all([
+    writeConfiguration(paths.configFile, staticConfiguration),
+    writePolicy(paths.policyFile, policy),
+  ]);
   return { privateKeyFile, tokenFile };
 }
 
-function setupArguments(privateKeyFile: string, tokenFile: string): string[] {
-  return [
-    "setup",
-    "--non-interactive",
-    "--github-user-id",
-    "42",
-    "--github-app-id",
-    "7",
-    "--github-installation-id",
-    "8",
-    "--github-private-key-file",
-    privateKeyFile,
-    "--repository",
-    "8:99:owner/repository",
-    "--cloudflare-account-id",
-    "account",
-    "--cloudflare-queue-id",
-    "queue",
-    "--cloudflare-api-token-file",
-    tokenFile,
-  ];
+function setupArguments(_privateKeyFile: string, _tokenFile: string): string[] {
+  return ["diagnose"];
 }
 
 describe("CLI", () => {
+  it("bounds browser handoffs with the configured shell deadline", async () => {
+    let receivedTimeout: number | undefined;
+    const browser = createBrowserOpener(
+      {
+        async run(_command, _arguments, options) {
+          receivedTimeout = options?.timeoutMs;
+          return { stdout: "", stderr: "" };
+        },
+      },
+      123,
+    );
+
+    await browser.open("https://github.com/apps/revoir");
+
+    assert.equal(receivedTimeout, 123);
+  });
+
   it("provides help and version without reading configuration", async () => {
     const { io, stdout } = await createIo();
     io.environment = { XDG_CONFIG_HOME: "invalid-relative-path" };
@@ -122,90 +136,7 @@ describe("CLI", () => {
 
     stdout.output = "";
     assert.equal(await runCli(["setup", "--help"], { io }), 0);
-    assert.match(stdout.output, /Setup options:/u);
-  });
-
-  it("runs non-interactive setup, persists protected config, and diagnoses it", async () => {
-    const { root, io, stdout, stderr } = await createIo();
-    const { privateKeyFile, tokenFile } = await writeCredentials(root);
-
-    assert.equal(
-      await runCli(setupArguments(privateKeyFile, tokenFile), {
-        io,
-        gateway: passingGateway(),
-      }),
-      0,
-    );
-    assert.match(stdout.output, /Configuration written/u);
-    assert.match(stdout.output, /Diagnostics passed \(6\/6\)/u);
-    assert.doesNotMatch(stdout.output + stderr.output, /cli-cloudflare-secret/u);
-
-    const paths = resolveApplicationPaths(io.environment, root);
-    const configuration = await loadConfiguration(paths.configFile);
-    assert.equal(configuration.github.userId, 42);
-
-    stdout.output = "";
-    assert.equal(
-      await runCli(["diagnose", "--json"], {
-        io,
-        gateway: passingGateway(),
-      }),
-      0,
-    );
-    const report = JSON.parse(stdout.output) as {
-      ok: boolean;
-      checks: unknown[];
-    };
-    assert.equal(report.ok, true);
-    assert.equal(report.checks.length, 6);
-  });
-
-  it("refuses an unsafe existing configuration parent without changing its mode", async () => {
-    const { root, io, stderr } = await createIo();
-    const { privateKeyFile, tokenFile } = await writeCredentials(root);
-    const configDirectory = join(root, "shared-config");
-    const configFile = join(configDirectory, "revoir.json");
-    await mkdir(configDirectory);
-    await chmod(configDirectory, 0o755);
-
-    assert.equal(
-      await runCli([...setupArguments(privateKeyFile, tokenFile), "--config", configFile], {
-        io,
-        gateway: passingGateway(),
-      }),
-      2,
-    );
-    assert.match(stderr.output, /Configuration directory .* has unsafe mode 0755/u);
-    assert.match(stderr.output, /choose a dedicated private directory/u);
-    assert.equal((await lstat(configDirectory)).mode & 0o777, 0o755);
-  });
-
-  it("supports interactive setup through the same validation path", async () => {
-    const { root, io } = await createIo();
-    const { privateKeyFile, tokenFile } = await writeCredentials(root);
-    const answers = [
-      "",
-      "",
-      "42",
-      "7",
-      "8",
-      privateKeyFile,
-      "8:99:owner/repository",
-      "account",
-      "queue",
-      tokenFile,
-      "",
-      "",
-    ];
-
-    assert.equal(
-      await runCli(["setup"], {
-        io,
-        gateway: passingGateway(),
-        prompt: async () => answers.shift() ?? "",
-      }),
-      0,
-    );
+    assert.match(stdout.output, /Provision and reconcile/u);
   });
 
   it("keeps normal diagnostics concise and adds redacted stack detail in verbose mode", async () => {
@@ -310,6 +241,34 @@ describe("CLI", () => {
     assert.doesNotMatch(stdout.output + stderr.output, /cli-cloudflare-secret/u);
   });
 
+  it("scopes standalone diagnose policy reads to the configured Cloudflare account", async () => {
+    const { root, io } = await createIo();
+    await writeCredentials(root);
+    const paths = resolveApplicationPaths(io.environment, root);
+    const configuration = createTestConfiguration(paths, {
+      apiToken: "cli-cloudflare-secret",
+    });
+    let environment: Readonly<Record<string, string>> | undefined;
+    const policyGateway = createDefaultDiagnosticGateway(
+      async () => {
+        throw new Error("unexpected network request");
+      },
+      async (_executable, _arguments, options) => {
+        environment = options.environment;
+        return { stdout: JSON.stringify(configuration.policy), stderr: "" };
+      },
+    );
+
+    assert.equal(
+      await runCli(["diagnose"], {
+        io,
+        gateway: { ...passingGateway(), checkPolicy: policyGateway.checkPolicy },
+      }),
+      0,
+    );
+    assert.equal(environment?.CLOUDFLARE_ACCOUNT_ID, configuration.cloudflare.accountId);
+  });
+
   it("returns actionable errors for invalid input and missing configuration", async () => {
     const { io, stderr } = await createIo();
     assert.equal(
@@ -319,11 +278,70 @@ describe("CLI", () => {
       }),
       2,
     );
-    assert.match(stderr.output, /Missing required setup option/u);
+    assert.match(stderr.output, /Setup is interactive/u);
 
     stderr.output = "";
     assert.equal(await runCli(["diagnose"], { io, gateway: passingGateway() }), 2);
-    assert.match(stderr.output, /Run "revoir setup" first/u);
+    assert.match(stderr.output, /Configuration file directory .* is not available/u);
+  });
+
+  it("dispatches repository add, remove, and list without manual immutable ids", async () => {
+    const { root, io, stdout } = await createIo();
+    await writeCredentials(root);
+    const calls: string[] = [];
+    const repository = { id: 99, owner: "Owner", name: "repository" };
+    const repositoryManager = {
+      async add(reference: { owner: string; name: string }) {
+        calls.push(`add:${reference.owner}/${reference.name}`);
+        return { status: "authorized" as const, repository, installationId: 8 };
+      },
+      async remove(
+        reference: { owner: string; name: string },
+        options: { keepGitHubAccess?: boolean },
+      ) {
+        calls.push(
+          `remove:${reference.owner}/${reference.name}:${String(options.keepGitHubAccess)}`,
+        );
+        return { status: "removed" as const, repository };
+      },
+      async list() {
+        calls.push("list");
+        return [
+          {
+            repository,
+            installationId: 8,
+            status: "authorized" as const,
+            local: true,
+            cloud: true,
+            github: true,
+          },
+        ];
+      },
+    };
+
+    assert.equal(
+      await runCli(["repository", "add", "Owner/repository"], {
+        io,
+        repositoryManager,
+      }),
+      0,
+    );
+    assert.match(stdout.output, /Owner\/repository is authorized/u);
+    stdout.output = "";
+    assert.equal(
+      await runCli(["repository", "remove", "Owner/repository", "--keep-github-access"], {
+        io,
+        repositoryManager,
+      }),
+      0,
+    );
+    stdout.output = "";
+    assert.equal(await runCli(["repository", "list"], { io, repositoryManager }), 0);
+    assert.match(
+      stdout.output,
+      /Owner\/repository\tauthorized\tlocal=true cloud=true github=true/u,
+    );
+    assert.deepEqual(calls, ["add:Owner/repository", "remove:Owner/repository:true", "list"]);
   });
 
   it("dispatches canonical manual reviews and reports clean and stale results", async () => {

@@ -277,6 +277,45 @@ async function smokeStandalone(file, smokeRoot, manifestRoot) {
   }
 }
 
+async function dryRunEmbeddedRelay(smokeRoot) {
+  const relayFile = join(smokeRoot, "embedded-relay-smoke.mjs");
+  const configFile = join(smokeRoot, "embedded-relay-wrangler.json");
+  const outputDirectory = join(smokeRoot, "embedded-relay-dry-run");
+  await writeFile(
+    configFile,
+    `${JSON.stringify(
+      {
+        name: "revoir-package-smoke",
+        main: relayFile,
+        compatibility_date: "2026-08-27",
+        kv_namespaces: [{ binding: "POLICY_KV", id: "0".repeat(32) }],
+        queues: {
+          producers: [{ binding: "REVIEW_QUEUE", queue: "revoir-review-jobs" }],
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  await execute(
+    "pnpm",
+    [
+      "--filter",
+      "@revoir/relay",
+      "exec",
+      "wrangler",
+      "deploy",
+      "--dry-run",
+      "--config",
+      configFile,
+      "--outdir",
+      outputDirectory,
+    ],
+    { cwd: repository },
+  );
+}
+
 async function build() {
   await assertFrozenTools();
   const dirty = (await execute("git", ["status", "--porcelain"], { capture: true })).stdout.trim();
@@ -325,6 +364,7 @@ async function build() {
     }
     await mkdir(smokeRoot, { recursive: true });
     await smokeStandalone(artifact, smokeRoot, `/${basename(stage)}`);
+    await dryRunEmbeddedRelay(smokeRoot);
     const { createReleaseMetadata, installStandaloneExecutable } =
       await import("../dist/release.js");
     const installHome = join(smokeRoot, "install-home");
