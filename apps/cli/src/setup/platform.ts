@@ -151,6 +151,23 @@ function samePolicy(left: RevoirPolicy, right: RevoirPolicy): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function bindingMatches(
+  bindings: readonly unknown[],
+  expected: Readonly<Record<string, unknown>>,
+): boolean {
+  const matching = bindings.filter((value) => recordValue(value)?.name === expected.name);
+  return (
+    matching.length === 1 &&
+    Object.entries(expected).every(([key, value]) => recordValue(matching[0])?.[key] === value)
+  );
+}
+
 const KV_PROPAGATION_WINDOW_MS = 60_000;
 const KV_ACTIVATION_DEADLINE_MS = 65_000;
 
@@ -494,6 +511,62 @@ export class DefaultSetupPlatform implements SetupPlatform {
     webhookSecret: string,
   ): Promise<boolean> {
     if (resources.relayUrl === undefined) return false;
+    const deployment = parseJsonRecord(
+      (
+        await this.#process.run(
+          "wrangler",
+          ["deployments", "status", "--name", resources.workerName, "--json"],
+          this.#cloudflareOptions(resources.accountId),
+        )
+      ).stdout,
+      "Wrangler deployment status",
+    );
+    if (!Array.isArray(deployment.versions) || deployment.versions.length !== 1) return false;
+    const currentVersion = recordValue(deployment.versions[0]);
+    if (
+      currentVersion === undefined ||
+      typeof currentVersion.version_id !== "string" ||
+      currentVersion.version_id === "" ||
+      currentVersion.percentage !== 100
+    ) {
+      return false;
+    }
+    const version = parseJsonRecord(
+      (
+        await this.#process.run(
+          "wrangler",
+          ["versions", "view", currentVersion.version_id, "--name", resources.workerName, "--json"],
+          this.#cloudflareOptions(resources.accountId),
+        )
+      ).stdout,
+      "Wrangler Worker version",
+    );
+    const versionResources = recordValue(version.resources);
+    const bindings = versionResources?.bindings;
+    if (
+      !Array.isArray(bindings) ||
+      !bindingMatches(bindings, {
+        name: "POLICY_KV",
+        type: "kv_namespace",
+        namespace_id: resources.kvNamespaceId,
+      }) ||
+      !bindingMatches(bindings, {
+        name: "REVIEW_QUEUE",
+        type: "queue",
+        queue_name: resources.queueName,
+      }) ||
+      !bindingMatches(bindings, {
+        name: "REVOIR_RELAY_VERSION",
+        type: "plain_text",
+        text: EMBEDDED_RELAY_SHA256,
+      }) ||
+      !bindingMatches(bindings, {
+        name: "GITHUB_WEBHOOK_SECRET",
+        type: "secret_text",
+      })
+    ) {
+      return false;
+    }
     const body = "{}";
     const signature = createHmac("sha256", webhookSecret).update(body).digest("hex");
     const response = await this.#fetch(resources.relayUrl, {

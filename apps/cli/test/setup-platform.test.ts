@@ -314,11 +314,46 @@ describe("default greenfield setup platform", () => {
     );
   });
 
-  it("recognizes only the expected signed relay artifact as current", async () => {
+  it("recognizes only the expected signed relay artifact and immutable bindings as current", async () => {
     const requests: Request[] = [];
-    let deployedVersion = EMBEDDED_RELAY_SHA256;
+    let deployedQueue: string = RESOURCES.queueName;
+    const process = new FakeProcess((_command, arguments_) => {
+      if (arguments_[0] === "deployments") {
+        return {
+          stdout: JSON.stringify({
+            versions: [{ version_id: "worker-version-id", percentage: 100 }],
+          }),
+          stderr: "",
+        };
+      }
+      assert.deepEqual(arguments_, [
+        "versions",
+        "view",
+        "worker-version-id",
+        "--name",
+        RESOURCES.workerName,
+        "--json",
+      ]);
+      return {
+        stdout: JSON.stringify({
+          resources: {
+            bindings: [
+              { name: "POLICY_KV", type: "kv_namespace", namespace_id: RESOURCES.kvNamespaceId },
+              { name: "REVIEW_QUEUE", type: "queue", queue_name: deployedQueue },
+              {
+                name: "REVOIR_RELAY_VERSION",
+                type: "plain_text",
+                text: EMBEDDED_RELAY_SHA256,
+              },
+              { name: "GITHUB_WEBHOOK_SECRET", type: "secret_text" },
+            ],
+          },
+        }),
+        stderr: "",
+      };
+    });
     const setup = platform({
-      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      process,
       fetch: async (input, init) => {
         const request = new Request(input, init);
         requests.push(request);
@@ -330,7 +365,7 @@ describe("default greenfield setup platform", () => {
         );
         return new Response("Accepted", {
           status: 202,
-          headers: { "X-Revoir-Relay-Version": deployedVersion },
+          headers: { "X-Revoir-Relay-Version": EMBEDDED_RELAY_SHA256 },
         });
       },
       shellCommandMs: 123,
@@ -341,14 +376,27 @@ describe("default greenfield setup platform", () => {
       relayUrl: "https://revoir-relay.example.workers.dev/github/webhook",
     };
     assert.equal(await setup.relayIsCurrent(deployed, "webhook-secret"), true);
-    deployedVersion = "stale-relay";
+    deployedQueue = "different-queue";
     assert.equal(await setup.relayIsCurrent(deployed, "webhook-secret"), false);
     assert.deepEqual(
-      requests.map((request) => [request.url, request.method, request.signal.aborted]),
+      process.calls.map(({ arguments: arguments_ }) => arguments_),
       [
-        [deployed.relayUrl, "POST", false],
-        [deployed.relayUrl, "POST", false],
+        ["deployments", "status", "--name", RESOURCES.workerName, "--json"],
+        ["versions", "view", "worker-version-id", "--name", RESOURCES.workerName, "--json"],
+        ["deployments", "status", "--name", RESOURCES.workerName, "--json"],
+        ["versions", "view", "worker-version-id", "--name", RESOURCES.workerName, "--json"],
       ],
+    );
+    assert.equal(
+      process.calls.every(
+        ({ environment, timeoutMs }) =>
+          environment?.CLOUDFLARE_ACCOUNT_ID === RESOURCES.accountId && timeoutMs === 123,
+      ),
+      true,
+    );
+    assert.deepEqual(
+      requests.map((request) => [request.url, request.method, request.signal.aborted]),
+      [[deployed.relayUrl, "POST", false]],
     );
   });
 
