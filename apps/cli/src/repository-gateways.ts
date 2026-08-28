@@ -340,6 +340,7 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
   async ensureAuthenticated(): Promise<void> {
     const options = {
       environment: { CLOUDFLARE_ACCOUNT_ID: this.#configuration.accountId },
+      timeoutMs: this.#shellCommandMs,
     };
     try {
       await this.#process.run("wrangler", ["whoami", "--json"], options);

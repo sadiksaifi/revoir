@@ -290,6 +290,50 @@ describe("GitHub repository gateway", () => {
 });
 
 describe("Wrangler policy propagation", () => {
+  it("bounds both Wrangler authentication probes for the selected account", async () => {
+    const calls: {
+      arguments: readonly string[];
+      environment?: Readonly<Record<string, string>>;
+      timeoutMs?: number;
+    }[] = [];
+    let firstProbe = true;
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      process: {
+        async run(_command, arguments_, options) {
+          calls.push({
+            arguments: arguments_,
+            ...(options?.environment === undefined ? {} : { environment: options.environment }),
+            ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+          });
+          if (arguments_[0] === "whoami" && firstProbe) {
+            firstProbe = false;
+            throw new Error("not authenticated");
+          }
+          return { stdout: "", stderr: "" };
+        },
+      },
+      shellCommandMs: 123,
+    });
+
+    await store.ensureAuthenticated();
+
+    const probes = calls.filter(({ arguments: arguments_ }) => arguments_[0] === "whoami");
+    assert.deepEqual(probes, [
+      {
+        arguments: ["whoami", "--json"],
+        environment: { CLOUDFLARE_ACCOUNT_ID: configuration.cloudflare.accountId },
+        timeoutMs: 123,
+      },
+      {
+        arguments: ["whoami", "--json"],
+        environment: { CLOUDFLARE_ACCOUNT_ID: configuration.cloudflare.accountId },
+        timeoutMs: 123,
+      },
+    ]);
+  });
+
   it("passes cancellation and the shell timeout to Wrangler policy reads", async () => {
     const expected = createEmptyPolicy(42);
     const controller = new AbortController();
