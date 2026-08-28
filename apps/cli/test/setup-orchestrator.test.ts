@@ -54,8 +54,13 @@ class MemorySetupState implements SetupStateStore {
 function platform(
   state: MemorySetupState,
   failOnce?: SetupStage,
-): SetupPlatform & { calls: SetupStage[]; relayMutations: string[] } {
+): SetupPlatform & {
+  calls: SetupStage[];
+  cloudPolicyMutations: string[];
+  relayMutations: string[];
+} {
   const calls: SetupStage[] = [];
+  const cloudPolicyMutations: string[] = [];
   const relayMutations: string[] = [];
   let failed = false;
   const stage = async <T>(name: SetupStage, value: T): Promise<T> => {
@@ -68,6 +73,7 @@ function platform(
   };
   return {
     calls,
+    cloudPolicyMutations,
     relayMutations,
     async ensureGitHubAuthentication() {
       return stage("prerequisites", { userId: 42, login: "test-user" });
@@ -113,12 +119,15 @@ function platform(
     },
     async validateQueueApiToken() {},
     async putCloudPolicy() {
+      cloudPolicyMutations.push("write");
       await stage("local-state", undefined);
     },
     async getCloudPolicy() {
       return state.finalPolicy ?? createEmptyPolicy(42);
     },
-    async verifyCloudPolicy() {},
+    async verifyCloudPolicy() {
+      cloudPolicyMutations.push("verify");
+    },
     async installService() {
       await stage("service-installed", undefined);
     },
@@ -340,10 +349,10 @@ describe("greenfield end-to-end setup", () => {
 
     assert.equal(result.resumed, true);
     assert.deepEqual(reconciliation.relayMutations, []);
+    assert.deepEqual(reconciliation.cloudPolicyMutations, []);
     assert.deepEqual(reconciliation.calls, [
       "prerequisites",
       "relay-deployed",
-      "local-state",
       "service-installed",
       "diagnostics",
     ]);
@@ -358,6 +367,23 @@ describe("greenfield end-to-end setup", () => {
     await setup(state, reconciliation).run();
 
     assert.deepEqual(reconciliation.relayMutations, ["secret-and-deploy"]);
+  });
+
+  it("writes and verifies KV when completed setup narrows a broader cloud policy", async () => {
+    const state = new MemorySetupState();
+    await setup(state, platform(state)).run();
+    const reconciliation = platform(state);
+    reconciliation.getCloudPolicy = async () =>
+      withRepository(createEmptyPolicy(42), 8, {
+        id: 99,
+        owner: "owner",
+        name: "cloud-only",
+      });
+
+    const result = await setup(state, reconciliation).run();
+
+    assert.deepEqual(result.policy, createEmptyPolicy(42));
+    assert.deepEqual(reconciliation.cloudPolicyMutations, ["write", "verify"]);
   });
 
   it("repairs completed-installation drift only by revoking trust", async () => {

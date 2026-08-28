@@ -94,6 +94,10 @@ function hasStage(checkpoint: SetupCheckpoint, stage: SetupStage): boolean {
   return checkpoint.completedStages.includes(stage);
 }
 
+function samePolicy(left: RevoirPolicy, right: RevoirPolicy): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function markStage(checkpoint: SetupCheckpoint, stage: SetupStage): SetupCheckpoint {
   return {
     ...checkpoint,
@@ -227,8 +231,10 @@ export class EndToEndSetup {
       const effectivePolicy = intersectPolicies(finalState.policy, cloudPolicy);
       await reconcile("local-state", async () => {
         await this.#state.writeFinal(configuration, effectivePolicy);
-        await this.#platform.putCloudPolicy(configuration.cloudflare, effectivePolicy);
-        await this.#platform.verifyCloudPolicy(configuration.cloudflare, effectivePolicy);
+        if (!samePolicy(cloudPolicy, effectivePolicy)) {
+          await this.#platform.putCloudPolicy(configuration.cloudflare, effectivePolicy);
+          await this.#platform.verifyCloudPolicy(configuration.cloudflare, effectivePolicy);
+        }
       });
       await reconcile("service-installed", () => this.#platform.installService(configuration));
       await reconcile("diagnostics", () =>
