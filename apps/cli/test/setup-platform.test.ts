@@ -59,6 +59,7 @@ class FakeProcess implements SetupProcessRunner {
 }
 
 function platform(input: {
+  confirmGitHubAppWebhook?: (url: string) => Promise<boolean>;
   diagnostics?: DefaultSetupPlatform["runDiagnostics"];
   process: SetupProcessRunner;
   fetch?: typeof fetch;
@@ -69,6 +70,7 @@ function platform(input: {
   shellCommandMs?: number;
 }) {
   return new DefaultSetupPlatform({
+    confirmGitHubAppWebhook: input.confirmGitHubAppWebhook ?? (async () => true),
     process: input.process,
     ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
     ...(input.now === undefined ? {} : { now: input.now }),
@@ -476,7 +478,7 @@ describe("default greenfield setup platform", () => {
 
     await setup.validateQueueApiToken(RESOURCES, "queue-token");
     await setup.reconcileGitHubApp(configuration as RevoirConfiguration, createEmptyPolicy(42));
-    assert.deepEqual(opened, []);
+    assert.deepEqual(opened, [`https://github.com/settings/apps/${configuration.github.appSlug}`]);
     assert.deepEqual(
       requests.map(({ method }) => method),
       ["GET", "POST", "GET", "PATCH"],
@@ -484,6 +486,91 @@ describe("default greenfield setup platform", () => {
     assert.match(requests[0]!.url, /accounts\/a{32}\/queues\/queue-immutable-id$/u);
     assert.match(requests[1]!.url, /\/messages\/ack$/u);
     assert.equal(requests[3]!.url, "https://api.github.com/app/hook/config");
+  });
+
+  it("requires browser-confirmed GitHub App webhook activation before completing reconciliation", async () => {
+    const configuration = createTestConfiguration({
+      cacheDir: "/tmp/revoir-test-cache",
+      stateDir: "/tmp/revoir-test-state",
+      dataDir: "/tmp/revoir-test-data",
+    });
+    let confirmationUrl: string | undefined;
+    let hookUpdated = false;
+    const opened: string[] = [];
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      async confirmGitHubAppWebhook(url) {
+        confirmationUrl = url;
+        return true;
+      },
+      opened,
+      fetch: async (input, init) => {
+        if (input.toString() === "https://api.github.com/app") {
+          return Response.json({
+            id: configuration.github.appId,
+            slug: configuration.github.appSlug,
+            events: ["issue_comment", "pull_request"],
+            permissions: {
+              actions: "read",
+              checks: "write",
+              contents: "read",
+              issues: "write",
+              metadata: "read",
+              pull_requests: "write",
+            },
+          });
+        }
+        assert.equal(
+          confirmationUrl,
+          `https://github.com/settings/apps/${configuration.github.appSlug}`,
+        );
+        assert.equal(init?.method, "PATCH");
+        hookUpdated = true;
+        return Response.json({});
+      },
+    });
+
+    await setup.reconcileGitHubApp(configuration, createEmptyPolicy(42));
+
+    assert.equal(hookUpdated, true);
+    assert.deepEqual(opened, [`https://github.com/settings/apps/${configuration.github.appSlug}`]);
+  });
+
+  it("does not report reconciliation success before GitHub App webhook activation is confirmed", async () => {
+    const configuration = createTestConfiguration({
+      cacheDir: "/tmp/revoir-test-cache",
+      stateDir: "/tmp/revoir-test-state",
+      dataDir: "/tmp/revoir-test-data",
+    });
+    let hookUpdated = false;
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      confirmGitHubAppWebhook: async () => false,
+      fetch: async (input) => {
+        if (input.toString() !== "https://api.github.com/app") {
+          hookUpdated = true;
+        }
+        return Response.json({
+          id: configuration.github.appId,
+          slug: configuration.github.appSlug,
+          events: ["issue_comment", "pull_request"],
+          permissions: {
+            actions: "read",
+            checks: "write",
+            contents: "read",
+            issues: "write",
+            metadata: "read",
+            pull_requests: "write",
+          },
+        });
+      },
+    });
+
+    await assert.rejects(
+      setup.reconcileGitHubApp(configuration, createEmptyPolicy(42)),
+      /webhook activation was not confirmed/u,
+    );
+    assert.equal(hookUpdated, false);
   });
 
   it("opens a Queue-only token template scoped to the configured account", async () => {

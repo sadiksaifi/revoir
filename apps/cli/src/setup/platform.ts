@@ -173,6 +173,7 @@ const KV_ACTIVATION_DEADLINE_MS = 65_000;
 
 export class DefaultSetupPlatform implements SetupPlatform {
   readonly #browser: GitHubManifestBrowser;
+  readonly #confirmGitHubAppWebhook: (url: string) => Promise<boolean>;
   readonly #diagnostics: (
     configuration: RevoirConfiguration,
     policy: RevoirPolicy,
@@ -192,6 +193,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
 
   constructor(input: {
     browser: GitHubManifestBrowser;
+    confirmGitHubAppWebhook?: (url: string) => Promise<boolean>;
     diagnostics: (configuration: RevoirConfiguration, policy: RevoirPolicy) => Promise<void>;
     hostname?: () => string;
     installService(configuration: RevoirConfiguration): Promise<void>;
@@ -205,6 +207,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     sleep?: (milliseconds: number) => Promise<void>;
   }) {
     this.#browser = input.browser;
+    this.#confirmGitHubAppWebhook = input.confirmGitHubAppWebhook ?? (async () => false);
     this.#diagnostics = input.diagnostics;
     this.#hostname = input.hostname ?? hostname;
     this.#installService = input.installService;
@@ -710,6 +713,13 @@ export class DefaultSetupPlatform implements SetupPlatform {
           `GitHub installation ${installation.id} requires permission approval. Complete it at ${url}, then rerun setup.`,
         );
       }
+    }
+    const appSettingsUrl = `https://github.com/settings/apps/${configuration.github.appSlug}`;
+    await this.#browser.open(appSettingsUrl);
+    if (!(await this.#confirmGitHubAppWebhook(appSettingsUrl))) {
+      throw new Error(
+        `GitHub App webhook activation was not confirmed. Enable Active and save the App at ${appSettingsUrl}, then rerun setup.`,
+      );
     }
     const hook = await this.#fetch("https://api.github.com/app/hook/config", {
       method: "PATCH",

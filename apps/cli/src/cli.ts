@@ -267,6 +267,20 @@ function createCloudflareAccountSelector(io: CliIo) {
   };
 }
 
+function createGitHubAppWebhookConfirmation(io: CliIo) {
+  return async (): Promise<boolean> => {
+    const prompt = createInterface({ input: io.stdin, output: io.stdout });
+    try {
+      const answer = await prompt.question(
+        'GitHub App settings opened. Enable "Active", save changes, then type yes: ',
+      );
+      return answer.trim().toLowerCase() === "yes";
+    } finally {
+      prompt.close();
+    }
+  };
+}
+
 function createBrowserOpener(processRunner: ChildProcessSetupRunner) {
   return {
     async open(url: string): Promise<void> {
@@ -503,6 +517,7 @@ export async function runCli(
         };
         const platform = new DefaultSetupPlatform({
           browser,
+          confirmGitHubAppWebhook: createGitHubAppWebhookConfirmation(io),
           process: processRunner,
           secretPrompt: createHiddenPrompt(io),
           selectCloudflareAccount: createCloudflareAccountSelector(io),
