@@ -172,7 +172,9 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
 
   async ensureAuthenticated(): Promise<void> {
     try {
-      await this.#process.run("gh", ["auth", "status"]);
+      await this.#process.run("gh", ["auth", "status"], {
+        timeoutMs: this.#shellCommandMs,
+      });
     } catch {
       await this.#process.run("gh", ["auth", "login", "--web"], { interactive: true });
     }

@@ -32,6 +32,28 @@ function repositories(count: number, offset = 0) {
 }
 
 describe("GitHub repository gateway", () => {
+  it("bounds the repository authentication probe with the configured shell deadline", async () => {
+    const calls: { arguments: readonly string[]; timeoutMs?: number }[] = [];
+    const gateway = new GitHubRepositoryGateway({
+      browser: { async open() {} },
+      configuration: configuration.github,
+      process: {
+        async run(_command, arguments_, options) {
+          calls.push({
+            arguments: arguments_,
+            ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+          });
+          return { stdout: "", stderr: "" };
+        },
+      },
+      shellCommandMs: 123,
+    });
+
+    await gateway.ensureAuthenticated();
+
+    assert.deepEqual(calls, [{ arguments: ["auth", "status"], timeoutMs: 123 }]);
+  });
+
   it("aborts stalled GitHub REST discovery at the configured shell deadline", async () => {
     let requestAborted = false;
     const gateway = new GitHubRepositoryGateway({
