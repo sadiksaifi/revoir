@@ -5,7 +5,11 @@ import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
 
 import { withCommandLock } from "./config/command-lock.js";
-import { resolveApplicationPaths, type PathEnvironment } from "./config/paths.js";
+import {
+  resolveApplicationPaths,
+  scopeApplicationPathsToConfig,
+  type PathEnvironment,
+} from "./config/paths.js";
 import { loadPolicy, writePolicy } from "./config/policy.js";
 import {
   DEFAULT_MODEL,
@@ -360,6 +364,7 @@ export async function runCli(
   }
   const configFile =
     common.configFile === undefined ? paths.configFile : resolve(io.cwd, common.configFile);
+  paths = scopeApplicationPathsToConfig(paths, configFile);
 
   if (command === "logs") {
     if (common.json) {

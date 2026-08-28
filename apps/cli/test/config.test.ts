@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
-import { resolveApplicationPaths, type ApplicationPaths } from "../src/config/paths.js";
+import {
+  resolveApplicationPaths,
+  scopeApplicationPathsToConfig,
+  type ApplicationPaths,
+} from "../src/config/paths.js";
 import {
   ConfigurationValidationError,
   createConfiguration,
@@ -69,6 +73,17 @@ afterEach(async () => {
 });
 
 describe("XDG paths", () => {
+  it("isolates policy, checkpoint, and command lock for an alternate config", () => {
+    const defaults = resolveApplicationPaths({}, "/Users/test");
+    const scoped = scopeApplicationPathsToConfig(defaults, "/tmp/personal.json");
+
+    assert.equal(scoped.configFile, "/tmp/personal.json");
+    assert.equal(scoped.policyFile, "/tmp/personal.json.policy.json");
+    assert.equal(scoped.setupCheckpointFile, "/tmp/personal.json.setup-checkpoint.json");
+    assert.equal(scoped.commandLockFile, "/tmp/personal.json.command.lock");
+    assert.equal(scoped.stateDir, defaults.stateDir);
+  });
+
   it("resolves separate config, policy, checkpoint, and lock files", () => {
     assert.deepEqual(resolveApplicationPaths({}, "/Users/test"), {
       configDir: "/Users/test/.config/revoir",
