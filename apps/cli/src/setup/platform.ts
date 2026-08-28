@@ -48,6 +48,18 @@ export interface SetupProcessRunner {
   ): Promise<ProcessResult>;
 }
 
+export class SetupProcessError extends Error {
+  readonly stdout: string;
+  readonly stderr: string;
+
+  constructor(command: string, status: string, result: ProcessResult) {
+    super(`${command} failed with ${status}.`);
+    this.name = "SetupProcessError";
+    this.stdout = result.stdout;
+    this.stderr = result.stderr;
+  }
+}
+
 export class ChildProcessSetupRunner implements SetupProcessRunner {
   run(
     command: string,
@@ -80,19 +92,33 @@ export class ChildProcessSetupRunner implements SetupProcessRunner {
         stderr += chunk;
       });
       child.once("error", reject);
-      child.once("exit", (code, signal) => {
+      child.once("close", (code, signal) => {
         if (code === 0) {
           resolve({ stdout, stderr });
           return;
         }
         reject(
-          new Error(
-            `${command} failed with ${signal === null ? `status ${String(code)}` : `signal ${signal}`}.`,
+          new SetupProcessError(
+            command,
+            signal === null ? `status ${String(code)}` : `signal ${signal}`,
+            { stdout, stderr },
           ),
         );
       });
     });
   }
+}
+
+function workersDevOnboardingUrl(error: unknown, accountId: string): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const output = ["stdout", "stderr"]
+    .map((key) => Reflect.get(error, key))
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+  const onboardingUrl = `https://dash.cloudflare.com/${accountId}/workers/onboarding`;
+  return /workers\.dev subdomain/iu.test(output) && output.includes(onboardingUrl)
+    ? onboardingUrl
+    : undefined;
 }
 
 function parseJsonRecord(value: string, label: string): Record<string, unknown> {
@@ -490,6 +516,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
               name: resources.workerName,
               main: workerFile,
               compatibility_date: "2026-07-22",
+              workers_dev: true,
               kv_namespaces: [{ binding: "POLICY_KV", id: resources.kvNamespaceId }],
               queues: {
                 producers: [{ binding: "REVIEW_QUEUE", queue: resources.queueName }],
@@ -510,11 +537,22 @@ export class DefaultSetupPlatform implements SetupPlatform {
 
   async deployRelay(resources: SetupCloudflareResources): Promise<string> {
     return this.#withRelayConfiguration(resources, async (configFile) => {
-      const deployment = await this.#process.run(
-        "wrangler",
-        ["deploy", "--config", configFile],
-        this.#cloudflareOptions(resources.accountId),
-      );
+      let deployment: ProcessResult;
+      try {
+        deployment = await this.#process.run(
+          "wrangler",
+          ["deploy", "--config", configFile],
+          this.#cloudflareOptions(resources.accountId),
+        );
+      } catch (error) {
+        const onboardingUrl = workersDevOnboardingUrl(error, resources.accountId);
+        if (onboardingUrl === undefined) throw error;
+        await this.#browser.open(onboardingUrl);
+        throw new Error(
+          'Cloudflare workers.dev onboarding is required. Complete the opened Cloudflare page, then rerun "revoir setup"; setup will resume from relay deployment.',
+          { cause: error },
+        );
+      }
       const baseUrl = /https:\/\/[A-Za-z0-9.-]+\.workers\.dev\/?/u.exec(
         `${deployment.stdout}\n${deployment.stderr}`,
       )?.[0];

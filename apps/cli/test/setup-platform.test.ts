@@ -12,6 +12,7 @@ import {
   ChildProcessSetupRunner,
   DefaultSetupPlatform,
   type ProcessResult,
+  SetupProcessError,
   type SetupProcessRunner,
 } from "../src/setup/platform.js";
 import { createTestConfiguration } from "./helpers.js";
@@ -121,6 +122,24 @@ describe("default greenfield setup platform", () => {
         }),
       ]),
       (error) => error instanceof Error && !/ignored its timeout/u.test(error.message),
+    );
+  });
+
+  it("preserves captured output when a noninteractive child process fails", async () => {
+    const runner = new ChildProcessSetupRunner();
+
+    await assert.rejects(
+      runner.run(process.execPath, [
+        "-e",
+        'process.stdout.write("captured stdout"); process.stderr.write("captured stderr"); process.exit(7)',
+      ]),
+      (error) => {
+        assert.ok(error instanceof SetupProcessError);
+        assert.equal(error.message, `${process.execPath} failed with status 7.`);
+        assert.equal(error.stdout, "captured stdout");
+        assert.equal(error.stderr, "captured stderr");
+        return true;
+      },
     );
   });
 
@@ -349,6 +368,7 @@ describe("default greenfield setup platform", () => {
     );
     await setup.configureRelaySecret(RESOURCES, "webhook-secret");
     assert.equal(generatedConfiguration?.account_id, RESOURCES.accountId);
+    assert.equal(generatedConfiguration?.workers_dev, true);
     assert.deepEqual(generatedConfiguration?.kv_namespaces, [
       { binding: "POLICY_KV", id: "kv-immutable-id" },
     ]);
@@ -368,6 +388,39 @@ describe("default greenfield setup platform", () => {
       process.calls.every(
         ({ environment }) => environment?.CLOUDFLARE_ACCOUNT_ID === RESOURCES.accountId,
       ),
+      true,
+    );
+  });
+
+  it("opens exact workers.dev onboarding and resumes relay deployment on rerun", async () => {
+    const opened: string[] = [];
+    let deployments = 0;
+    const onboardingUrl = `https://dash.cloudflare.com/${RESOURCES.accountId}/workers/onboarding`;
+    const process = new FakeProcess((_command, arguments_) => {
+      if (arguments_[0] !== "deploy") return { stdout: "", stderr: "" };
+      deployments += 1;
+      if (deployments === 1) {
+        throw Object.assign(new Error("wrangler failed with status 1."), {
+          stdout: "",
+          stderr: `You need to register a workers.dev subdomain before publishing to workers.dev.\n${onboardingUrl}`,
+        });
+      }
+      return { stdout: "Published https://revoir-relay.example.workers.dev", stderr: "" };
+    });
+    const setup = platform({ process, opened, shellCommandMs: 123 });
+
+    await assert.rejects(
+      setup.deployRelay(RESOURCES),
+      /workers\.dev onboarding is required.*rerun "revoir setup"/u,
+    );
+    assert.deepEqual(opened, [onboardingUrl]);
+    assert.equal(
+      await setup.deployRelay(RESOURCES),
+      "https://revoir-relay.example.workers.dev/github/webhook",
+    );
+    assert.equal(deployments, 2);
+    assert.equal(
+      process.calls.every(({ timeoutMs }) => timeoutMs === 123),
       true,
     );
   });

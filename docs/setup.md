@@ -79,6 +79,10 @@ Setup is interactive and resumable. It performs these stages in order:
 10. verifies the relay webhook route, LaunchAgent process health, App/installation
     grants, Queue acknowledgement scope, and local/KV policy equality.
 
+On a new Cloudflare account, Wrangler cannot create the required `workers.dev`
+subdomain noninteractively. Revoir opens that account's exact Workers onboarding page;
+complete the subdomain setup there, then rerun `revoir setup` to resume at relay deployment.
+
 The GitHub callback listener binds only to a random `127.0.0.1` port and validates a
 one-time state value. The generated GitHub private key and webhook secret are persisted
 before the browser flow can be considered complete. The webhook secret is an encrypted
