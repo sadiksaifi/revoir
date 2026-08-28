@@ -349,10 +349,14 @@ export class RepositoryManager {
       await this.#policies.writeLocal(prior);
     }
     const next = withRepository(prior, installation.id, discovered.repository);
-    await this.#policies.writeLocal(next);
+    if (!policiesMatch(priorLocal, next)) {
+      await this.#policies.writeLocal(next);
+    }
     try {
-      await this.#policies.writeCloud(next);
-      await this.#policies.verifyCloud(next);
+      if (!policiesMatch(priorCloud, next)) {
+        await this.#policies.writeCloud(next);
+        await this.#policies.verifyCloud(next);
+      }
     } catch (error) {
       await this.#policies.writeLocal(prior);
       throw new RepositoryPolicyUpdateError(

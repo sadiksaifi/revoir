@@ -286,6 +286,30 @@ describe("repository authorization", () => {
     ]);
   });
 
+  it("does not rewrite or verify an already-authorized repository policy", async () => {
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);
+    policies.cloud = policies.local;
+    const pending = pendingStore();
+    await pending.upsert({
+      version: 1,
+      kind: "add",
+      repository: REPOSITORY,
+      installationId: 8,
+      settingsUrl: "https://github.com/settings/installations/8",
+      createdAt: "2026-08-28T00:00:00.000Z",
+    });
+    const manager = new RepositoryManager({ github: fakeGitHub(), policies, pending });
+
+    assert.deepEqual(await manager.add({ owner: "Owner", name: "repository" }), {
+      status: "authorized",
+      repository: REPOSITORY,
+      installationId: 8,
+    });
+    assert.deepEqual(policies.events, []);
+    assert.deepEqual(pending.values, []);
+  });
+
   it("rolls local authorization back when the cloud write fails", async () => {
     const policies = new MemoryPolicies();
     policies.failWrite = true;
