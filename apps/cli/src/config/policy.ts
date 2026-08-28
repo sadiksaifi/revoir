@@ -140,10 +140,10 @@ export function withoutRepository(policy: RevoirPolicy, repositoryId: number): R
   return parseRevoirPolicy({
     ...policy,
     revision: policy.revision + 1,
-    installations: policy.installations.map((installation) => ({
-      ...installation,
-      repositories: installation.repositories.filter(({ id }) => id !== repositoryId),
-    })),
+    installations: policy.installations.flatMap((installation) => {
+      const repositories = installation.repositories.filter(({ id }) => id !== repositoryId);
+      return repositories.length === 0 ? [] : [{ ...installation, repositories }];
+    }),
   });
 }
 

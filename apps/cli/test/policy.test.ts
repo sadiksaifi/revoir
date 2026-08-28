@@ -54,8 +54,11 @@ describe("repository policy", () => {
 
     const removed = withoutRepository(added, 99);
     assert.equal(removed.revision, 2);
-    assert.deepEqual(removed.installations, [{ id: 8, repositories: [] }]);
+    assert.deepEqual(removed.installations, []);
     assert.equal(withoutRepository(removed, 99), removed);
+
+    const readded = withRepository(removed, 9, repository);
+    assert.deepEqual(readded.installations, [{ id: 9, repositories: [repository] }]);
   });
 
   it("rejects conflicting immutable identities", () => {

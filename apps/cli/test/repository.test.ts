@@ -527,8 +527,8 @@ describe("repository authorization", () => {
     const adding = manager.add({ owner: "Owner", name: "repository" });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(removalStarted, true);
-    assert.equal(policies.local.installations[0]?.repositories.length, 0);
-    assert.equal(policies.cloud.installations[0]?.repositories.length, 0);
+    assert.equal(policies.local.installations.length, 0);
+    assert.equal(policies.cloud.installations.length, 0);
     assert.equal(pending.values[0]?.kind, "remove");
 
     finishRemoval();
@@ -792,8 +792,8 @@ describe("repository authorization", () => {
       (await manager.remove({ owner: "Owner", name: "repository" })).status,
       "github-access-pending",
     );
-    assert.deepEqual(policies.events, ["local:1", "local:1", "cloud:1", "cloud:verified"]);
-    assert.equal(policies.local.installations[0]?.repositories.length, 0);
+    assert.deepEqual(policies.events, ["local:0", "local:0", "cloud:0", "cloud:verified"]);
+    assert.equal(policies.local.installations.length, 0);
     assert.deepEqual(github.events, [
       "open:https://github.com/settings/installations/8",
       "poll:false",
@@ -1144,8 +1144,8 @@ describe("repository authorization", () => {
         error instanceof RepositoryGitHubAccessPendingError &&
         /Revoir authorization is revoked/u.test(error.message),
     );
-    assert.equal(policies.local.installations[0]?.repositories.length, 0);
-    assert.equal(policies.cloud.installations[0]?.repositories.length, 0);
+    assert.equal(policies.local.installations.length, 0);
+    assert.equal(policies.cloud.installations.length, 0);
     assert.equal(pending.values[0]?.kind, "remove");
   });
 
