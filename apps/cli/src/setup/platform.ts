@@ -197,6 +197,19 @@ function bindingMatches(
 const KV_PROPAGATION_WINDOW_MS = 60_000;
 const KV_ACTIVATION_DEADLINE_MS = 65_000;
 
+interface PiAuthenticationRuntime {
+  getModel(provider: string, model: string): { reasoning: boolean } | undefined;
+  checkAuth(provider: string): Promise<{ type: string } | undefined>;
+  login(
+    provider: string,
+    method: "oauth",
+    callbacks: {
+      prompt(prompt: { message: string }): Promise<string>;
+      notify(event: { type: string; url?: string; verificationUri?: string }): void;
+    },
+  ): Promise<void>;
+}
+
 export class DefaultSetupPlatform implements SetupPlatform {
   readonly #browser: GitHubManifestBrowser;
   readonly #confirmGitHubAppWebhook: (url: string) => Promise<boolean>;
@@ -216,6 +229,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
   readonly #fetch: typeof fetch;
   readonly #now: () => number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
+  readonly #createPiRuntime: () => Promise<PiAuthenticationRuntime>;
 
   constructor(input: {
     browser: GitHubManifestBrowser;
@@ -231,6 +245,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     fetch?: typeof fetch;
     now?: () => number;
     sleep?: (milliseconds: number) => Promise<void>;
+    createPiRuntime?: () => Promise<PiAuthenticationRuntime>;
   }) {
     this.#browser = input.browser;
     this.#confirmGitHubAppWebhook = input.confirmGitHubAppWebhook ?? (async () => false);
@@ -251,6 +266,14 @@ export class DefaultSetupPlatform implements SetupPlatform {
     this.#sleep =
       input.sleep ??
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.#createPiRuntime =
+      input.createPiRuntime ??
+      (async () => {
+        const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+        return (await ModelRuntime.create({
+          allowModelNetwork: false,
+        })) as unknown as PiAuthenticationRuntime;
+      });
   }
 
   async ensureGitHubAuthentication(): Promise<{ userId: number; login: string }> {
@@ -360,8 +383,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     const separator = modelId.indexOf("/");
     const provider = modelId.slice(0, separator);
     const modelName = modelId.slice(separator + 1);
-    const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
-    const runtime = await ModelRuntime.create({ allowModelNetwork: false });
+    const runtime = await this.#createPiRuntime();
     const model = runtime.getModel(provider, modelName);
     if (model === undefined || (reasoning !== "minimal" && !model.reasoning)) {
       throw new Error(`Pi does not support ${modelId} with ${reasoning} reasoning.`);
@@ -369,18 +391,28 @@ export class DefaultSetupPlatform implements SetupPlatform {
     if ((await runtime.checkAuth(provider))?.type === "oauth") {
       return;
     }
-    const browserOperations: Promise<void>[] = [];
+    const browserOperations: Promise<{ error?: unknown }>[] = [];
+    const openBrowser = (url: string): void => {
+      browserOperations.push(
+        this.#browser.open(url).then(
+          () => ({}),
+          (error: unknown) => ({ error }),
+        ),
+      );
+    };
     await runtime.login(provider, "oauth", {
       prompt: async (prompt) => this.#secretPrompt(`${prompt.message}: `),
       notify: (event) => {
-        if (event.type === "auth_url") {
-          browserOperations.push(this.#browser.open(event.url));
-        } else if (event.type === "device_code") {
-          browserOperations.push(this.#browser.open(event.verificationUri));
+        if (event.type === "auth_url" && typeof event.url === "string") {
+          openBrowser(event.url);
+        } else if (event.type === "device_code" && typeof event.verificationUri === "string") {
+          openBrowser(event.verificationUri);
         }
       },
     });
-    await Promise.all(browserOperations);
+    const browserResults = await Promise.all(browserOperations);
+    const browserFailure = browserResults.find(({ error }) => error !== undefined);
+    if (browserFailure?.error !== undefined) throw browserFailure.error;
     if ((await runtime.checkAuth(provider))?.type !== "oauth") {
       throw new Error("Pi OpenAI Codex authentication did not complete.");
     }

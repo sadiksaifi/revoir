@@ -60,7 +60,9 @@ class FakeProcess implements SetupProcessRunner {
 }
 
 function platform(input: {
+  browserOpen?: (url: string) => Promise<void>;
   confirmGitHubAppWebhook?: (url: string) => Promise<boolean>;
+  createPiRuntime?: ConstructorParameters<typeof DefaultSetupPlatform>[0]["createPiRuntime"];
   diagnostics?: DefaultSetupPlatform["runDiagnostics"];
   process: SetupProcessRunner;
   fetch?: typeof fetch;
@@ -81,10 +83,13 @@ function platform(input: {
       : { selectCloudflareAccount: input.selectCloudflareAccount }),
     ...(input.shellCommandMs === undefined ? {} : { shellCommandMs: input.shellCommandMs }),
     browser: {
-      async open(url) {
-        input.opened?.push(url);
-      },
+      open:
+        input.browserOpen ??
+        (async (url) => {
+          input.opened?.push(url);
+        }),
     },
+    ...(input.createPiRuntime === undefined ? {} : { createPiRuntime: input.createPiRuntime }),
     diagnostics: input.diagnostics ?? (async () => {}),
     async installService() {},
     async secretPrompt() {
@@ -195,6 +200,38 @@ describe("default greenfield setup platform", () => {
         { command: "api user", timeoutMs: 123 },
       ],
     );
+  });
+
+  it("handles a rejected OAuth browser handoff while login is still active", async () => {
+    const browserFailure = new Error("browser unavailable");
+    let authenticationChecks = 0;
+    let loginFinished = false;
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      browserOpen: async () => {
+        throw browserFailure;
+      },
+      createPiRuntime: async () => ({
+        getModel() {
+          return { reasoning: true };
+        },
+        async checkAuth() {
+          authenticationChecks += 1;
+          return authenticationChecks === 1 ? undefined : { type: "oauth" };
+        },
+        async login(_provider, _method, callbacks) {
+          callbacks.notify({ type: "auth_url", url: "https://example.com/oauth" });
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          loginFinished = true;
+        },
+      }),
+    });
+
+    await assert.rejects(
+      setup.ensurePiAuthentication("openai-codex/gpt-5.6-sol", "high"),
+      browserFailure,
+    );
+    assert.equal(loginFinished, true);
   });
 
   it("authenticates Wrangler and creates KV, Queue, and its HTTP pull consumer", async () => {
