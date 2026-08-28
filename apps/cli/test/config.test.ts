@@ -36,6 +36,7 @@ function testConfiguration(
   paths: Pick<ApplicationPaths, "cacheDir" | "stateDir" | "dataDir">,
 ): RevoirConfiguration {
   return createConfiguration({
+    service: { executablePath: "/Users/test/.local/share/mise/shims:/usr/bin:/bin" },
     github: {
       appId: 7,
       appSlug: "revoir-test",
@@ -165,9 +166,10 @@ describe("greenfield configuration", () => {
             ...configuration.cloudflare,
             relayUrl: "http://user:pass@example.test/?secret=x",
           },
+          service: { executablePath: "relative/bin:/usr/bin" },
           paths: { ...configuration.paths, cacheDir: "cache" },
         }),
-      /configuration\.unexpected is not supported[\s\S]+credential-free HTTPS URL[\s\S]+paths\.cacheDir must be an absolute path/u,
+      /configuration\.unexpected is not supported[\s\S]+service\.executablePath must contain only absolute directories[\s\S]+credential-free HTTPS URL[\s\S]+paths\.cacheDir must be an absolute path/u,
     );
   });
 });

@@ -11,7 +11,7 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { ApplicationPaths } from "../config/paths.js";
 import { LaunchctlProcessAdapter } from "./launchctl.js";
@@ -376,8 +376,12 @@ function currentExecutableArguments(): readonly string[] {
   });
 }
 
-export function resolveServiceExecutablePath(homeDir: string): string {
+export function resolveServiceExecutablePath(
+  homeDir: string,
+  inheritedPath = process.env.PATH,
+): string {
   return [
+    ...(inheritedPath ?? "").split(":").filter((entry) => isAbsolute(entry)),
     join(homeDir, ".local", "bin"),
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -385,11 +389,14 @@ export function resolveServiceExecutablePath(homeDir: string): string {
     "/bin",
     "/usr/sbin",
     "/sbin",
-  ].join(":");
+  ]
+    .filter((entry, index, entries) => entries.indexOf(entry) === index)
+    .join(":");
 }
 
 export function createDefaultServiceManager(input: {
   configFile: string;
+  executablePath?: string;
   homeDir: string;
   paths: ApplicationPaths;
 }): ServiceManager {
@@ -409,7 +416,7 @@ export function createDefaultServiceManager(input: {
       configFile: input.configFile,
       executableArguments: currentExecutableArguments(),
       homeDir: input.homeDir,
-      executablePath: resolveServiceExecutablePath(input.homeDir),
+      executablePath: input.executablePath ?? resolveServiceExecutablePath(input.homeDir),
       paths: input.paths,
       uid,
     },

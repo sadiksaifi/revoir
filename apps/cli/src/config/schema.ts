@@ -29,6 +29,7 @@ export interface CloudflareConfiguration {
 export interface RevoirConfiguration {
   version: typeof CONFIG_VERSION;
   model: { id: string; reasoning: ReasoningLevel };
+  service: { executablePath: string };
   github: GitHubConfiguration;
   cloudflare: CloudflareConfiguration;
   timeouts: { reviewMs: number; shellCommandMs: number };
@@ -37,6 +38,7 @@ export interface RevoirConfiguration {
 
 export interface ConfigurationInput {
   model?: { id?: string; reasoning?: ReasoningLevel };
+  service: RevoirConfiguration["service"];
   github: GitHubConfiguration;
   cloudflare: CloudflareConfiguration;
   timeouts?: Partial<RevoirConfiguration["timeouts"]>;
@@ -112,7 +114,7 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
   checkKeys(
     root,
     "configuration",
-    ["version", "model", "github", "cloudflare", "timeouts", "paths"],
+    ["version", "model", "service", "github", "cloudflare", "timeouts", "paths"],
     issues,
   );
   if (root.version !== CONFIG_VERSION) issues.push(`version must be ${CONFIG_VERSION}.`);
@@ -129,6 +131,19 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
     !(REASONING_LEVELS as readonly string[]).includes(reasoning)
   ) {
     issues.push(`model.reasoning must be one of: ${REASONING_LEVELS.join(", ")}.`);
+  }
+
+  const service = readObject(root.service, "service", issues);
+  if (service !== undefined) checkKeys(service, "service", ["executablePath"], issues);
+  const executablePath =
+    service === undefined
+      ? undefined
+      : readString(service.executablePath, "service.executablePath", issues);
+  if (
+    executablePath !== undefined &&
+    executablePath.split(":").some((entry) => entry === "" || !isAbsolute(entry))
+  ) {
+    issues.push("service.executablePath must contain only absolute directories.");
   }
 
   const github = readObject(root.github, "github", issues);
@@ -241,6 +256,7 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
     issues.length > 0 ||
     modelId === undefined ||
     typeof reasoning !== "string" ||
+    executablePath === undefined ||
     appId === undefined ||
     appSlug === undefined ||
     privateKey === undefined ||
@@ -264,6 +280,7 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
   return {
     version: CONFIG_VERSION,
     model: { id: modelId, reasoning: reasoning as ReasoningLevel },
+    service: { executablePath },
     github: { appId, appSlug, privateKey, webhookSecret },
     cloudflare: {
       accountId,
@@ -286,6 +303,7 @@ export function createConfiguration(input: ConfigurationInput): RevoirConfigurat
       id: input.model?.id ?? DEFAULT_MODEL,
       reasoning: input.model?.reasoning ?? DEFAULT_REASONING,
     },
+    service: input.service,
     github: input.github,
     cloudflare: input.cloudflare,
     timeouts: {

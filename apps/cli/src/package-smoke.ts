@@ -434,6 +434,7 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
     },
     defaults: {
       model: { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
       timeouts: { reviewMs: 1_200_000, shellCommandMs: 120_000 },
       paths: { cacheDir: paths.cacheDir, stateDir: paths.stateDir, dataDir: paths.dataDir },
     },
@@ -447,6 +448,7 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
     throw new Error("Packaged greenfield setup orchestration did not complete cleanly.");
   }
   const configuration = createConfiguration({
+    service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
     github: {
       appId: 2,
       appSlug: "package-smoke",

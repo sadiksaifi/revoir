@@ -204,10 +204,13 @@ describe("launchd service manager", () => {
     });
   });
 
-  it("uses a stable service PATH independent of the invoking shell", () => {
+  it("preserves the setup PATH while appending deterministic service fallbacks", () => {
     assert.equal(
-      resolveServiceExecutablePath("/Users/test"),
-      "/Users/test/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      resolveServiceExecutablePath(
+        "/Users/test",
+        "/Users/test/.local/share/mise/shims:/custom/wrangler/bin:/usr/bin",
+      ),
+      "/Users/test/.local/share/mise/shims:/custom/wrangler/bin:/usr/bin:/Users/test/.local/bin:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/sbin:/sbin",
     );
   });
 

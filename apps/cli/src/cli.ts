@@ -58,6 +58,7 @@ import {
 } from "./service/logging.js";
 import {
   createDefaultServiceManager,
+  resolveServiceExecutablePath,
   type ServiceManager,
   type ServiceStatus,
 } from "./service/manager.js";
@@ -409,6 +410,9 @@ export async function runCli(
         dependencies.serviceManager ??
         createDefaultServiceManager({
           configFile,
+          ...(configuration === undefined
+            ? {}
+            : { executablePath: configuration.service.executablePath }),
           homeDir: io.userHome ?? homedir(),
           paths: managerPaths,
         });
@@ -472,6 +476,7 @@ export async function runCli(
             dependencies.serviceManager ??
             createDefaultServiceManager({
               configFile,
+              executablePath: configuration.service.executablePath,
               homeDir: io.userHome ?? homedir(),
               paths: {
                 ...paths,
@@ -584,6 +589,12 @@ export async function runCli(
           },
           defaults: {
             model: { id: DEFAULT_MODEL, reasoning: DEFAULT_REASONING },
+            service: {
+              executablePath: resolveServiceExecutablePath(
+                io.userHome ?? homedir(),
+                process.env.PATH,
+              ),
+            },
             timeouts: {
               reviewMs: DEFAULT_REVIEW_TIMEOUT_MS,
               shellCommandMs: DEFAULT_SHELL_COMMAND_TIMEOUT_MS,
@@ -738,6 +749,7 @@ export async function runCli(
                 dependencies.serviceManager ??
                 createDefaultServiceManager({
                   configFile,
+                  executablePath: configuration.service.executablePath,
                   homeDir: io.userHome ?? homedir(),
                   paths: {
                     ...paths,

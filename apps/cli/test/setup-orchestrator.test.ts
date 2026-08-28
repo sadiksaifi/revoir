@@ -126,6 +126,7 @@ function setup(state: MemorySetupState, setupPlatform: SetupPlatform) {
     state,
     defaults: {
       model: { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      service: { executablePath: "/Users/test/.local/share/mise/shims:/usr/bin:/bin" },
       timeouts: { reviewMs: 1_200_000, shellCommandMs: 120_000 },
       paths: { cacheDir: "/cache", stateDir: "/state", dataDir: "/data" },
     },
@@ -149,6 +150,10 @@ describe("greenfield end-to-end setup", () => {
     assert.equal(state.finalConfiguration?.github.privateKey, TEST_PRIVATE_KEY);
     assert.equal(state.finalConfiguration?.github.webhookSecret, "github-generated-secret");
     assert.equal(state.finalConfiguration?.cloudflare.apiToken, "queue-token-secret");
+    assert.equal(
+      state.finalConfiguration?.service.executablePath,
+      "/Users/test/.local/share/mise/shims:/usr/bin:/bin",
+    );
     assert.equal(state.checkpoint, undefined);
     assert.deepEqual(setupPlatform.calls, [
       "prerequisites",

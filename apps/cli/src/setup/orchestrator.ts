@@ -137,12 +137,12 @@ function assertCloudflareResources(
 export class EndToEndSetup {
   readonly #platform: SetupPlatform;
   readonly #state: SetupStateStore;
-  readonly #defaults: Pick<RevoirConfiguration, "model" | "timeouts" | "paths">;
+  readonly #defaults: Pick<RevoirConfiguration, "model" | "service" | "timeouts" | "paths">;
 
   constructor(input: {
     platform: SetupPlatform;
     state: SetupStateStore;
-    defaults: Pick<RevoirConfiguration, "model" | "timeouts" | "paths">;
+    defaults: Pick<RevoirConfiguration, "model" | "service" | "timeouts" | "paths">;
   }) {
     this.#platform = input.platform;
     this.#state = input.state;
@@ -466,6 +466,7 @@ export class EndToEndSetup {
     const configuration = {
       version: 1,
       model: this.#defaults.model,
+      service: this.#defaults.service,
       timeouts: this.#defaults.timeouts,
       paths: this.#defaults.paths,
       github: {

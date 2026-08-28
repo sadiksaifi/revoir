@@ -19,6 +19,7 @@ export function createTestConfiguration(
   } = {},
 ): RevoirConfiguration & { policy: RevoirPolicy } {
   const configuration = createConfiguration({
+    service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
     github: {
       appId: 7,
       appSlug: "test-app",

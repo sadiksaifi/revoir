@@ -22,6 +22,7 @@ import { TEST_PRIVATE_KEY } from "./helpers.js";
 
 function configuration(timeouts?: { reviewMs?: number; shellCommandMs?: number }) {
   const value = createConfiguration({
+    service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
     github: {
       appId: 7,
       appSlug: "revoir-test",

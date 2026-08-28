@@ -89,6 +89,7 @@ async function fileIsMissing(path: string): Promise<boolean> {
 
 function configuration(reviewMs = 60_000) {
   const value = createConfiguration({
+    service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
     github: {
       appId: 7,
       appSlug: "revoir-test",
