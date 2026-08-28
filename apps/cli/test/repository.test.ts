@@ -227,7 +227,46 @@ describe("repository authorization", () => {
       ]),
       cancellation,
     );
-    assert.equal(cloudSignal, controller.signal);
+    assert.equal(cloudSignal?.aborted, true);
+    assert.equal(cloudSignal?.reason, cancellation);
+  });
+
+  it("aborts and joins cloud policy loading when the local policy fails", async () => {
+    const localFailure = new Error("local policy unavailable");
+    let cloudAborted = false;
+    let cloudSettled = false;
+    const loader = createEffectivePolicyLoader({
+      async loadLocal() {
+        throw localFailure;
+      },
+      async loadCloud(signal?: AbortSignal) {
+        return new Promise<RevoirPolicy>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              cloudAborted = true;
+              setImmediate(() => {
+                cloudSettled = true;
+                reject(signal.reason);
+              });
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+
+    await assert.rejects(
+      Promise.race([
+        loader(),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("peer policy load was not cancelled")), 100);
+        }),
+      ]),
+      localFailure,
+    );
+    assert.equal(cloudAborted, true);
+    assert.equal(cloudSettled, true);
   });
 
   it("adds local then cloud policy before reporting GitHub-confirmed authorization", async () => {

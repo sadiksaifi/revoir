@@ -400,10 +400,25 @@ export function createEffectivePolicyLoader(
   policies: Pick<RepositoryPolicyStore, "loadLocal" | "loadCloud">,
 ): (signal?: AbortSignal) => Promise<RevoirPolicy> {
   return async (signal) => {
-    const [local, cloud] = await Promise.all([
-      policies.loadLocal(signal),
-      policies.loadCloud(signal),
-    ]);
-    return intersectPolicies(local, cloud);
+    const controller = new AbortController();
+    const operationSignal =
+      signal === undefined ? controller.signal : AbortSignal.any([signal, controller.signal]);
+    const start = (operation: () => Promise<RevoirPolicy>): Promise<RevoirPolicy> => {
+      try {
+        return Promise.resolve(operation());
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+    const localLoading = start(() => policies.loadLocal(operationSignal));
+    const cloudLoading = start(() => policies.loadCloud(operationSignal));
+    try {
+      const [local, cloud] = await Promise.all([localLoading, cloudLoading]);
+      return intersectPolicies(local, cloud);
+    } catch (error) {
+      controller.abort(error);
+      await Promise.allSettled([localLoading, cloudLoading]);
+      throw error;
+    }
   };
 }
