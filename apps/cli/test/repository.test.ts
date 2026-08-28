@@ -316,6 +316,29 @@ describe("repository authorization", () => {
     ]);
   });
 
+  it("reconciles an authorized repository rename by immutable id", async () => {
+    const previousIdentity = { ...REPOSITORY, name: "previous-name" };
+    const policies = new MemoryPolicies();
+    policies.local = withRepository(createEmptyPolicy(42), 8, previousIdentity);
+    policies.cloud = policies.local;
+    const pending = pendingStore();
+
+    const result = await new RepositoryManager({
+      github: fakeGitHub(),
+      policies,
+      pending,
+    }).add({ owner: "Owner", name: "repository" });
+
+    assert.deepEqual(result, {
+      status: "authorized",
+      repository: REPOSITORY,
+      installationId: 8,
+    });
+    assert.deepEqual(policies.local.installations[0]?.repositories, [REPOSITORY]);
+    assert.deepEqual(policies.cloud, policies.local);
+    assert.deepEqual(pending.values, []);
+  });
+
   it("does not rewrite or verify an already-authorized repository policy", async () => {
     const policies = new MemoryPolicies();
     policies.local = withRepository(createEmptyPolicy(42), 8, REPOSITORY);

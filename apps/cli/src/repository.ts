@@ -368,7 +368,22 @@ export class RepositoryManager {
       // Cloud-side revocations may safely narrow local trust before an explicit addition.
       await this.#policies.writeLocal(prior);
     }
-    const next = withRepository(prior, installation.id, discovered.repository);
+    const configuredInstallation = prior.installations.find((candidate) =>
+      candidate.repositories.some(({ id }) => id === discovered.repository.id),
+    );
+    const configuredIdentity = configuredInstallation?.repositories.find(
+      ({ id }) => id === discovered.repository.id,
+    );
+    const renamedInSameInstallation =
+      configuredInstallation?.id === installation.id &&
+      configuredIdentity !== undefined &&
+      (configuredIdentity.owner.toLowerCase() !== discovered.repository.owner.toLowerCase() ||
+        configuredIdentity.name.toLowerCase() !== discovered.repository.name.toLowerCase());
+    const next = withRepository(
+      renamedInSameInstallation ? withoutRepository(prior, discovered.repository.id) : prior,
+      installation.id,
+      discovered.repository,
+    );
     if (!policiesMatch(priorLocal, next)) {
       await this.#policies.writeLocal(next);
     }
