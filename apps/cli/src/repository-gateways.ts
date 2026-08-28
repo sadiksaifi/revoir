@@ -96,12 +96,19 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
+  #request(input: string, init: RequestInit = {}): Promise<Response> {
+    return this.#fetch(input, {
+      ...init,
+      signal: AbortSignal.timeout(this.#shellCommandMs),
+    });
+  }
+
   async #appInstallations(): Promise<GitHubInstallationIdentity[]> {
     const entries: GitHubInstallationIdentity[] = [];
     for (let page = 1; page <= MAX_GITHUB_PAGES; page += 1) {
       const jwt = createGitHubAppJwt(this.#configuration.appId, this.#configuration.privateKey);
       // eslint-disable-next-line no-await-in-loop
-      const response = await this.#fetch(
+      const response = await this.#request(
         `https://api.github.com/app/installations?per_page=${GITHUB_PAGE_SIZE}&page=${page}`,
         { headers: appHeaders(jwt) },
       );
@@ -120,7 +127,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
 
   async #installationToken(installationId: number): Promise<string | undefined> {
     const jwt = createGitHubAppJwt(this.#configuration.appId, this.#configuration.privateKey);
-    const response = await this.#fetch(
+    const response = await this.#request(
       `https://api.github.com/app/installations/${installationId}/access_tokens`,
       { method: "POST", headers: appHeaders(jwt) },
     );
@@ -138,7 +145,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
   async #hasAccess(installationId: number, repositoryId: number): Promise<boolean | undefined> {
     const token = await this.#installationToken(installationId);
     if (token === undefined) return undefined;
-    const response = await this.#fetch(`https://api.github.com/repositories/${repositoryId}`, {
+    const response = await this.#request(`https://api.github.com/repositories/${repositoryId}`, {
       headers: appHeaders(token),
     });
     if (response.status === 404) return false;
@@ -263,7 +270,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
       let complete = false;
       for (let page = 1; page <= MAX_GITHUB_PAGES; page += 1) {
         // eslint-disable-next-line no-await-in-loop
-        const response = await this.#fetch(
+        const response = await this.#request(
           `https://api.github.com/installation/repositories?per_page=${GITHUB_PAGE_SIZE}&page=${page}`,
           { headers: appHeaders(token) },
         );

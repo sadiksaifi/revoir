@@ -32,6 +32,45 @@ function repositories(count: number, offset = 0) {
 }
 
 describe("GitHub repository gateway", () => {
+  it("aborts stalled GitHub REST discovery at the configured shell deadline", async () => {
+    let requestAborted = false;
+    const gateway = new GitHubRepositoryGateway({
+      browser: { async open() {} },
+      configuration: configuration.github,
+      process: {
+        async run() {
+          return {
+            stdout: JSON.stringify({ id: 9001, name: "repository", owner: { login: "owner" } }),
+            stderr: "",
+          };
+        },
+      },
+      shellCommandMs: 5,
+      fetch: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              requestAborted = true;
+              reject(init.signal?.reason);
+            },
+            { once: true },
+          );
+        }),
+    });
+
+    await assert.rejects(
+      Promise.race([
+        gateway.discover({ owner: "owner", name: "repository" }),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("GitHub REST request ignored its deadline")), 100);
+        }),
+      ]),
+      (error) => error instanceof DOMException && error.name === "TimeoutError",
+    );
+    assert.equal(requestAborted, true);
+  });
+
   it("discovers an installation beyond the first GitHub page", async () => {
     const urls: string[] = [];
     let processTimeoutMs: number | undefined;
