@@ -1,10 +1,7 @@
 import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY } from "@revoir/contracts";
 
 import { intersectPolicies, loadPolicy, writePolicy, type RevoirPolicy } from "./config/policy.js";
-import {
-  DEFAULT_SHELL_COMMAND_TIMEOUT_MS,
-  type RevoirConfiguration,
-} from "./config/schema.js";
+import { DEFAULT_SHELL_COMMAND_TIMEOUT_MS, type RevoirConfiguration } from "./config/schema.js";
 import {
   githubInstallationSettingsUrl,
   parseGitHubInstallation,
@@ -25,6 +22,14 @@ const GITHUB_PAGE_SIZE = 100;
 const MAX_GITHUB_PAGES = 100;
 const KV_PROPAGATION_WINDOW_MS = 60_000;
 const KV_ACTIVATION_DEADLINE_MS = 65_000;
+
+function startPolicyLoad(operation: () => Promise<RevoirPolicy>): Promise<RevoirPolicy> {
+  try {
+    return Promise.resolve(operation());
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -403,15 +408,8 @@ export function createEffectivePolicyLoader(
     const controller = new AbortController();
     const operationSignal =
       signal === undefined ? controller.signal : AbortSignal.any([signal, controller.signal]);
-    const start = (operation: () => Promise<RevoirPolicy>): Promise<RevoirPolicy> => {
-      try {
-        return Promise.resolve(operation());
-      } catch (error) {
-        return Promise.reject(error);
-      }
-    };
-    const localLoading = start(() => policies.loadLocal(operationSignal));
-    const cloudLoading = start(() => policies.loadCloud(operationSignal));
+    const localLoading = startPolicyLoad(() => policies.loadLocal(operationSignal));
+    const cloudLoading = startPolicyLoad(() => policies.loadCloud(operationSignal));
     try {
       const [local, cloud] = await Promise.all([localLoading, cloudLoading]);
       return intersectPolicies(local, cloud);
