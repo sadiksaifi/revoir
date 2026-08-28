@@ -86,7 +86,7 @@ export interface DiagnosticGateway {
     policy: RevoirPolicy,
   ): Promise<{ app: string; repositories: string }>;
   checkCloudflare(configuration: RevoirConfiguration["cloudflare"]): Promise<string>;
-  checkRelay(relayUrl: string, webhookSecret: string): Promise<string>;
+  checkRelay(relayUrl: string, webhookSecret: string, timeoutMs: number): Promise<string>;
   checkPolicy(
     configuration: RevoirConfiguration["cloudflare"],
     policy: RevoirPolicy,
@@ -116,6 +116,7 @@ type FetchFunction = (
     method?: string;
     headers?: Readonly<Record<string, string>>;
     body?: string;
+    signal?: AbortSignal;
   },
 ) => Promise<JsonResponse>;
 
@@ -426,7 +427,7 @@ export function createDefaultDiagnosticGateway(
       return `queue ${queueName}, HTTP pull consumer ${consumerId}; token and pull acknowledgement access verified without leasing messages.`;
     },
 
-    async checkRelay(relayUrl, webhookSecret) {
+    async checkRelay(relayUrl, webhookSecret, timeoutMs) {
       const body = "{}";
       const signature = `sha256=${createHmac("sha256", webhookSecret).update(body).digest("hex")}`;
       const response = await fetchImplementation(relayUrl, {
@@ -438,6 +439,7 @@ export function createDefaultDiagnosticGateway(
           "X-Hub-Signature-256": signature,
         },
         body,
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (response.status !== 202) {
         throw new Error(
@@ -553,7 +555,11 @@ export async function runDiagnostics(
       gateway.checkCloudflare(configuration.cloudflare),
     ),
     capture("relay", "Webhook relay", () =>
-      gateway.checkRelay(configuration.cloudflare.relayUrl, configuration.github.webhookSecret),
+      gateway.checkRelay(
+        configuration.cloudflare.relayUrl,
+        configuration.github.webhookSecret,
+        configuration.timeouts.shellCommandMs,
+      ),
     ),
     capture("policy", "Repository policy", () =>
       gateway.checkPolicy(configuration.cloudflare, policy),

@@ -219,6 +219,7 @@ describe("diagnostic contracts", () => {
       await gateway.checkRelay(
         configuration.cloudflare.relayUrl,
         configuration.github.webhookSecret,
+        configuration.timeouts.shellCommandMs,
       ),
       /relay signature and policy path/u,
     );
@@ -237,6 +238,38 @@ describe("diagnostic contracts", () => {
     assert.equal(requests[7]?.event, "pull_request");
     assert.match(requests[7]?.signature ?? "", /^sha256=[0-9a-f]{64}$/u);
     assert.equal(requests[7]?.body, "{}");
+  });
+
+  it("aborts a stalled relay diagnostic at the configured shell deadline", async () => {
+    let relayAborted = false;
+    const gateway = createDefaultDiagnosticGateway(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              relayAborted = true;
+              reject(init.signal?.reason);
+            },
+            { once: true },
+          );
+        }),
+    );
+
+    await assert.rejects(
+      Promise.race([
+        gateway.checkRelay(
+          configuration.cloudflare.relayUrl,
+          configuration.github.webhookSecret,
+          5,
+        ),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("relay diagnostic ignored its deadline")), 100);
+        }),
+      ]),
+      (error) => error instanceof DOMException && error.name === "TimeoutError",
+    );
+    assert.equal(relayAborted, true);
   });
 
   it("validates every installation with its own token and repository allowlist", async () => {
