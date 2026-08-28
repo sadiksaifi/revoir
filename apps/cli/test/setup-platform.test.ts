@@ -322,10 +322,7 @@ describe("default greenfield setup platform", () => {
     await setup.deployRelay(RESOURCES);
 
     assert.equal(process.calls[0]?.timeoutMs, 123);
-    assert.equal(
-      process.calls[0]?.environment?.CLOUDFLARE_ACCOUNT_ID,
-      RESOURCES.accountId,
-    );
+    assert.equal(process.calls[0]?.environment?.CLOUDFLARE_ACCOUNT_ID, RESOURCES.accountId);
   });
 
   it("scopes final setup diagnostics policy reads to the selected Cloudflare account", async () => {

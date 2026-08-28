@@ -6,10 +6,7 @@ import { join } from "node:path";
 import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY, REVOIR_WEBHOOK_PATH } from "@revoir/contracts";
 
 import type { RevoirPolicy } from "../config/policy.js";
-import {
-  DEFAULT_SHELL_COMMAND_TIMEOUT_MS,
-  type RevoirConfiguration,
-} from "../config/schema.js";
+import { DEFAULT_SHELL_COMMAND_TIMEOUT_MS, type RevoirConfiguration } from "../config/schema.js";
 import { EMBEDDED_RELAY_SHA256, EMBEDDED_RELAY_SOURCE } from "../generated/relay-artifact.js";
 import { githubInstallationSettingsUrl, parseGitHubInstallation } from "../github-installation.js";
 import { createGitHubAppJwt } from "../review/github.js";
