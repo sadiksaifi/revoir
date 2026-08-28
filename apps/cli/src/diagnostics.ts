@@ -84,8 +84,12 @@ export interface DiagnosticGateway {
   checkGitHub(
     configuration: RevoirConfiguration["github"],
     policy: RevoirPolicy,
+    timeoutMs?: number,
   ): Promise<{ app: string; repositories: string }>;
-  checkCloudflare(configuration: RevoirConfiguration["cloudflare"]): Promise<string>;
+  checkCloudflare(
+    configuration: RevoirConfiguration["cloudflare"],
+    timeoutMs?: number,
+  ): Promise<string>;
   checkRelay(relayUrl: string, webhookSecret: string, timeoutMs: number): Promise<string>;
   checkPolicy(
     configuration: RevoirConfiguration["cloudflare"],
@@ -260,9 +264,12 @@ export function createDefaultDiagnosticGateway(
       return `${modelId} (${reasoning} reasoning), OpenAI Codex OAuth`;
     },
 
-    async checkGitHub(configuration, policy) {
+    async checkGitHub(configuration, policy, timeoutMs = 120_000) {
+      const signal = AbortSignal.timeout(timeoutMs);
+      const boundedFetch: FetchFunction = (input, init) =>
+        fetchImplementation(input, { ...init, signal });
       const appJwt = createGitHubAppJwt(configuration.appId, configuration.privateKey);
-      const app = await requestJson(fetchImplementation, "GitHub App", `${GITHUB_API}/app`, {
+      const app = await requestJson(boundedFetch, "GitHub App", `${GITHUB_API}/app`, {
         headers: githubHeaders(appJwt),
       });
       if (app.id !== configuration.appId) {
@@ -275,7 +282,7 @@ export function createDefaultDiagnosticGateway(
       const installationResults = await Promise.all(
         policy.installations.map(async (installation) => {
           const tokenResponse = await requestJson(
-            fetchImplementation,
+            boundedFetch,
             `GitHub installation ${installation.id}`,
             `${GITHUB_API}/app/installations/${installation.id}/access_tokens`,
             { method: "POST", headers: githubHeaders(appJwt) },
@@ -289,7 +296,7 @@ export function createDefaultDiagnosticGateway(
           const installationToken = tokenResponse.token;
 
           const user = await requestJson(
-            fetchImplementation,
+            boundedFetch,
             "GitHub user identity",
             `${GITHUB_API}/user/${policy.userId}`,
             { headers: githubHeaders(installationToken) },
@@ -303,7 +310,7 @@ export function createDefaultDiagnosticGateway(
           await Promise.all(
             installation.repositories.map(async (repository) => {
               const response = await requestJson(
-                fetchImplementation,
+                boundedFetch,
                 "GitHub repository",
                 `${GITHUB_API}/repositories/${repository.id}`,
                 { headers: githubHeaders(installationToken) },
@@ -343,13 +350,16 @@ export function createDefaultDiagnosticGateway(
       };
     },
 
-    async checkCloudflare(configuration) {
+    async checkCloudflare(configuration, timeoutMs = 120_000) {
+      const signal = AbortSignal.timeout(timeoutMs);
+      const boundedFetch: FetchFunction = (input, init) =>
+        fetchImplementation(input, { ...init, signal });
       const headers = {
         Authorization: `Bearer ${configuration.apiToken}`,
         "Content-Type": "application/json",
       };
       const queueUrl = `${CLOUDFLARE_API}/accounts/${encodeURIComponent(configuration.accountId)}/queues/${encodeURIComponent(configuration.queueId)}`;
-      const response = await requestJson(fetchImplementation, "Cloudflare Queue", queueUrl, {
+      const response = await requestJson(boundedFetch, "Cloudflare Queue", queueUrl, {
         headers,
       });
       if (response.success !== true) {
@@ -372,7 +382,7 @@ export function createDefaultDiagnosticGateway(
       }
 
       const consumerResponse = await requestJson(
-        fetchImplementation,
+        boundedFetch,
         "Cloudflare Queue consumers",
         `${queueUrl}/consumers`,
         { headers },
@@ -398,7 +408,7 @@ export function createDefaultDiagnosticGateway(
         // Empty lists exercise the pull consumer's write-only acknowledgement endpoint
         // without pulling, leasing, acknowledging, or retrying a real message.
         acknowledgementResponse = await requestJson(
-          fetchImplementation,
+          boundedFetch,
           "Cloudflare Queue pull acknowledgement",
           `${queueUrl}/messages/ack`,
           {
@@ -517,7 +527,11 @@ export async function runDiagnostics(
     ),
     (async () => {
       try {
-        const result = await gateway.checkGitHub(configuration.github, policy);
+        const result = await gateway.checkGitHub(
+          configuration.github,
+          policy,
+          configuration.timeouts.shellCommandMs,
+        );
         return [
           {
             id: "github",
@@ -552,7 +566,7 @@ export async function runDiagnostics(
       }
     })(),
     capture("cloudflare", "Cloudflare Queue", () =>
-      gateway.checkCloudflare(configuration.cloudflare),
+      gateway.checkCloudflare(configuration.cloudflare, configuration.timeouts.shellCommandMs),
     ),
     capture("relay", "Webhook relay", () =>
       gateway.checkRelay(

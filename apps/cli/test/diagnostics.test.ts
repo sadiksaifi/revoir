@@ -34,6 +34,66 @@ describe("diagnostic contracts", () => {
     );
   });
 
+  it("passes the configured shell deadline to remote GitHub and Cloudflare diagnostics", async () => {
+    const deadlines: number[] = [];
+    const gateway: DiagnosticGateway = {
+      ...passingGateway(),
+      async checkGitHub(_github, _policy, timeoutMs) {
+        deadlines.push(timeoutMs ?? -1);
+        return { app: "app", repositories: "" };
+      },
+      async checkCloudflare(_cloudflare, timeoutMs) {
+        deadlines.push(timeoutMs ?? -1);
+        return "queue";
+      },
+    };
+
+    await runDiagnostics(configuration, configuration.policy, gateway);
+
+    assert.deepEqual(deadlines, [
+      configuration.timeouts.shellCommandMs,
+      configuration.timeouts.shellCommandMs,
+    ]);
+  });
+
+  it("aborts stalled GitHub and Cloudflare diagnostic requests at the shell deadline", async () => {
+    const operations = [
+      (gateway: DiagnosticGateway) =>
+        gateway.checkGitHub(configuration.github, configuration.policy, 5),
+      (gateway: DiagnosticGateway) => gateway.checkCloudflare(configuration.cloudflare, 5),
+    ];
+
+    for (const operation of operations) {
+      let aborted = false;
+      const gateway = createDefaultDiagnosticGateway(
+        async (_url, init) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => {
+                aborted = true;
+                reject(init.signal?.reason);
+              },
+              { once: true },
+            );
+          }),
+      );
+
+      // Each iteration owns an isolated fake transport and timeout.
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(
+        Promise.race([
+          operation(gateway),
+          new Promise<never>((_resolve, reject) => {
+            setTimeout(() => reject(new Error("diagnostic request ignored its deadline")), 100);
+          }),
+        ]),
+        (error) => error instanceof DOMException && error.name === "TimeoutError",
+      );
+      assert.equal(aborted, true);
+    }
+  });
+
   it("includes the LaunchAgent health boundary when the caller supplies it", async () => {
     const results = await runDiagnostics(
       configuration,
