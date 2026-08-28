@@ -863,21 +863,21 @@ export class DefaultSetupPlatform implements SetupPlatform {
     const activationAt = startedAt + KV_PROPAGATION_WINDOW_MS;
     const deadline = startedAt + KV_ACTIVATION_DEADLINE_MS;
     do {
-      // eslint-disable-next-line no-await-in-loop
-      const result = await this.#process.run(
-        "wrangler",
-        [
-          "kv",
-          "key",
-          "get",
-          `--namespace-id=${resources.kvNamespaceId}`,
-          REVOIR_POLICY_KV_KEY,
-          "--remote",
-          "--text",
-        ],
-        this.#cloudflareOptions(resources.accountId),
-      );
       try {
+        // eslint-disable-next-line no-await-in-loop
+        const result = await this.#process.run(
+          "wrangler",
+          [
+            "kv",
+            "key",
+            "get",
+            `--namespace-id=${resources.kvNamespaceId}`,
+            REVOIR_POLICY_KV_KEY,
+            "--remote",
+            "--text",
+          ],
+          this.#cloudflareOptions(resources.accountId),
+        );
         if (
           samePolicy(parseRevoirPolicy(JSON.parse(result.stdout) as unknown), expected) &&
           this.#now() >= activationAt

@@ -843,6 +843,28 @@ describe("default greenfield setup platform", () => {
     assert.equal(sleeps.length, 60);
   });
 
+  it("retries transient Wrangler failures while verifying KV propagation", async () => {
+    const expected = createEmptyPolicy(42);
+    let now = 0;
+    let reads = 0;
+    const setup = platform({
+      process: new FakeProcess(() => {
+        reads += 1;
+        if (reads === 1) throw new Error("transient Wrangler failure");
+        return { stdout: JSON.stringify(expected), stderr: "" };
+      }),
+      now: () => now,
+      sleep: async (milliseconds) => {
+        now += milliseconds;
+      },
+    });
+
+    await setup.verifyCloudPolicy(RESOURCES, expected);
+
+    assert.equal(now, 60_000);
+    assert.equal(reads, 61);
+  });
+
   it("fails closed when the KV policy misses the propagation deadline", async () => {
     let now = 0;
     let reads = 0;
