@@ -512,6 +512,7 @@ export async function runCli(
                   browser,
                   configuration: configuration.github,
                   process: processRunner,
+                  shellCommandMs: configuration.timeouts.shellCommandMs,
                 }),
                 policies: new LocalAndWranglerPolicyStore({
                   cloudflare: configuration.cloudflare,
@@ -626,6 +627,7 @@ export async function runCli(
             github: new GitHubRepositoryGateway({
               browser: createBrowserOpener(new ChildProcessSetupRunner()),
               configuration: configuration.github,
+              shellCommandMs: configuration.timeouts.shellCommandMs,
             }),
             policies: new LocalAndWranglerPolicyStore({
               cloudflare: configuration.cloudflare,
@@ -714,6 +716,7 @@ export async function runCli(
                 github: new GitHubRepositoryGateway({
                   browser: createBrowserOpener(new ChildProcessSetupRunner()),
                   configuration: configuration.github,
+                  shellCommandMs: configuration.timeouts.shellCommandMs,
                 }),
                 policies: new LocalAndWranglerPolicyStore({
                   cloudflare: configuration.cloudflare,

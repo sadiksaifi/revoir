@@ -1,7 +1,10 @@
 import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY } from "@revoir/contracts";
 
 import { intersectPolicies, loadPolicy, writePolicy, type RevoirPolicy } from "./config/policy.js";
-import type { RevoirConfiguration } from "./config/schema.js";
+import {
+  DEFAULT_SHELL_COMMAND_TIMEOUT_MS,
+  type RevoirConfiguration,
+} from "./config/schema.js";
 import {
   githubInstallationSettingsUrl,
   parseGitHubInstallation,
@@ -65,6 +68,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
   readonly #fetch: FetchLike;
   readonly #pollAttempts: number;
   readonly #process: SetupProcessRunner;
+  readonly #shellCommandMs: number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
 
   constructor(input: {
@@ -72,6 +76,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
     configuration: RevoirConfiguration["github"];
     fetch?: FetchLike;
     process?: SetupProcessRunner;
+    shellCommandMs?: number;
     pollAttempts?: number;
     sleep?: (milliseconds: number) => Promise<void>;
   }) {
@@ -79,6 +84,7 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
     this.#configuration = input.configuration;
     this.#fetch = input.fetch ?? fetch;
     this.#process = input.process ?? new ChildProcessSetupRunner();
+    this.#shellCommandMs = input.shellCommandMs ?? DEFAULT_SHELL_COMMAND_TIMEOUT_MS;
     this.#pollAttempts = input.pollAttempts ?? 15;
     this.#sleep =
       input.sleep ??
@@ -139,7 +145,9 @@ export class GitHubRepositoryGateway implements RepositoryGitHubGateway {
 
   async #publicRepository(reference: RepositoryReference) {
     const output = await this.#process
-      .run("gh", ["api", `repos/${reference.owner}/${reference.name}`])
+      .run("gh", ["api", `repos/${reference.owner}/${reference.name}`], {
+        timeoutMs: this.#shellCommandMs,
+      })
       .then(({ stdout }) => stdout)
       .catch((error: unknown) => {
         throw new Error(

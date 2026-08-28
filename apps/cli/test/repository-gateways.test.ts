@@ -34,8 +34,10 @@ function repositories(count: number, offset = 0) {
 describe("GitHub repository gateway", () => {
   it("discovers an installation beyond the first GitHub page", async () => {
     const urls: string[] = [];
+    let processTimeoutMs: number | undefined;
     const process: SetupProcessRunner = {
-      async run() {
+      async run(_command, _arguments, options) {
+        processTimeoutMs = options?.timeoutMs;
         return {
           stdout: JSON.stringify({ id: 9001, name: "repository", owner: { login: "owner" } }),
           stderr: "",
@@ -46,6 +48,7 @@ describe("GitHub repository gateway", () => {
       browser: { async open() {} },
       configuration: configuration.github,
       process,
+      shellCommandMs: 123,
       fetch: async (input) => {
         const url = String(input);
         urls.push(url);
@@ -78,6 +81,7 @@ describe("GitHub repository gateway", () => {
         .map((url) => new URL(url).searchParams.get("page")),
       ["1", "2"],
     );
+    assert.equal(processTimeoutMs, 123);
   });
 
   it("treats an installation-token 404 during discovery as authoritative uninstallation", async () => {
