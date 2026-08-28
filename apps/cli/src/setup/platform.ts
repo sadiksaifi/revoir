@@ -230,7 +230,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
   async ensureGitHubAuthentication(): Promise<{ userId: number; login: string }> {
     try {
       try {
-        await this.#process.run("gh", ["auth", "status"]);
+        await this.#process.run("gh", ["auth", "status"], { timeoutMs: this.#shellCommandMs });
       } catch {
         await this.#process.run("gh", ["auth", "login", "--web"], { interactive: true });
       }
@@ -241,7 +241,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
       );
     }
     const response = parseJsonRecord(
-      (await this.#process.run("gh", ["api", "user"])).stdout,
+      (await this.#process.run("gh", ["api", "user"], { timeoutMs: this.#shellCommandMs })).stdout,
       "GitHub CLI",
     );
     if (typeof response.login !== "string" || response.login === "") {

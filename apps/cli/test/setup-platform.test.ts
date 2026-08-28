@@ -156,6 +156,27 @@ describe("default greenfield setup platform", () => {
     assert.equal(appName.length, 34);
   });
 
+  it("bounds noninteractive GitHub authentication probes with the setup shell timeout", async () => {
+    const process = new FakeProcess((_command, arguments_) => ({
+      stdout:
+        arguments_.join(" ") === "api user" ? JSON.stringify({ id: 42, login: "test-user" }) : "",
+      stderr: "",
+    }));
+    const setup = platform({ process, shellCommandMs: 123 });
+
+    assert.deepEqual(await setup.ensureGitHubAuthentication(), { userId: 42, login: "test-user" });
+    assert.deepEqual(
+      process.calls.map(({ arguments: arguments_, timeoutMs }) => ({
+        command: arguments_.join(" "),
+        timeoutMs,
+      })),
+      [
+        { command: "auth status", timeoutMs: 123 },
+        { command: "api user", timeoutMs: 123 },
+      ],
+    );
+  });
+
   it("authenticates Wrangler and creates KV, Queue, and its HTTP pull consumer", async () => {
     const accountId = "a".repeat(32);
     const otherAccountId = "b".repeat(32);
