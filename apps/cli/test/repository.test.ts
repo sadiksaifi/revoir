@@ -380,6 +380,36 @@ describe("repository authorization", () => {
     assert.deepEqual(policies.events, ["local:1", "cloud:1", "local:0"]);
   });
 
+  it("revalidates cloud propagation after interruption between put and verification", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    let writes = 0;
+    policies.writeCloud = async (policy) => {
+      writes += 1;
+      policies.cloud = policy;
+    };
+    policies.verifyCloud = async () => {
+      throw new Error("interrupted before propagation verification");
+    };
+    const manager = new RepositoryManager({ github: fakeGitHub(), policies, pending });
+
+    await assert.rejects(
+      manager.add({ owner: "Owner", name: "repository" }),
+      RepositoryPolicyUpdateError,
+    );
+    assert.equal(writes, 1);
+    assert.equal(pending.values[0]?.phase, "policy-propagation");
+
+    let verifications = 0;
+    policies.verifyCloud = async () => {
+      verifications += 1;
+    };
+    assert.equal((await manager.add({ owner: "Owner", name: "repository" })).status, "authorized");
+    assert.equal(writes, 1);
+    assert.equal(verifications, 1);
+    assert.deepEqual(pending.values, []);
+  });
+
   it("preserves cloud revocations when adding a different repository", async () => {
     const policies = new MemoryPolicies();
     policies.local = withRepository(createEmptyPolicy(42), 7, {

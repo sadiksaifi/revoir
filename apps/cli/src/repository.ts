@@ -65,6 +65,7 @@ export interface RepositoryPolicyStore {
 export interface PendingRepositoryOperation {
   version: 1;
   kind: "add" | "remove";
+  phase?: "policy-propagation";
   repository: RepositoryIdentity;
   installationId?: number;
   settingsUrl?: string;
@@ -231,6 +232,12 @@ export class RepositoryManager {
     const discovered = await this.#github.discover(reference);
     let installation = discovered.installation;
     const pendingOperations = await this.#pending.load();
+    const pendingPropagation = pendingOperations.some(
+      (operation) =>
+        operation.kind === "add" &&
+        operation.phase === "policy-propagation" &&
+        operation.repository.id === discovered.repository.id,
+    );
     const replacedPendingAdds = pendingOperations.filter(
       (operation) =>
         operation.kind === "add" &&
@@ -384,12 +391,26 @@ export class RepositoryManager {
       installation.id,
       discovered.repository,
     );
+    const cloudWriteRequired = !policiesMatch(priorCloud, next);
+    if (cloudWriteRequired) {
+      await this.#pending.upsert({
+        version: 1,
+        kind: "add",
+        phase: "policy-propagation",
+        repository: discovered.repository,
+        installationId: installation.id,
+        settingsUrl: installation.settingsUrl,
+        createdAt: this.#now().toISOString(),
+      });
+    }
     if (!policiesMatch(priorLocal, next)) {
       await this.#policies.writeLocal(next);
     }
     try {
-      if (!policiesMatch(priorCloud, next)) {
+      if (cloudWriteRequired) {
         await this.#policies.writeCloud(next);
+      }
+      if (cloudWriteRequired || pendingPropagation) {
         await this.#policies.verifyCloud(next);
       }
     } catch (error) {
@@ -724,6 +745,8 @@ function parsePending(value: unknown): PendingRepositoryOperation[] {
     if (
       operation.version !== 1 ||
       (operation.kind !== "add" && operation.kind !== "remove") ||
+      (operation.phase !== undefined &&
+        (operation.kind !== "add" || operation.phase !== "policy-propagation")) ||
       typeof repository !== "object" ||
       repository === null ||
       !Number.isSafeInteger(repository.id) ||
