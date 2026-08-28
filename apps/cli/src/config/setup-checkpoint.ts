@@ -40,6 +40,7 @@ export interface SetupCheckpoint {
     github?: { appId: number; appSlug: string };
   };
   secrets: {
+    githubManifestCode?: string;
     githubWebhookSecret?: string;
     githubPrivateKey?: string;
     cloudflareQueueApiToken?: string;
@@ -173,10 +174,12 @@ export function validateSetupCheckpoint(value: unknown): SetupCheckpoint {
   if (
     !isRecord(value.secrets) ||
     !hasOnlyKeys(value.secrets, [
+      "githubManifestCode",
       "githubWebhookSecret",
       "githubPrivateKey",
       "cloudflareQueueApiToken",
     ]) ||
+    !optionalString(value.secrets.githubManifestCode) ||
     !optionalString(value.secrets.githubWebhookSecret) ||
     !optionalString(value.secrets.githubPrivateKey) ||
     !optionalString(value.secrets.cloudflareQueueApiToken)

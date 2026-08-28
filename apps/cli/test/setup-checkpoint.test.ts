@@ -144,6 +144,7 @@ describe("setup checkpoint", () => {
     const root = await temporaryDirectory();
     const checkpointFile = join(root, "config", "setup-checkpoint.json");
     const checkpoint = createSetupCheckpoint();
+    checkpoint.secrets.githubManifestCode = "one-time-manifest-code";
     checkpoint.secrets.githubWebhookSecret = "generated-before-manifest";
     await writeSetupCheckpoint(checkpointFile, checkpoint);
 

@@ -149,6 +149,7 @@ describe("default greenfield setup platform", () => {
     await setup.createGitHubApp({
       relayUrl: "https://relay.example.workers.dev/github/webhook",
       state: "0123456789abcdef",
+      async persistConversionCode() {},
       persist: async () => {},
     });
 

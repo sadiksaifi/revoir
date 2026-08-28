@@ -615,8 +615,10 @@ export class DefaultSetupPlatform implements SetupPlatform {
   }
 
   createGitHubApp(input: {
+    conversionCode?: string;
     relayUrl: string;
     state: string;
+    persistConversionCode: (code: string) => Promise<void>;
     persist: (app: SetupGitHubApp) => Promise<void>;
   }): Promise<SetupGitHubApp> {
     const machine =

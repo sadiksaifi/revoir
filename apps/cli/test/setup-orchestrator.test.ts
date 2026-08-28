@@ -292,6 +292,37 @@ describe("greenfield end-to-end setup", () => {
     assert.equal(state.finalConfiguration?.github.privateKey, TEST_PRIVATE_KEY);
   });
 
+  it("checkpoints the manifest code before conversion and resumes without a new registration", async () => {
+    const state = new MemorySetupState();
+    const interrupted = platform(state);
+    interrupted.createGitHubApp = async (input) => {
+      await input.persistConversionCode("one-time-manifest-code");
+      throw new Error("conversion response interrupted");
+    };
+
+    await assert.rejects(setup(state, interrupted).run(), /github-app/u);
+    assert.equal(state.checkpoint?.secrets.githubManifestCode, "one-time-manifest-code");
+
+    const resumed = platform(state);
+    let resumedCode: string | undefined;
+    resumed.createGitHubApp = async (input) => {
+      resumedCode = input.conversionCode;
+      const app = {
+        appId: 7,
+        appSlug: "revoir-test",
+        privateKey: TEST_PRIVATE_KEY,
+        webhookSecret: "github-generated-secret",
+      };
+      await input.persist(app);
+      return app;
+    };
+
+    await setup(state, resumed).run();
+
+    assert.equal(resumedCode, "one-time-manifest-code");
+    assert.equal(state.finalConfiguration?.github.privateKey, TEST_PRIVATE_KEY);
+  });
+
   it("resumes secret installation from the checkpointed GitHub-generated credentials", async () => {
     const state = new MemorySetupState();
     const firstPlatform = platform(state);

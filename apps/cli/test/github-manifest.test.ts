@@ -23,6 +23,7 @@ function decodeHtml(value: string): string {
 describe("GitHub App Manifest flow", () => {
   it("binds to loopback, submits an Any-account manifest, validates state, and converts once", async () => {
     let manifest: Record<string, unknown> | undefined;
+    let persistedCode: string | undefined;
     const opened: string[] = [];
     const flow = new GitHubManifestFlow(
       {
@@ -41,6 +42,7 @@ describe("GitHub App Manifest flow", () => {
         },
       },
       async (url, init) => {
+        assert.equal(persistedCode, "one-time-code");
         assert.equal(String(url), "https://api.github.com/app-manifests/one-time-code/conversions");
         assert.equal(init?.method, "POST");
         return new Response(
@@ -58,6 +60,9 @@ describe("GitHub App Manifest flow", () => {
       appName: "Revoir Test",
       relayUrl: "https://relay.example.workers.dev/github/webhook",
       state: "expected-state",
+      async persistConversionCode(code) {
+        persistedCode = code;
+      },
     });
 
     assert.deepEqual(result, {
@@ -75,6 +80,39 @@ describe("GitHub App Manifest flow", () => {
       url: "https://relay.example.workers.dev/github/webhook",
     });
     assert.match(String(manifest?.redirect_url), /^http:\/\/127\.0\.0\.1:\d+\/callback$/u);
+  });
+
+  it("resumes a checkpointed manifest conversion without opening another registration", async () => {
+    let browserOpens = 0;
+    const flow = new GitHubManifestFlow(
+      {
+        async open() {
+          browserOpens += 1;
+        },
+      },
+      async (url) => {
+        assert.equal(
+          String(url),
+          "https://api.github.com/app-manifests/checkpointed-code/conversions",
+        );
+        return Response.json({
+          id: 7,
+          slug: "revoir-test",
+          pem: PRIVATE_KEY,
+          webhook_secret: "github-generated-secret",
+        });
+      },
+    );
+
+    const result = await flow.create({
+      appName: "Revoir Test",
+      conversionCode: "checkpointed-code",
+      relayUrl: "https://relay.example.workers.dev/github/webhook",
+      state: "expected-state",
+    });
+
+    assert.equal(browserOpens, 0);
+    assert.equal(result.appId, 7);
   });
 
   it("rejects a callback with the wrong state before conversion", async () => {

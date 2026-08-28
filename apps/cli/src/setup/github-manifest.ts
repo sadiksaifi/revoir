@@ -115,12 +115,41 @@ export class GitHubManifestFlow {
     this.#timeoutMs = timeoutMs;
   }
 
+  async #convert(
+    code: string,
+    persist?: (result: GitHubManifestResult) => Promise<void>,
+  ): Promise<GitHubManifestResult> {
+    const response = await this.#fetch(
+      `https://api.github.com/app-manifests/${encodeURIComponent(code)}/conversions`,
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "revoir",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        signal: AbortSignal.timeout(this.#timeoutMs),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(`GitHub App Manifest conversion failed with HTTP ${response.status}.`);
+    }
+    const result = parseConversion(await response.json());
+    await persist?.(result);
+    return result;
+  }
+
   async create(input: {
     appName: string;
+    conversionCode?: string;
     relayUrl: string;
     state: string;
+    persistConversionCode?: (code: string) => Promise<void>;
     persist?: (result: GitHubManifestResult) => Promise<void>;
   }): Promise<GitHubManifestResult> {
+    if (input.conversionCode !== undefined) {
+      return this.#convert(input.conversionCode, input.persist);
+    }
     const callback = pendingCallback();
     void callback.promise.catch(() => {});
     let manifestJson = "";
@@ -191,23 +220,8 @@ export class GitHubManifestFlow {
           ).unref();
         }),
       ]);
-      const response = await this.#fetch(
-        `https://api.github.com/app-manifests/${encodeURIComponent(code)}/conversions`,
-        {
-          method: "POST",
-          headers: {
-            Accept: "application/vnd.github+json",
-            "User-Agent": "revoir",
-            "X-GitHub-Api-Version": "2022-11-28",
-          },
-        },
-      );
-      if (!response.ok) {
-        throw new Error(`GitHub App Manifest conversion failed with HTTP ${response.status}.`);
-      }
-      const result = parseConversion(await response.json());
-      await input.persist?.(result);
-      return result;
+      await input.persistConversionCode?.(code);
+      return await this.#convert(code, input.persist);
     } finally {
       await closeServer(server);
     }

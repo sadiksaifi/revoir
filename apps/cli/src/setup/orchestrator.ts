@@ -39,8 +39,10 @@ export interface SetupPlatform {
   relayIsCurrent(resources: SetupCloudflareResources, webhookSecret: string): Promise<boolean>;
   configureRelaySecret(resources: SetupCloudflareResources, webhookSecret: string): Promise<void>;
   createGitHubApp(input: {
+    conversionCode?: string;
     relayUrl: string;
     state: string;
+    persistConversionCode: (code: string) => Promise<void>;
     persist: (app: SetupGitHubApp) => Promise<void>;
   }): Promise<SetupGitHubApp>;
   reconcileGitHubApp(configuration: RevoirConfiguration, policy: RevoirPolicy): Promise<void>;
@@ -402,9 +404,21 @@ export class EndToEndSetup {
         };
       } else {
         github = await this.#platform.createGitHubApp({
+          ...(checkpoint.secrets.githubManifestCode === undefined
+            ? {}
+            : { conversionCode: checkpoint.secrets.githubManifestCode }),
           relayUrl,
           state: randomBytes(32).toString("base64url"),
+          persistConversionCode: async (code) => {
+            checkpoint = {
+              ...checkpoint,
+              secrets: { ...checkpoint.secrets, githubManifestCode: code },
+            };
+            await writeCheckpoint(checkpoint);
+          },
           persist: async (created) => {
+            const { githubManifestCode: _githubManifestCode, ...persistedSecrets } =
+              checkpoint.secrets;
             checkpoint = {
               ...checkpoint,
               resources: {
@@ -412,7 +426,7 @@ export class EndToEndSetup {
                 github: { appId: created.appId, appSlug: created.appSlug },
               },
               secrets: {
-                ...checkpoint.secrets,
+                ...persistedSecrets,
                 githubPrivateKey: created.privateKey,
                 githubWebhookSecret: created.webhookSecret,
               },
