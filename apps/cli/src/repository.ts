@@ -222,10 +222,8 @@ export class RepositoryManager {
   }
 
   async #authenticate(): Promise<void> {
-    await Promise.all([
-      this.#github.ensureAuthenticated?.(),
-      this.#policies.ensureAuthenticated?.(),
-    ]);
+    await this.#github.ensureAuthenticated?.();
+    await this.#policies.ensureAuthenticated?.();
   }
 
   async add(reference: RepositoryReference): Promise<RepositoryAddResult> {

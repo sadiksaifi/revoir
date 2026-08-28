@@ -157,6 +157,36 @@ describe("repository references", () => {
 });
 
 describe("repository authorization", () => {
+  it("serializes interactive GitHub and Wrangler authentication", async () => {
+    const events: string[] = [];
+    let finishGitHubAuthentication: (() => void) | undefined;
+    const githubAuthentication = new Promise<void>((resolve) => {
+      finishGitHubAuthentication = resolve;
+    });
+    const github = fakeGitHub();
+    github.ensureAuthenticated = async () => {
+      events.push("github-started");
+      await githubAuthentication;
+      events.push("github-finished");
+    };
+    const policies = new MemoryPolicies();
+    policies.ensureAuthenticated = async () => {
+      events.push("wrangler-started");
+    };
+
+    const adding = new RepositoryManager({
+      github,
+      policies,
+      pending: pendingStore(),
+    }).add({ owner: "Owner", name: "repository" });
+    await Promise.resolve();
+    assert.deepEqual(events, ["github-started"]);
+
+    finishGitHubAuthentication?.();
+    await adding;
+    assert.deepEqual(events, ["github-started", "github-finished", "wrangler-started"]);
+  });
+
   it("atomically replaces persisted add intent with removal intent", async () => {
     const root = await mkdtemp(join(tmpdir(), "revoir-pending-transition-test-"));
     try {
