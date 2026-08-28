@@ -600,16 +600,20 @@ export class DefaultSetupPlatform implements SetupPlatform {
     webhookSecret: string,
   ): Promise<boolean> {
     if (resources.relayUrl === undefined) return false;
-    const deployment = parseJsonRecord(
-      (
-        await this.#process.run(
-          "wrangler",
-          ["deployments", "status", "--name", resources.workerName, "--json"],
-          this.#cloudflareOptions(resources.accountId),
-        )
-      ).stdout,
-      "Wrangler deployment status",
-    );
+    let deploymentResult: ProcessResult;
+    try {
+      deploymentResult = await this.#process.run(
+        "wrangler",
+        ["deployments", "status", "--name", resources.workerName, "--json"],
+        this.#cloudflareOptions(resources.accountId),
+      );
+    } catch (error) {
+      const output =
+        error instanceof SetupProcessError ? `${error.stdout}\n${error.stderr}` : String(error);
+      if (/\b(?:not found|does not exist|no deployments?)\b/iu.test(output)) return false;
+      throw error;
+    }
+    const deployment = parseJsonRecord(deploymentResult.stdout, "Wrangler deployment status");
     if (!Array.isArray(deployment.versions) || deployment.versions.length !== 1) return false;
     const currentVersion = recordValue(deployment.versions[0]);
     if (

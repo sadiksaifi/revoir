@@ -548,6 +548,28 @@ describe("default greenfield setup platform", () => {
     );
   });
 
+  it("treats a missing setup-owned Worker as relay drift", async () => {
+    const setup = platform({
+      process: new FakeProcess(() => {
+        throw new SetupProcessError("wrangler", "status 1", {
+          stdout: "",
+          stderr: `Worker ${RESOURCES.workerName} was not found`,
+        });
+      }),
+    });
+
+    assert.equal(
+      await setup.relayIsCurrent(
+        {
+          ...RESOURCES,
+          relayUrl: "https://revoir-relay.example.workers.dev/github/webhook",
+        },
+        "webhook-secret",
+      ),
+      false,
+    );
+  });
+
   it("bounds noninteractive Wrangler deployment with the setup shell timeout", async () => {
     const process = new FakeProcess(() => ({
       stdout: "Published https://revoir-relay.example.workers.dev",
