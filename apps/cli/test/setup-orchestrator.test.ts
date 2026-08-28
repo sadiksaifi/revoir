@@ -490,4 +490,28 @@ describe("greenfield end-to-end setup", () => {
     assert.deepEqual(result.policy, createEmptyPolicy(42));
     assert.deepEqual(state.finalPolicy, createEmptyPolicy(42));
   });
+
+  it("narrows revoked cloud policy before reconciling GitHub installations", async () => {
+    const state = new MemorySetupState();
+    await setup(state, platform(state)).run();
+    state.finalPolicy = withRepository(state.finalPolicy!, 8, {
+      id: 99,
+      owner: "owner",
+      name: "revoked",
+    });
+    const reconciliation = platform(state);
+    reconciliation.getCloudPolicy = async () => createEmptyPolicy(42);
+    reconciliation.reconcileGitHubApp = async (configuration, policy) => {
+      assert.deepEqual(policy, createEmptyPolicy(42));
+      return {
+        appId: configuration.github.appId,
+        appSlug: configuration.github.appSlug,
+      };
+    };
+
+    const result = await setup(state, reconciliation).run();
+
+    assert.deepEqual(result.policy, createEmptyPolicy(42));
+    assert.deepEqual(state.finalPolicy, createEmptyPolicy(42));
+  });
 });

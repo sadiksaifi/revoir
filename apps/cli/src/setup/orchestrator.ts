@@ -234,21 +234,6 @@ export class EndToEndSetup {
         ...finalState.configuration,
         cloudflare: { ...resources, relayUrl },
       };
-      const persistGitHubIdentity = async (identity: SetupGitHubAppIdentity): Promise<void> => {
-        if (identity.appId !== configuration.github.appId) {
-          throw new Error("GitHub App reconciliation returned a different immutable App id.");
-        }
-        if (identity.appSlug === configuration.github.appSlug) return;
-        configuration = {
-          ...configuration,
-          github: { ...configuration.github, appSlug: identity.appSlug },
-        };
-        await this.#state.writeFinal(configuration, finalState.policy);
-      };
-      const githubIdentity = await reconcile("github-app", () =>
-        this.#platform.reconcileGitHubApp(configuration, finalState.policy, persistGitHubIdentity),
-      );
-      await reconcile("github-app", () => persistGitHubIdentity(githubIdentity));
       const cloudPolicy = await reconcile("local-state", () =>
         this.#platform.getCloudPolicy(configuration.cloudflare),
       );
@@ -260,6 +245,21 @@ export class EndToEndSetup {
           await this.#platform.verifyCloudPolicy(configuration.cloudflare, effectivePolicy);
         }
       });
+      const persistGitHubIdentity = async (identity: SetupGitHubAppIdentity): Promise<void> => {
+        if (identity.appId !== configuration.github.appId) {
+          throw new Error("GitHub App reconciliation returned a different immutable App id.");
+        }
+        if (identity.appSlug === configuration.github.appSlug) return;
+        configuration = {
+          ...configuration,
+          github: { ...configuration.github, appSlug: identity.appSlug },
+        };
+        await this.#state.writeFinal(configuration, effectivePolicy);
+      };
+      const githubIdentity = await reconcile("github-app", () =>
+        this.#platform.reconcileGitHubApp(configuration, effectivePolicy, persistGitHubIdentity),
+      );
+      await reconcile("github-app", () => persistGitHubIdentity(githubIdentity));
       await reconcile("service-installed", () => this.#platform.installService(configuration));
       await reconcile("diagnostics", () =>
         this.#platform.runDiagnostics(configuration, effectivePolicy),
