@@ -203,15 +203,17 @@ export class EndToEndSetup {
       };
       const [authenticatedGitHubIdentity, cloudflareIdentity] = await reconcile(
         "prerequisites",
-        () =>
-          Promise.all([
-            this.#platform.ensureGitHubAuthentication(),
-            this.#platform.ensureWranglerAuthentication({ accountId: resources.accountId }),
-            this.#platform.ensurePiAuthentication(
-              finalState.configuration.model.id,
-              finalState.configuration.model.reasoning,
-            ),
-          ]).then(([github, cloudflare]) => [github, cloudflare] as const),
+        async () => {
+          const github = await this.#platform.ensureGitHubAuthentication();
+          const cloudflare = await this.#platform.ensureWranglerAuthentication({
+            accountId: resources.accountId,
+          });
+          await this.#platform.ensurePiAuthentication(
+            finalState.configuration.model.id,
+            finalState.configuration.model.reasoning,
+          );
+          return [github, cloudflare] as const;
+        },
       );
       if (
         authenticatedGitHubIdentity.userId !== finalState.policy.userId ||
@@ -333,14 +335,14 @@ export class EndToEndSetup {
       ),
     };
     if (prerequisitesCompletedAtStart) {
-      const [verifiedGitHub, verifiedCloudflare] = await Promise.all([
-        this.#platform.ensureGitHubAuthentication(),
-        this.#platform.ensureWranglerAuthentication({ accountId: account.accountId }),
-        this.#platform.ensurePiAuthentication(
-          this.#defaults.model.id,
-          this.#defaults.model.reasoning,
-        ),
-      ]).then(([github, cloudflare]) => [github, cloudflare] as const);
+      const verifiedGitHub = await this.#platform.ensureGitHubAuthentication();
+      const verifiedCloudflare = await this.#platform.ensureWranglerAuthentication({
+        accountId: account.accountId,
+      });
+      await this.#platform.ensurePiAuthentication(
+        this.#defaults.model.id,
+        this.#defaults.model.reasoning,
+      );
       if (
         verifiedGitHub.userId !== identity.userId ||
         verifiedCloudflare.accountId !== account.accountId

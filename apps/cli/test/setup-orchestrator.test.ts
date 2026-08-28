@@ -394,6 +394,43 @@ describe("greenfield end-to-end setup", () => {
     ]);
   });
 
+  it("serializes completed-setup authentication providers", async () => {
+    const state = new MemorySetupState();
+    await setup(state, platform(state)).run();
+    const reconciliation = platform(state);
+    const events: string[] = [];
+    let signalGitHubStarted: (() => void) | undefined;
+    const githubStarted = new Promise<void>((resolve) => {
+      signalGitHubStarted = resolve;
+    });
+    let finishGitHub: (() => void) | undefined;
+    const githubFinished = new Promise<void>((resolve) => {
+      finishGitHub = resolve;
+    });
+    reconciliation.ensureGitHubAuthentication = async () => {
+      events.push("github-started");
+      signalGitHubStarted?.();
+      await githubFinished;
+      events.push("github-finished");
+      return { userId: 42, login: "test-user" };
+    };
+    reconciliation.ensureWranglerAuthentication = async () => {
+      events.push("wrangler");
+      return { accountId: "account" };
+    };
+    reconciliation.ensurePiAuthentication = async () => {
+      events.push("pi");
+    };
+
+    const running = setup(state, reconciliation).run();
+    await githubStarted;
+    assert.deepEqual(events, ["github-started"]);
+
+    finishGitHub?.();
+    await running;
+    assert.deepEqual(events, ["github-started", "github-finished", "wrangler", "pi"]);
+  });
+
   it("repairs a drifted completed relay with only the secret-and-deploy path", async () => {
     const state = new MemorySetupState();
     await setup(state, platform(state)).run();
