@@ -597,6 +597,45 @@ describe("default greenfield setup platform", () => {
     assert.equal(requests[3]!.url, "https://api.github.com/app/hook/config");
   });
 
+  it("accepts a renamed App by immutable id and uses its live slug for settings", async () => {
+    const configuration = createTestConfiguration({
+      cacheDir: "/tmp/revoir-test-cache",
+      stateDir: "/tmp/revoir-test-state",
+      dataDir: "/tmp/revoir-test-data",
+    });
+    const opened: string[] = [];
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      opened,
+      fetch: async (input) => {
+        if (input.toString() === "https://api.github.com/app") {
+          return Response.json({
+            id: configuration.github.appId,
+            slug: "revoir-renamed",
+            events: ["issue_comment", "pull_request"],
+            permissions: {
+              actions: "read",
+              checks: "write",
+              contents: "read",
+              issues: "write",
+              metadata: "read",
+              pull_requests: "write",
+            },
+          });
+        }
+        return Response.json({});
+      },
+    });
+
+    const identity = await setup.reconcileGitHubApp(configuration, createEmptyPolicy(42));
+
+    assert.deepEqual(identity, {
+      appId: configuration.github.appId,
+      appSlug: "revoir-renamed",
+    });
+    assert.deepEqual(opened, ["https://github.com/settings/apps/revoir-renamed"]);
+  });
+
   it("aborts stalled GitHub and Cloudflare setup requests at the shell deadline", async () => {
     const configuration = createTestConfiguration({
       cacheDir: "/tmp/revoir-test-cache",

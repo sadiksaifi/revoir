@@ -22,6 +22,8 @@ export interface SetupGitHubApp {
   webhookSecret: string;
 }
 
+export type SetupGitHubAppIdentity = Pick<SetupGitHubApp, "appId" | "appSlug">;
+
 export interface SetupPlatform {
   ensureGitHubAuthentication(): Promise<{ userId: number; login: string }>;
   ensureWranglerAuthentication(options?: {
@@ -45,7 +47,11 @@ export interface SetupPlatform {
     persistConversionCode: (code: string) => Promise<void>;
     persist: (app: SetupGitHubApp) => Promise<void>;
   }): Promise<SetupGitHubApp>;
-  reconcileGitHubApp(configuration: RevoirConfiguration, policy: RevoirPolicy): Promise<void>;
+  reconcileGitHubApp(
+    configuration: RevoirConfiguration,
+    policy: RevoirPolicy,
+    persistIdentity?: (identity: SetupGitHubAppIdentity) => Promise<void>,
+  ): Promise<SetupGitHubAppIdentity>;
   requestQueueApiToken(resources: SetupCloudflareResources): Promise<string>;
   validateQueueApiToken(resources: SetupCloudflareResources, token: string): Promise<void>;
   putCloudPolicy(resources: SetupCloudflareResources, policy: RevoirPolicy): Promise<void>;
@@ -195,18 +201,20 @@ export class EndToEndSetup {
           throw new SetupStageError(stage, reconciliationCheckpoint, { cause: error });
         }
       };
-      const [githubIdentity, cloudflareIdentity] = await reconcile("prerequisites", () =>
-        Promise.all([
-          this.#platform.ensureGitHubAuthentication(),
-          this.#platform.ensureWranglerAuthentication({ accountId: resources.accountId }),
-          this.#platform.ensurePiAuthentication(
-            finalState.configuration.model.id,
-            finalState.configuration.model.reasoning,
-          ),
-        ]).then(([github, cloudflare]) => [github, cloudflare] as const),
+      const [authenticatedGitHubIdentity, cloudflareIdentity] = await reconcile(
+        "prerequisites",
+        () =>
+          Promise.all([
+            this.#platform.ensureGitHubAuthentication(),
+            this.#platform.ensureWranglerAuthentication({ accountId: resources.accountId }),
+            this.#platform.ensurePiAuthentication(
+              finalState.configuration.model.id,
+              finalState.configuration.model.reasoning,
+            ),
+          ]).then(([github, cloudflare]) => [github, cloudflare] as const),
       );
       if (
-        githubIdentity.userId !== finalState.policy.userId ||
+        authenticatedGitHubIdentity.userId !== finalState.policy.userId ||
         cloudflareIdentity.accountId !== resources.accountId
       ) {
         throw new SetupStageError("prerequisites", reconciliationCheckpoint, {
@@ -220,13 +228,25 @@ export class EndToEndSetup {
         }
         return resources.relayUrl;
       });
-      const configuration = {
+      let configuration = {
         ...finalState.configuration,
         cloudflare: { ...resources, relayUrl },
       };
-      await reconcile("github-app", () =>
-        this.#platform.reconcileGitHubApp(configuration, finalState.policy),
+      const persistGitHubIdentity = async (identity: SetupGitHubAppIdentity): Promise<void> => {
+        if (identity.appId !== configuration.github.appId) {
+          throw new Error("GitHub App reconciliation returned a different immutable App id.");
+        }
+        if (identity.appSlug === configuration.github.appSlug) return;
+        configuration = {
+          ...configuration,
+          github: { ...configuration.github, appSlug: identity.appSlug },
+        };
+        await this.#state.writeFinal(configuration, finalState.policy);
+      };
+      const githubIdentity = await reconcile("github-app", () =>
+        this.#platform.reconcileGitHubApp(configuration, finalState.policy, persistGitHubIdentity),
       );
+      await reconcile("github-app", () => persistGitHubIdentity(githubIdentity));
       const cloudPolicy = await reconcile("local-state", () =>
         this.#platform.getCloudPolicy(configuration.cloudflare),
       );

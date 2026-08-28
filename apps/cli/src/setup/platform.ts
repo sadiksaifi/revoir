@@ -680,7 +680,8 @@ export class DefaultSetupPlatform implements SetupPlatform {
   async reconcileGitHubApp(
     configuration: RevoirConfiguration,
     policy: RevoirPolicy,
-  ): Promise<void> {
+    persistIdentity?: (identity: { appId: number; appSlug: string }) => Promise<void>,
+  ): Promise<{ appId: number; appSlug: string }> {
     const jwt = createGitHubAppJwt(configuration.github.appId, configuration.github.privateKey);
     const headers = {
       Accept: "application/vnd.github+json",
@@ -694,9 +695,14 @@ export class DefaultSetupPlatform implements SetupPlatform {
       throw new Error(`GitHub App reconciliation failed with HTTP ${response.status}.`);
     }
     const app = parseJsonRecord(JSON.stringify(await response.json()), "GitHub App");
-    if (app.id !== configuration.github.appId || app.slug !== configuration.github.appSlug) {
-      throw new Error("GitHub App reconciliation returned a different immutable App identity.");
+    if (app.id !== configuration.github.appId) {
+      throw new Error("GitHub App reconciliation returned a different immutable App id.");
     }
+    if (typeof app.slug !== "string" || app.slug === "") {
+      throw new Error("GitHub App reconciliation returned an invalid App slug.");
+    }
+    const identity = { appId: configuration.github.appId, appSlug: app.slug };
+    await persistIdentity?.(identity);
     const events = Array.isArray(app.events) ? app.events : [];
     const permissions =
       typeof app.permissions === "object" && app.permissions !== null
@@ -709,7 +715,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
       Object.keys(permissions).length !== expectedPermissions.length ||
       expectedPermissions.some(([permission, access]) => permissions[permission] !== access);
     if (drifted) {
-      const url = `https://github.com/settings/apps/${configuration.github.appSlug}/permissions`;
+      const url = `https://github.com/settings/apps/${identity.appSlug}/permissions`;
       await this.#browser.open(url);
       throw new Error(
         `GitHub App permissions or events require approval. Complete the change at ${url}, then rerun setup.`,
@@ -769,7 +775,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
         );
       }
     }
-    const appSettingsUrl = `https://github.com/settings/apps/${configuration.github.appSlug}`;
+    const appSettingsUrl = `https://github.com/settings/apps/${identity.appSlug}`;
     await this.#browser.open(appSettingsUrl);
     if (!(await this.#confirmGitHubAppWebhook(appSettingsUrl))) {
       throw new Error(
@@ -789,6 +795,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     if (!hook.ok) {
       throw new Error(`GitHub webhook reconciliation failed with HTTP ${hook.status}.`);
     }
+    return identity;
   }
 
   async requestQueueApiToken(resources: SetupCloudflareResources): Promise<string> {

@@ -405,7 +405,12 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
       await created.persist(app);
       return app;
     },
-    async reconcileGitHubApp() {},
+    async reconcileGitHubApp(configuration) {
+      return {
+        appId: configuration.github.appId,
+        appSlug: configuration.github.appSlug,
+      };
+    },
     async requestQueueApiToken() {
       return "package-smoke-cloudflare-token";
     },

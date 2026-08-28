@@ -113,7 +113,12 @@ function platform(
       await input.persist(app);
       return app;
     },
-    async reconcileGitHubApp() {},
+    async reconcileGitHubApp(configuration) {
+      return {
+        appId: configuration.github.appId,
+        appSlug: configuration.github.appSlug,
+      };
+    },
     async requestQueueApiToken() {
       return stage("queue-token", "queue-token-secret");
     },
@@ -398,6 +403,21 @@ describe("greenfield end-to-end setup", () => {
     await setup(state, reconciliation).run();
 
     assert.deepEqual(reconciliation.relayMutations, ["secret-and-deploy"]);
+  });
+
+  it("checkpoints a live renamed App slug before reconciliation can be interrupted", async () => {
+    const state = new MemorySetupState();
+    await setup(state, platform(state)).run();
+    const reconciliation = platform(state);
+    reconciliation.reconcileGitHubApp = async (configuration, _policy, persist) => {
+      const identity = { appId: configuration.github.appId, appSlug: "revoir-renamed" };
+      await persist?.(identity);
+      throw new Error("permission approval interrupted reconciliation");
+    };
+
+    await assert.rejects(setup(state, reconciliation).run(), /github-app/u);
+
+    assert.equal(state.finalConfiguration?.github.appSlug, "revoir-renamed");
   });
 
   it("writes and verifies KV when completed setup narrows a broader cloud policy", async () => {
