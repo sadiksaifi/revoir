@@ -247,14 +247,20 @@ export class RepositoryManager {
     }
     const pendingRemoval = pendingOperations.find(
       (operation) =>
-        operation.kind === "remove" && operation.repository.id === discovered.repository.id,
+        operation.kind === "remove" &&
+        (operation.repository.id === discovered.repository.id ||
+          (operation.repository.owner.toLowerCase() === discovered.repository.owner.toLowerCase() &&
+            operation.repository.name.toLowerCase() === discovered.repository.name.toLowerCase())),
     );
     if (pendingRemoval !== undefined) {
       const [local, cloud] = await Promise.all([
         this.#policies.loadLocal(),
         this.#policies.loadCloud(),
       ]);
-      const revoked = withoutRepository(intersectPolicies(local, cloud), discovered.repository.id);
+      const revoked = withoutRepository(
+        intersectPolicies(local, cloud),
+        pendingRemoval.repository.id,
+      );
       if (!policiesMatch(local, revoked)) {
         await this.#policies.writeLocal(revoked);
       }
@@ -275,7 +281,7 @@ export class RepositoryManager {
         pendingRemoval.installationId !== undefined &&
         installation?.id !== pendingRemoval.installationId
       ) {
-        await this.#pending.remove("remove", discovered.repository.id);
+        await this.#pending.remove("remove", pendingRemoval.repository.id);
       } else {
         if (installationId === undefined || settingsUrl === undefined) {
           return { status: "pending", repository: discovered.repository };
@@ -285,7 +291,7 @@ export class RepositoryManager {
           await this.#github.open(settingsUrl);
           removal = await this.#github.waitForRepositoryAccess(
             installationId,
-            discovered.repository,
+            pendingRemoval.repository,
             false,
           );
         } catch (error) {
@@ -301,10 +307,13 @@ export class RepositoryManager {
             installationId,
           };
         }
-        await this.#pending.remove("remove", discovered.repository.id);
+        await this.#pending.remove("remove", pendingRemoval.repository.id);
         if (removal === "installation-absent") {
           installation = undefined;
-        } else if (installation?.id === installationId) {
+        } else if (
+          pendingRemoval.repository.id === discovered.repository.id &&
+          installation?.id === installationId
+        ) {
           installation = { ...installation, hasRepositoryAccess: false };
         }
       }

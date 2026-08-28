@@ -396,6 +396,36 @@ describe("repository authorization", () => {
     );
   });
 
+  it("finishes an old-ID removal before authorizing a recreated same-name repository", async () => {
+    const policies = new MemoryPolicies();
+    const pending = pendingStore();
+    const replaced = { ...REPOSITORY, id: 98 };
+    await pending.upsert({
+      version: 1,
+      kind: "remove",
+      repository: replaced,
+      installationId: 8,
+      settingsUrl: "https://github.com/settings/installations/8",
+      createdAt: "2026-08-27T00:00:00.000Z",
+    });
+    const github = fakeGitHub();
+    const accessChecks: { repositoryId: number; expected: boolean }[] = [];
+    github.waitForRepositoryAccess = async (_installationId, repository, expected) => {
+      accessChecks.push({ repositoryId: repository.id, expected });
+      return "confirmed";
+    };
+    const manager = new RepositoryManager({ github, policies, pending });
+
+    assert.equal((await manager.add({ owner: "Owner", name: "repository" })).status, "authorized");
+
+    assert.deepEqual(accessChecks, [{ repositoryId: replaced.id, expected: false }]);
+    assert.deepEqual(pending.values, []);
+    assert.deepEqual(
+      (await manager.list()).map(({ repository, status }) => ({ id: repository.id, status })),
+      [{ id: REPOSITORY.id, status: "authorized" }],
+    );
+  });
+
   it("persists non-authorizing installation approval before opening GitHub", async () => {
     const policies = new MemoryPolicies();
     const pending = pendingStore();
