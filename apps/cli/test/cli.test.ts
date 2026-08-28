@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { afterEach, describe, it } from "node:test";
 
-import { CLI_VERSION, runCli, type CliIo } from "../src/cli.js";
+import { CLI_VERSION, createBrowserOpener, runCli, type CliIo } from "../src/cli.js";
 import { resolveApplicationPaths } from "../src/config/paths.js";
 import { writePolicy } from "../src/config/policy.js";
 import { writeConfiguration } from "../src/config/store.js";
@@ -106,6 +106,23 @@ function setupArguments(_privateKeyFile: string, _tokenFile: string): string[] {
 }
 
 describe("CLI", () => {
+  it("bounds browser handoffs with the configured shell deadline", async () => {
+    let receivedTimeout: number | undefined;
+    const browser = createBrowserOpener(
+      {
+        async run(_command, _arguments, options) {
+          receivedTimeout = options?.timeoutMs;
+          return { stdout: "", stderr: "" };
+        },
+      },
+      123,
+    );
+
+    await browser.open("https://github.com/apps/revoir");
+
+    assert.equal(receivedTimeout, 123);
+  });
+
   it("provides help and version without reading configuration", async () => {
     const { io, stdout } = await createIo();
     io.environment = { XDG_CONFIG_HOME: "invalid-relative-path" };

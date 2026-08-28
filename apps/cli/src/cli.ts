@@ -63,7 +63,11 @@ import {
   type ServiceStatus,
 } from "./service/manager.js";
 import { EndToEndSetup, type SetupResult } from "./setup/orchestrator.js";
-import { ChildProcessSetupRunner, DefaultSetupPlatform } from "./setup/platform.js";
+import {
+  ChildProcessSetupRunner,
+  DefaultSetupPlatform,
+  type SetupProcessRunner,
+} from "./setup/platform.js";
 
 export const CLI_VERSION = "0.0.0";
 
@@ -281,10 +285,10 @@ function createGitHubAppWebhookConfirmation(io: CliIo) {
   };
 }
 
-function createBrowserOpener(processRunner: ChildProcessSetupRunner) {
+export function createBrowserOpener(processRunner: SetupProcessRunner, timeoutMs: number) {
   return {
     async open(url: string): Promise<void> {
-      await processRunner.run("/usr/bin/open", [url]);
+      await processRunner.run("/usr/bin/open", [url], { timeoutMs });
     },
   };
 }
@@ -483,7 +487,7 @@ export async function runCli(
           return dependencies.setupService.run();
         }
         const processRunner = new ChildProcessSetupRunner();
-        const browser = createBrowserOpener(processRunner);
+        const browser = createBrowserOpener(processRunner, DEFAULT_SHELL_COMMAND_TIMEOUT_MS);
         let setupServiceManager: ServiceManager | undefined;
         const getSetupServiceManager = (configuration: RevoirConfiguration): ServiceManager => {
           setupServiceManager ??=
@@ -651,7 +655,10 @@ export async function runCli(
           dependencies.repositoryManager ??
           new RepositoryManager({
             github: new GitHubRepositoryGateway({
-              browser: createBrowserOpener(new ChildProcessSetupRunner()),
+              browser: createBrowserOpener(
+                new ChildProcessSetupRunner(),
+                configuration.timeouts.shellCommandMs,
+              ),
               configuration: configuration.github,
               shellCommandMs: configuration.timeouts.shellCommandMs,
             }),
@@ -740,7 +747,10 @@ export async function runCli(
               dependencies.repositoryManager ??
               new RepositoryManager({
                 github: new GitHubRepositoryGateway({
-                  browser: createBrowserOpener(new ChildProcessSetupRunner()),
+                  browser: createBrowserOpener(
+                    new ChildProcessSetupRunner(),
+                    configuration.timeouts.shellCommandMs,
+                  ),
                   configuration: configuration.github,
                   shellCommandMs: configuration.timeouts.shellCommandMs,
                 }),
