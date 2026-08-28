@@ -259,10 +259,18 @@ export class DefaultSetupPlatform implements SetupPlatform {
     let output: string;
     try {
       try {
-        output = (await this.#process.run("wrangler", ["whoami", "--json"])).stdout;
+        output = (
+          await this.#process.run("wrangler", ["whoami", "--json"], {
+            timeoutMs: this.#shellCommandMs,
+          })
+        ).stdout;
       } catch {
         await this.#process.run("wrangler", ["login"], { interactive: true });
-        output = (await this.#process.run("wrangler", ["whoami", "--json"])).stdout;
+        output = (
+          await this.#process.run("wrangler", ["whoami", "--json"], {
+            timeoutMs: this.#shellCommandMs,
+          })
+        ).stdout;
       }
     } catch (error) {
       throw new Error(

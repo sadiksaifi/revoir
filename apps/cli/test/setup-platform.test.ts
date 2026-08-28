@@ -246,6 +246,40 @@ describe("default greenfield setup platform", () => {
     );
   });
 
+  it("bounds both noninteractive Wrangler authentication probes with the setup shell timeout", async () => {
+    let probes = 0;
+    const process = new FakeProcess((_command, arguments_) => {
+      if (arguments_.join(" ") === "whoami --json") {
+        probes += 1;
+        if (probes === 1) throw new Error("not authenticated");
+        return {
+          stdout: JSON.stringify({
+            loggedIn: true,
+            accounts: [{ id: RESOURCES.accountId, name: "Personal" }],
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+    const setup = platform({ process, shellCommandMs: 123 });
+
+    assert.deepEqual(await setup.ensureWranglerAuthentication(), {
+      accountId: RESOURCES.accountId,
+    });
+    assert.deepEqual(
+      process.calls.map(({ arguments: arguments_, timeoutMs }) => ({
+        command: arguments_.join(" "),
+        timeoutMs,
+      })),
+      [
+        { command: "whoami --json", timeoutMs: 123 },
+        { command: "login", timeoutMs: undefined },
+        { command: "whoami --json", timeoutMs: 123 },
+      ],
+    );
+  });
+
   it("recovers its deterministic KV after a post-create checkpoint interruption", async () => {
     let kvCreated = false;
     let kvCreates = 0;
