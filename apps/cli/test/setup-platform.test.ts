@@ -20,6 +20,7 @@ class FakeProcess implements SetupProcessRunner {
     arguments: readonly string[];
     environment?: Readonly<Record<string, string>>;
     input?: string;
+    timeoutMs?: number;
   }[] = [];
   readonly #handle: (
     command: string,
@@ -38,13 +39,18 @@ class FakeProcess implements SetupProcessRunner {
   async run(
     command: string,
     arguments_: readonly string[],
-    options: { environment?: Readonly<Record<string, string>>; input?: string } = {},
+    options: {
+      environment?: Readonly<Record<string, string>>;
+      input?: string;
+      timeoutMs?: number;
+    } = {},
   ): Promise<ProcessResult> {
     this.calls.push({
       command,
       arguments: arguments_,
       ...(options.environment === undefined ? {} : { environment: options.environment }),
       ...(options.input === undefined ? {} : { input: options.input }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
     return this.#handle(command, arguments_);
   }
@@ -58,6 +64,7 @@ function platform(input: {
   opened?: string[];
   sleep?: (milliseconds: number) => Promise<void>;
   selectCloudflareAccount?: (accounts: readonly { id: string; name: string }[]) => Promise<string>;
+  shellCommandMs?: number;
 }) {
   return new DefaultSetupPlatform({
     process: input.process,
@@ -67,6 +74,7 @@ function platform(input: {
     ...(input.selectCloudflareAccount === undefined
       ? {}
       : { selectCloudflareAccount: input.selectCloudflareAccount }),
+    ...(input.shellCommandMs === undefined ? {} : { shellCommandMs: input.shellCommandMs }),
     browser: {
       async open(url) {
         input.opened?.push(url);
@@ -301,6 +309,22 @@ describe("default greenfield setup platform", () => {
         ({ environment }) => environment?.CLOUDFLARE_ACCOUNT_ID === RESOURCES.accountId,
       ),
       true,
+    );
+  });
+
+  it("bounds noninteractive Wrangler deployment with the setup shell timeout", async () => {
+    const process = new FakeProcess(() => ({
+      stdout: "Published https://revoir-relay.example.workers.dev",
+      stderr: "",
+    }));
+    const setup = platform({ process, shellCommandMs: 123 });
+
+    await setup.deployRelay(RESOURCES);
+
+    assert.equal(process.calls[0]?.timeoutMs, 123);
+    assert.equal(
+      process.calls[0]?.environment?.CLOUDFLARE_ACCOUNT_ID,
+      RESOURCES.accountId,
     );
   });
 

@@ -6,7 +6,10 @@ import { join } from "node:path";
 import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY, REVOIR_WEBHOOK_PATH } from "@revoir/contracts";
 
 import type { RevoirPolicy } from "../config/policy.js";
-import type { RevoirConfiguration } from "../config/schema.js";
+import {
+  DEFAULT_SHELL_COMMAND_TIMEOUT_MS,
+  type RevoirConfiguration,
+} from "../config/schema.js";
 import { EMBEDDED_RELAY_SHA256, EMBEDDED_RELAY_SOURCE } from "../generated/relay-artifact.js";
 import { githubInstallationSettingsUrl, parseGitHubInstallation } from "../github-installation.js";
 import { createGitHubAppJwt } from "../review/github.js";
@@ -164,6 +167,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
   readonly #manifest: GitHubManifestFlow;
   readonly #process: SetupProcessRunner;
   readonly #secretPrompt: (message: string) => Promise<string>;
+  readonly #shellCommandMs: number;
   readonly #selectCloudflareAccount: (
     accounts: readonly { id: string; name: string }[],
   ) => Promise<string>;
@@ -178,6 +182,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     installService(configuration: RevoirConfiguration): Promise<void>;
     secretPrompt(message: string): Promise<string>;
     selectCloudflareAccount?(accounts: readonly { id: string; name: string }[]): Promise<string>;
+    shellCommandMs?: number;
     process?: SetupProcessRunner;
     manifest?: GitHubManifestFlow;
     fetch?: typeof fetch;
@@ -191,6 +196,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     this.#process = input.process ?? new ChildProcessSetupRunner();
     this.#manifest = input.manifest ?? new GitHubManifestFlow(input.browser);
     this.#secretPrompt = input.secretPrompt;
+    this.#shellCommandMs = input.shellCommandMs ?? DEFAULT_SHELL_COMMAND_TIMEOUT_MS;
     this.#selectCloudflareAccount =
       input.selectCloudflareAccount ??
       (async () => {
@@ -286,6 +292,7 @@ export class DefaultSetupPlatform implements SetupPlatform {
     return {
       ...options,
       environment: { ...options.environment, CLOUDFLARE_ACCOUNT_ID: accountId },
+      timeoutMs: options.timeoutMs ?? this.#shellCommandMs,
     };
   }
 
