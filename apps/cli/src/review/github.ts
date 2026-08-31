@@ -161,7 +161,7 @@ interface GitHubReviewResponse {
   body: string;
   id: number;
   state: string;
-  userLogin: string;
+  userLogin: string | null;
 }
 
 interface GitHubIssueCommentResponse {
@@ -617,7 +617,10 @@ function parseReaction(value: unknown): GitHubReactionResponse {
 
 function parseReview(value: unknown): GitHubReviewResponse {
   const review = record(value, "review");
-  const user = record(review.user, "review user");
+  const userLogin =
+    review.user === null || review.user === undefined
+      ? null
+      : string(record(review.user, "review user").login, "review user login");
   return {
     body:
       review.body === null || review.body === undefined
@@ -629,7 +632,7 @@ function parseReview(value: unknown): GitHubReviewResponse {
             })(),
     id: positiveInteger(review.id, "review id"),
     state: string(review.state, "review state"),
-    userLogin: string(user.login, "review user login"),
+    userLogin,
   };
 }
 
@@ -1687,7 +1690,7 @@ class InstallationSession implements GitHubReviewSession {
       for (const review of reviews) {
         if (
           review.state.toUpperCase() !== "PENDING" &&
-          review.userLogin.toLowerCase() === this.#botLogin
+          review.userLogin?.toLowerCase() === this.#botLogin
         ) {
           const reviewHeadShas = runMarkerHeadShas(review.body);
           for (const headSha of reviewHeadShas) {
@@ -1876,7 +1879,7 @@ class InstallationSession implements GitHubReviewSession {
       for (const review of reviews) {
         if (
           review.state.toUpperCase() === "PENDING" &&
-          review.userLogin.toLowerCase() === this.#botLogin
+          review.userLogin?.toLowerCase() === this.#botLogin
         ) {
           ownedReviewIds.add(review.id);
         }
@@ -2072,7 +2075,7 @@ class InstallationSession implements GitHubReviewSession {
         // A rejected or ambiguous deletion needs an ordered state readback.
         // eslint-disable-next-line no-await-in-loop
         const review = await this.#boundedGetReview(reference, reviewId, signal);
-        if (review.userLogin.toLowerCase() !== this.#botLogin) {
+        if (review.userLogin?.toLowerCase() !== this.#botLogin) {
           failures.push(new Error("GitHub returned a pending review owned by another user."));
         } else if (review.state.toUpperCase() !== "PENDING") {
           return "submitted";
@@ -2153,19 +2156,19 @@ class InstallationSession implements GitHubReviewSession {
         }
         if (
           liveReview !== undefined &&
-          liveReview.userLogin.toLowerCase() === this.#botLogin &&
+          liveReview.userLogin?.toLowerCase() === this.#botLogin &&
           liveReview.state.toUpperCase() !== "PENDING"
         ) {
           return;
         }
         if (
           definitiveRejection &&
-          liveReview?.userLogin.toLowerCase() === this.#botLogin &&
+          liveReview?.userLogin?.toLowerCase() === this.#botLogin &&
           liveReview.state.toUpperCase() === "PENDING"
         ) {
           throw failure;
         }
-        if (liveReview !== undefined && liveReview.userLogin.toLowerCase() !== this.#botLogin) {
+        if (liveReview !== undefined && liveReview.userLogin?.toLowerCase() !== this.#botLogin) {
           throw new ReviewSubmissionUncertainError();
         }
 

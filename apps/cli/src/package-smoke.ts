@@ -317,6 +317,10 @@ async function probeServiceLifecycle(input: PackageSmokeInput): Promise<void> {
       homeDir,
       paths,
       uid,
+      ...(input.environment.XDG_CONFIG_HOME === undefined ||
+      input.environment.XDG_CONFIG_HOME === ""
+        ? {}
+        : { xdgConfigHome: input.environment.XDG_CONFIG_HOME }),
     },
     launchctl,
   );

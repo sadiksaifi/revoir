@@ -38,6 +38,7 @@ describe("launchd service definition", () => {
       configFile: "/Users/test & tools/.config/revoir/config.json",
       homeDir: "/Users/test & tools",
       executablePath: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+      xdgConfigHome: "/Users/test & tools/.config",
       paths: {
         configDir: "/Users/test & tools/.config/revoir",
         configFile: "/Users/test & tools/.config/revoir/config.json",
@@ -78,6 +79,32 @@ describe("launchd service definition", () => {
       plist,
       /<key>StandardErrorPath<\/key>\s*<string>\/Users\/test &amp; tools\/\.local\/state\/revoir\/logs\/launchd\.stderr\.log<\/string>/u,
     );
+  });
+
+  it("does not synthesize XDG_CONFIG_HOME from Revoir's default config path", () => {
+    const definition = createLaunchAgentDefinition({
+      executableArguments: ["/Users/test/.local/bin/revoir"],
+      configFile: "/Users/test/.config/revoir/config.json",
+      homeDir: "/Users/test",
+      paths: {
+        configDir: "/Users/test/.config/revoir",
+        configFile: "/Users/test/.config/revoir/config.json",
+        policyFile: "/Users/test/.config/revoir/policy.json",
+        setupCheckpointFile: "/Users/test/.config/revoir/setup-checkpoint.json",
+        commandLockFile: "/Users/test/.config/revoir/command.lock",
+        cacheDir: "/Users/test/.cache/revoir",
+        stateDir: "/Users/test/.local/state/revoir",
+        dataDir: "/Users/test/.local/share/revoir",
+      },
+    });
+
+    assert.equal(definition.environment["XDG_CONFIG_HOME"], undefined);
+    assert.deepEqual(definition.programArguments.slice(-3), [
+      "run",
+      "--config",
+      "/Users/test/.config/revoir/config.json",
+    ]);
+    assert.equal(definition.environment["XDG_STATE_HOME"], "/Users/test/.local/state");
   });
 
   it(

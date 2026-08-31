@@ -433,6 +433,7 @@ export async function runCli(
         dependencies.serviceManager ??
         createDefaultServiceManager({
           configFile,
+          environment: io.environment,
           ...(configuration === undefined
             ? {}
             : { executablePath: configuration.service.executablePath }),
@@ -499,6 +500,7 @@ export async function runCli(
             dependencies.serviceManager ??
             createDefaultServiceManager({
               configFile,
+              environment: io.environment,
               executablePath: configuration.service.executablePath,
               homeDir: io.userHome ?? homedir(),
               paths: {
@@ -779,6 +781,7 @@ export async function runCli(
                 dependencies.serviceManager ??
                 createDefaultServiceManager({
                   configFile,
+                  environment: io.environment,
                   executablePath: configuration.service.executablePath,
                   homeDir: io.userHome ?? homedir(),
                   paths: {
