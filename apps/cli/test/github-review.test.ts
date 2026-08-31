@@ -584,6 +584,7 @@ describe("GitHub App review gateway", () => {
           { id: 71, state: "PENDING", user: { login: "revoir-test[bot]" } },
           { id: 72, state: "PENDING", user: { login: "human" } },
           { id: 73, state: "COMMENTED", user: { login: "revoir-test[bot]" } },
+          { id: 74, state: "PENDING", user: null },
         ]);
       }
       const reviewId = /\/reviews\/(\d+)$/u.exec(url)?.[1];
@@ -1032,7 +1033,7 @@ describe("GitHub App review gateway", () => {
         runHeadShas: ["3".repeat(40)],
       },
       {
-        name: "pending and non-App reviews are ignored",
+        name: "pending, non-App, and deleted-author reviews are ignored",
         reviews: [
           ownReview(201, unversionedReviewBody(findings.latest)),
           ownReview(202, unversionedReviewBody(findings.ignored), "PENDING"),
@@ -1041,6 +1042,12 @@ describe("GitHub App review gateway", () => {
             state: "COMMENTED",
             body: unversionedReviewBody(findings.other),
             user: { login: "human" },
+          },
+          {
+            id: 204,
+            state: "COMMENTED",
+            body: explicitReviewBody([findings.other]),
+            user: null,
           },
         ],
         expectedBodyFingerprints: [],
