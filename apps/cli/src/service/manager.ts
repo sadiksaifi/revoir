@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
-import type { ApplicationPaths } from "../config/paths.js";
+import type { ApplicationPaths, PathEnvironment } from "../config/paths.js";
 import { LaunchctlProcessAdapter } from "./launchctl.js";
 import {
   createLaunchAgentDefinition,
@@ -44,6 +44,7 @@ export interface LaunchdServiceInput {
   executablePath?: string;
   paths: ApplicationPaths;
   uid: number;
+  xdgConfigHome?: string;
 }
 
 export interface ServiceStatus {
@@ -147,6 +148,7 @@ export class LaunchdServiceManager {
       homeDir: input.homeDir,
       ...(input.executablePath === undefined ? {} : { executablePath: input.executablePath }),
       paths: input.paths,
+      ...(input.xdgConfigHome === undefined ? {} : { xdgConfigHome: input.xdgConfigHome }),
     });
     this.#expectedPlist = renderLaunchAgentPlist(this.#definition);
     const executable = input.executableArguments[0];
@@ -396,6 +398,7 @@ export function resolveServiceExecutablePath(
 
 export function createDefaultServiceManager(input: {
   configFile: string;
+  environment: PathEnvironment;
   executablePath?: string;
   homeDir: string;
   paths: ApplicationPaths;
@@ -419,6 +422,10 @@ export function createDefaultServiceManager(input: {
       executablePath: input.executablePath ?? resolveServiceExecutablePath(input.homeDir),
       paths: input.paths,
       uid,
+      ...(input.environment["XDG_CONFIG_HOME"] === undefined ||
+      input.environment["XDG_CONFIG_HOME"] === ""
+        ? {}
+        : { xdgConfigHome: input.environment["XDG_CONFIG_HOME"] }),
     },
     new LaunchctlProcessAdapter(),
   );

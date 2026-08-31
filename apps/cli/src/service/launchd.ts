@@ -23,6 +23,7 @@ export interface LaunchAgentInput {
   homeDir: string;
   executablePath?: string;
   paths: ApplicationPaths;
+  xdgConfigHome?: string;
 }
 
 function requireAbsolutePath(value: string, label: string): void {
@@ -42,6 +43,9 @@ export function createLaunchAgentDefinition(input: LaunchAgentInput): LaunchAgen
   }
   requireAbsolutePath(input.configFile, "The configuration file");
   requireAbsolutePath(input.homeDir, "The user home directory");
+  if (input.xdgConfigHome !== undefined && input.xdgConfigHome !== "") {
+    requireAbsolutePath(input.xdgConfigHome, "XDG_CONFIG_HOME");
+  }
 
   const logs = serviceLogPaths(input.paths.stateDir);
   return {
@@ -53,7 +57,9 @@ export function createLaunchAgentDefinition(input: LaunchAgentInput): LaunchAgen
         ? {}
         : { PATH: input.executablePath }),
       XDG_CACHE_HOME: dirname(input.paths.cacheDir),
-      XDG_CONFIG_HOME: dirname(input.paths.configDir),
+      ...(input.xdgConfigHome === undefined || input.xdgConfigHome === ""
+        ? {}
+        : { XDG_CONFIG_HOME: input.xdgConfigHome }),
       XDG_DATA_HOME: dirname(input.paths.dataDir),
       XDG_STATE_HOME: dirname(input.paths.stateDir),
     },
