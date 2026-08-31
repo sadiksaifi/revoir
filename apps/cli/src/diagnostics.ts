@@ -460,29 +460,22 @@ export function createDefaultDiagnosticGateway(
     },
 
     async checkPolicy(configuration, policy) {
-      const { stdout } = await processRunner(
-        "wrangler",
-        [
-          "kv",
-          "key",
-          "get",
-          `--namespace-id=${configuration.kvNamespaceId}`,
-          "policy",
-          "--remote",
-          "--text",
-        ],
+      const response = await fetchImplementation(
+        `${CLOUDFLARE_API}/accounts/${encodeURIComponent(configuration.accountId)}/storage/kv/namespaces/${encodeURIComponent(configuration.kvNamespaceId)}/values/policy`,
         {
-          environment: { CLOUDFLARE_ACCOUNT_ID: configuration.accountId },
-          timeout: 30_000,
-          maxBuffer: 1024 * 1024,
+          headers: { Authorization: `Bearer ${configuration.apiToken}` },
+          signal: AbortSignal.timeout(30_000),
         },
       );
+      if (!response.ok) {
+        throw new Error(`Cloudflare KV policy read failed with HTTP ${response.status}.`);
+      }
       let cloud: RevoirPolicy;
       try {
         const { parseRevoirPolicy } = await import("@revoir/contracts");
-        cloud = parseRevoirPolicy(JSON.parse(stdout) as unknown);
-      } catch (error) {
-        throw new Error("Cloudflare KV policy is missing or invalid.", { cause: error });
+        cloud = parseRevoirPolicy(await response.json());
+      } catch {
+        throw new Error("Cloudflare KV policy is missing or invalid.");
       }
       if (JSON.stringify(cloud) !== JSON.stringify(policy)) {
         throw new Error(

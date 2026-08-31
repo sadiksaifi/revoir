@@ -52,8 +52,8 @@ export interface SetupPlatform {
     policy: RevoirPolicy,
     persistIdentity?: (identity: SetupGitHubAppIdentity) => Promise<void>,
   ): Promise<SetupGitHubAppIdentity>;
-  requestQueueApiToken(resources: SetupCloudflareResources): Promise<string>;
-  validateQueueApiToken(resources: SetupCloudflareResources, token: string): Promise<void>;
+  requestRuntimeApiToken(resources: SetupCloudflareResources): Promise<string>;
+  validateRuntimeApiToken(resources: SetupCloudflareResources, token: string): Promise<void>;
   putCloudPolicy(resources: SetupCloudflareResources, policy: RevoirPolicy): Promise<void>;
   getCloudPolicy(resources: SetupCloudflareResources): Promise<RevoirPolicy>;
   verifyCloudPolicy(resources: SetupCloudflareResources, policy: RevoirPolicy): Promise<void>;
@@ -260,20 +260,20 @@ export class EndToEndSetup {
         this.#platform.reconcileGitHubApp(configuration, effectivePolicy, persistGitHubIdentity),
       );
       await reconcile("github-app", () => persistGitHubIdentity(githubIdentity));
-      await reconcile("queue-token", async () => {
+      await reconcile("runtime-token", async () => {
         try {
-          await this.#platform.validateQueueApiToken(
+          await this.#platform.validateRuntimeApiToken(
             configuration.cloudflare,
             configuration.cloudflare.apiToken,
           );
         } catch {
-          const apiToken = await this.#platform.requestQueueApiToken(configuration.cloudflare);
+          const apiToken = await this.#platform.requestRuntimeApiToken(configuration.cloudflare);
           configuration = {
             ...configuration,
             cloudflare: { ...configuration.cloudflare, apiToken },
           };
           await this.#state.writeFinal(configuration, effectivePolicy);
-          await this.#platform.validateQueueApiToken(configuration.cloudflare, apiToken);
+          await this.#platform.validateRuntimeApiToken(configuration.cloudflare, apiToken);
         }
       });
       await reconcile("service-installed", () => this.#platform.installService(configuration));
@@ -491,34 +491,34 @@ export class EndToEndSetup {
       "github-app",
     );
 
-    let queueToken: string | undefined;
-    await execute("queue-token", async () => {
-      const persisted = checkpoint.secrets.cloudflareQueueApiToken;
-      queueToken = persisted ?? (await this.#platform.requestQueueApiToken(cloudflare!));
+    let runtimeToken: string | undefined;
+    await execute("runtime-token", async () => {
+      const persisted = checkpoint.secrets.cloudflareRuntimeApiToken;
+      runtimeToken = persisted ?? (await this.#platform.requestRuntimeApiToken(cloudflare!));
       if (persisted === undefined) {
         checkpoint = {
           ...checkpoint,
-          secrets: { ...checkpoint.secrets, cloudflareQueueApiToken: queueToken },
+          secrets: { ...checkpoint.secrets, cloudflareRuntimeApiToken: runtimeToken },
         };
         await writeCheckpoint(checkpoint);
       }
       try {
-        await this.#platform.validateQueueApiToken(cloudflare!, queueToken);
+        await this.#platform.validateRuntimeApiToken(cloudflare!, runtimeToken);
       } catch (error) {
         if (persisted === undefined) throw error;
-        queueToken = await this.#platform.requestQueueApiToken(cloudflare!);
+        runtimeToken = await this.#platform.requestRuntimeApiToken(cloudflare!);
         checkpoint = {
           ...checkpoint,
-          secrets: { ...checkpoint.secrets, cloudflareQueueApiToken: queueToken },
+          secrets: { ...checkpoint.secrets, cloudflareRuntimeApiToken: runtimeToken },
         };
         await writeCheckpoint(checkpoint);
-        await this.#platform.validateQueueApiToken(cloudflare!, queueToken);
+        await this.#platform.validateRuntimeApiToken(cloudflare!, runtimeToken);
       }
     });
-    queueToken ??= assertCheckpointValue(
-      checkpoint.secrets.cloudflareQueueApiToken,
-      "the Cloudflare Queue API token",
-      "queue-token",
+    runtimeToken ??= assertCheckpointValue(
+      checkpoint.secrets.cloudflareRuntimeApiToken,
+      "the Cloudflare runtime API token",
+      "runtime-token",
     );
 
     const configuration = {
@@ -536,7 +536,7 @@ export class EndToEndSetup {
       cloudflare: {
         ...cloudflare,
         relayUrl,
-        apiToken: queueToken,
+        apiToken: runtimeToken,
       },
     } as RevoirConfiguration;
     const policy = {

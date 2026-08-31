@@ -1,5 +1,6 @@
 import { parseRevoirPolicy, REVOIR_POLICY_KV_KEY } from "@revoir/contracts";
 
+import { CloudflarePolicyReader, CloudflarePolicyReadError } from "./cloudflare-policy.js";
 import { intersectPolicies, loadPolicy, writePolicy, type RevoirPolicy } from "./config/policy.js";
 import { DEFAULT_SHELL_COMMAND_TIMEOUT_MS, type RevoirConfiguration } from "./config/schema.js";
 import {
@@ -307,6 +308,7 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
   readonly #configuration: RevoirConfiguration["cloudflare"];
   readonly #now: () => number;
   readonly #policyFile: string;
+  readonly #policyReader: CloudflarePolicyReader;
   readonly #process: SetupProcessRunner;
   readonly #shellCommandMs: number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
@@ -316,8 +318,10 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
     now?: () => number;
     policyFile: string;
     process?: SetupProcessRunner;
+    fetch?: ConstructorParameters<typeof CloudflarePolicyReader>[0]["fetch"];
     shellCommandMs: number;
-    sleep?: (milliseconds: number) => Promise<void>;
+    sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+    policyReadRetryDelaysMs?: readonly number[];
   }) {
     this.#configuration = input.cloudflare;
     this.#now = input.now ?? Date.now;
@@ -327,6 +331,15 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
     this.#sleep =
       input.sleep ??
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.#policyReader = new CloudflarePolicyReader({
+      configuration: input.cloudflare,
+      ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
+      requestTimeoutMs: input.shellCommandMs,
+      ...(input.policyReadRetryDelaysMs === undefined
+        ? {}
+        : { retryDelaysMs: input.policyReadRetryDelaysMs }),
+      ...(input.sleep === undefined ? {} : { sleep: input.sleep }),
+    });
   }
 
   loadLocal(): Promise<RevoirPolicy> {
@@ -351,24 +364,7 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
   }
 
   async loadCloud(signal?: AbortSignal): Promise<RevoirPolicy> {
-    const result = await this.#process.run(
-      "wrangler",
-      [
-        "kv",
-        "key",
-        "get",
-        `--namespace-id=${this.#configuration.kvNamespaceId}`,
-        REVOIR_POLICY_KV_KEY,
-        "--remote",
-        "--text",
-      ],
-      {
-        environment: { CLOUDFLARE_ACCOUNT_ID: this.#configuration.accountId },
-        ...(signal === undefined ? {} : { signal }),
-        timeoutMs: this.#shellCommandMs,
-      },
-    );
-    return parseRevoirPolicy(JSON.parse(result.stdout) as unknown);
+    return this.#policyReader.read(signal);
   }
 
   async writeCloud(policy: RevoirPolicy): Promise<void> {
@@ -410,6 +406,8 @@ export class LocalAndWranglerPolicyStore implements RepositoryPolicyStore {
     throw new Error("Cloudflare KV policy did not propagate before the activation deadline.");
   }
 }
+
+export { CloudflarePolicyReadError };
 
 export function createEffectivePolicyLoader(
   policies: Pick<RepositoryPolicyStore, "loadLocal" | "loadCloud">,

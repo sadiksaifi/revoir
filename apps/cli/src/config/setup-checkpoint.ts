@@ -15,7 +15,7 @@ export const SETUP_STAGES = [
   "cloudflare-resources",
   "relay-deployed",
   "github-app",
-  "queue-token",
+  "runtime-token",
   "local-state",
   "service-installed",
   "diagnostics",
@@ -43,7 +43,7 @@ export interface SetupCheckpoint {
     githubManifestCode?: string;
     githubWebhookSecret?: string;
     githubPrivateKey?: string;
-    cloudflareQueueApiToken?: string;
+    cloudflareRuntimeApiToken?: string;
   };
 }
 
@@ -177,12 +177,12 @@ export function validateSetupCheckpoint(value: unknown): SetupCheckpoint {
       "githubManifestCode",
       "githubWebhookSecret",
       "githubPrivateKey",
-      "cloudflareQueueApiToken",
+      "cloudflareRuntimeApiToken",
     ]) ||
     !optionalString(value.secrets.githubManifestCode) ||
     !optionalString(value.secrets.githubWebhookSecret) ||
     !optionalString(value.secrets.githubPrivateKey) ||
-    !optionalString(value.secrets.cloudflareQueueApiToken)
+    !optionalString(value.secrets.cloudflareRuntimeApiToken)
   ) {
     throw new SetupCheckpointError("Setup checkpoint secrets are invalid.");
   }

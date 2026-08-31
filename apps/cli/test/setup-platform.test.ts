@@ -93,7 +93,7 @@ function platform(input: {
     diagnostics: input.diagnostics ?? (async () => {}),
     async installService() {},
     async secretPrompt() {
-      return "queue-token";
+      return "runtime-token";
     },
   });
 }
@@ -167,7 +167,7 @@ describe("default greenfield setup platform", () => {
       installService: async () => {},
       manifest,
       process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
-      secretPrompt: async () => "queue-token",
+      secretPrompt: async () => "runtime-token",
     });
 
     await setup.createGitHubApp({
@@ -583,22 +583,17 @@ describe("default greenfield setup platform", () => {
     assert.equal(process.calls[0]?.environment?.CLOUDFLARE_ACCOUNT_ID, RESOURCES.accountId);
   });
 
-  it("scopes final setup diagnostics policy reads to the selected Cloudflare account", async () => {
+  it("uses the runtime token for final setup diagnostics policy reads", async () => {
     const configuration = createTestConfiguration({
       cacheDir: "/tmp/revoir-test-cache",
       stateDir: "/tmp/revoir-test-state",
       dataDir: "/tmp/revoir-test-data",
     });
-    let environment: Readonly<Record<string, string>> | undefined;
-    const gateway = createDefaultDiagnosticGateway(
-      async () => {
-        throw new Error("unexpected network request");
-      },
-      async (_executable, _arguments, options) => {
-        environment = options.environment;
-        return { stdout: JSON.stringify(configuration.policy), stderr: "" };
-      },
-    );
+    let authorization: string | null | undefined;
+    const gateway = createDefaultDiagnosticGateway(async (_input, init) => {
+      authorization = new Headers(init?.headers).get("Authorization");
+      return new Response(JSON.stringify(configuration.policy));
+    });
     const setup = platform({
       process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
       async diagnostics(current, policy) {
@@ -607,10 +602,10 @@ describe("default greenfield setup platform", () => {
     });
 
     await setup.runDiagnostics(configuration, configuration.policy);
-    assert.equal(environment?.CLOUDFLARE_ACCOUNT_ID, configuration.cloudflare.accountId);
+    assert.equal(authorization, `Bearer ${configuration.cloudflare.apiToken}`);
   });
 
-  it("validates the Queue token and reconciles the existing App without creating resources", async () => {
+  it("validates the runtime token and reconciles the existing App without creating resources", async () => {
     const opened: string[] = [];
     const requests: { url: string; method: string }[] = [];
     const configuration = createTestConfiguration({
@@ -644,16 +639,17 @@ describe("default greenfield setup platform", () => {
       opened,
     });
 
-    await setup.validateQueueApiToken(RESOURCES, "queue-token");
+    await setup.validateRuntimeApiToken(RESOURCES, "runtime-token");
     await setup.reconcileGitHubApp(configuration as RevoirConfiguration, createEmptyPolicy(42));
     assert.deepEqual(opened, [`https://github.com/settings/apps/${configuration.github.appSlug}`]);
     assert.deepEqual(
       requests.map(({ method }) => method),
-      ["GET", "POST", "GET", "PATCH"],
+      ["GET", "POST", "GET", "GET", "PATCH"],
     );
     assert.match(requests[0]!.url, /accounts\/a{32}\/queues\/queue-immutable-id$/u);
     assert.match(requests[1]!.url, /\/messages\/ack$/u);
-    assert.equal(requests[3]!.url, "https://api.github.com/app/hook/config");
+    assert.match(requests[2]!.url, /accounts\/a{32}\/storage\/kv\/namespaces\/kv-immutable-id$/u);
+    assert.equal(requests[4]!.url, "https://api.github.com/app/hook/config");
   });
 
   it("accepts a renamed App by immutable id and uses its live slug for settings", async () => {
@@ -709,7 +705,8 @@ describe("default greenfield setup platform", () => {
       },
       {
         name: "Cloudflare Queue validation",
-        run: (setup: DefaultSetupPlatform) => setup.validateQueueApiToken(RESOURCES, "queue-token"),
+        run: (setup: DefaultSetupPlatform) =>
+          setup.validateRuntimeApiToken(RESOURCES, "runtime-token"),
       },
     ];
 
@@ -830,14 +827,14 @@ describe("default greenfield setup platform", () => {
     assert.equal(hookUpdated, false);
   });
 
-  it("opens a Queue-only token template scoped to the configured account", async () => {
+  it("opens a least-privilege runtime token template scoped to the configured account", async () => {
     const opened: string[] = [];
     const setup = platform({
       process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
       opened,
     });
 
-    assert.equal(await setup.requestQueueApiToken(RESOURCES), "queue-token");
+    assert.equal(await setup.requestRuntimeApiToken(RESOURCES), "runtime-token");
     assert.equal(opened.length, 1);
     const tokenTemplate = new URL(opened[0]!);
     assert.equal(
@@ -846,10 +843,31 @@ describe("default greenfield setup platform", () => {
     );
     assert.deepEqual(JSON.parse(tokenTemplate.searchParams.get("permissionGroupKeys") ?? ""), [
       { key: "queues", type: "edit" },
+      { key: "workers_kv_storage", type: "read" },
     ]);
     assert.equal(tokenTemplate.searchParams.get("accountId"), RESOURCES.accountId);
     assert.equal(tokenTemplate.searchParams.get("zoneId"), "all");
-    assert.equal(tokenTemplate.searchParams.get("name"), "Revoir Queue Pull");
+    assert.equal(tokenTemplate.searchParams.get("name"), "Revoir Runtime");
+  });
+
+  it("rejects a runtime token that cannot read the configured KV namespace", async () => {
+    const token = "sensitive-runtime-token";
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      fetch: async (input) => {
+        if (input.toString().includes("/storage/kv/namespaces/")) {
+          return new Response(`unsafe response ${token}`, { status: 403 });
+        }
+        return Response.json({ success: true });
+      },
+    });
+
+    await assert.rejects(setup.validateRuntimeApiToken(RESOURCES, token), (error) => {
+      assert.match((error as Error).message, /Queues > Edit/u);
+      assert.match((error as Error).message, /Workers KV Storage > Read/u);
+      assert.doesNotMatch((error as Error).message, /sensitive-runtime-token|unsafe response/u);
+      return true;
+    });
   });
 
   it("waits for the exact KV policy while stale and malformed reads remain unauthorized", async () => {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { CloudflarePolicyReadError } from "../src/cloudflare-policy.js";
 import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
 import type { QueueDelivery } from "../src/queue/client.js";
@@ -884,7 +885,7 @@ describe("queue review runner", () => {
     );
   });
 
-  it("bounds repeated policy-load failures and acknowledges the third delivery", async () => {
+  it("defers transient policy outages without consuming review attempts or posting comments", async () => {
     const deliveries = [1, 2, 3].map((attempt) =>
       delivery(`lease-policy-${attempt}`, reviewJob(), attempt),
     );
@@ -914,16 +915,26 @@ describe("queue review runner", () => {
       },
     };
     const failures = new MemoryOperationalFailureStore();
+    const events: Array<{ event: string; data: Readonly<Record<string, unknown>> }> = [];
     const runner = new QueueReviewRunner(
       configuration(),
       queue,
       reviews,
       reporter,
       failures,
-      undefined,
+      {
+        async write(event, data = {}) {
+          events.push({ event, data });
+        },
+      },
       undefined,
       async () => {
-        throw new Error("cloud policy unavailable");
+        throw new CloudflarePolicyReadError({
+          message: "Cloudflare KV policy read failed transiently with HTTP 503.",
+          reason: "http_transient",
+          retryable: true,
+          status: 503,
+        });
       },
     );
 
@@ -936,8 +947,92 @@ describe("queue review runner", () => {
       { leaseId: "lease-policy-2", delaySeconds: 120 },
     ]);
     assert.deepEqual(acknowledgements, ["lease-policy-3"]);
-    assert.deepEqual(reportedAttempts, [1, 2, 3]);
+    assert.deepEqual(reportedAttempts, []);
+    assert.deepEqual(
+      events.map(({ event }) => event),
+      ["queue_review_deferred", "queue_review_deferred", "queue_review_abandoned"],
+    );
+    assert.deepEqual(events[0]?.data, {
+      deliveryId: reviewJob().deliveryId,
+      attempt: 1,
+      delaySeconds: 30,
+      reason: "http_transient",
+      status: 503,
+    });
+    assert.deepEqual(events[2]?.data, {
+      deliveryId: reviewJob().deliveryId,
+      attempt: 3,
+      reason: "http_transient",
+      retryable: true,
+      status: 503,
+    });
+    assert.deepEqual(failures.saves, []);
     assert.equal(failures.failures.size, 0);
+  });
+
+  it("abandons terminal policy failures immediately without GitHub mutations", async () => {
+    const acknowledgements: string[] = [];
+    const retries: string[] = [];
+    const events: Array<{ event: string; data: Readonly<Record<string, unknown>> }> = [];
+    let reports = 0;
+    const failures = new MemoryOperationalFailureStore();
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return delivery("terminal-policy", reviewJob());
+        },
+        async acknowledge(leaseId) {
+          acknowledgements.push(leaseId);
+        },
+        async retry(leaseId) {
+          retries.push(leaseId);
+        },
+      },
+      {
+        async review() {
+          assert.fail("A terminal policy failure must not start review work.");
+        },
+      },
+      {
+        async report() {
+          reports += 1;
+        },
+      },
+      failures,
+      {
+        async write(event, data = {}) {
+          events.push({ event, data });
+        },
+      },
+      undefined,
+      async () => {
+        throw new CloudflarePolicyReadError({
+          message: "Cloudflare rejected repository policy access.",
+          reason: "authentication",
+          retryable: false,
+          status: 403,
+        });
+      },
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.deepEqual(acknowledgements, ["terminal-policy"]);
+    assert.deepEqual(retries, []);
+    assert.equal(reports, 0);
+    assert.deepEqual(failures.saves, []);
+    assert.deepEqual(events, [
+      {
+        event: "queue_review_abandoned",
+        data: {
+          deliveryId: reviewJob().deliveryId,
+          attempt: 1,
+          reason: "authentication",
+          retryable: false,
+          status: 403,
+        },
+      },
+    ]);
   });
 
   it("acknowledges a successful third attempt after two reported operational failures", async () => {

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import {
+  CloudflarePolicyReadError,
   GitHubRepositoryGateway,
   LocalAndWranglerPolicyStore,
 } from "../src/repository-gateways.js";
@@ -334,32 +335,167 @@ describe("Wrangler policy propagation", () => {
     ]);
   });
 
-  it("passes cancellation and the shell timeout to Wrangler policy reads", async () => {
+  it("reads the cloud policy directly with the configured token and deadline", async () => {
     const expected = createEmptyPolicy(42);
     const controller = new AbortController();
-    let options:
-      | {
-          environment?: Readonly<Record<string, string>>;
-          signal?: AbortSignal;
-          timeoutMs?: number;
-        }
-      | undefined;
+    let request: { url: string; authorization: string | null; signal?: AbortSignal } | undefined;
     const store = new LocalAndWranglerPolicyStore({
       cloudflare: configuration.cloudflare,
       policyFile: "/unused/policy.json",
-      process: {
-        async run(_command, _arguments, receivedOptions) {
-          options = receivedOptions as typeof options;
-          return { stdout: JSON.stringify(expected), stderr: "" };
-        },
+      fetch: async (input, init) => {
+        request = {
+          url: input.toString(),
+          authorization: new Headers(init?.headers).get("Authorization"),
+          ...(init?.signal == null ? {} : { signal: init.signal }),
+        };
+        return new Response(JSON.stringify(expected));
       },
       shellCommandMs: 123,
     });
 
     await (store.loadCloud as (signal?: AbortSignal) => Promise<unknown>)(controller.signal);
-    assert.equal(options?.signal, controller.signal);
-    assert.equal(options?.timeoutMs, 123);
-    assert.equal(options?.environment?.CLOUDFLARE_ACCOUNT_ID, configuration.cloudflare.accountId);
+    assert.equal(
+      request?.url,
+      `https://api.cloudflare.com/client/v4/accounts/${configuration.cloudflare.accountId}/storage/kv/namespaces/${configuration.cloudflare.kvNamespaceId}/values/policy`,
+    );
+    assert.equal(request?.authorization, `Bearer ${configuration.cloudflare.apiToken}`);
+    assert.equal(request?.signal?.aborted, false);
+  });
+
+  it("retries only transient Cloudflare policy read failures with deterministic backoff", async () => {
+    const expected = createEmptyPolicy(42);
+    const statuses = [408, 429, 503, 200];
+    const sleeps: number[] = [];
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      fetch: async () => {
+        const status = statuses.shift()!;
+        return new Response(status === 200 ? JSON.stringify(expected) : "sensitive response body", {
+          status,
+        });
+      },
+      shellCommandMs: 123,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      },
+      policyReadRetryDelaysMs: [10, 20, 30],
+    });
+
+    assert.deepEqual(await store.loadCloud(), expected);
+    assert.deepEqual(sleeps, [10, 20, 30]);
+  });
+
+  it("retries transient network failures without exposing their unsafe cause", async () => {
+    const expected = createEmptyPolicy(42);
+    let attempts = 0;
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      fetch: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error(`network failed with ${configuration.cloudflare.apiToken}`);
+        }
+        return new Response(JSON.stringify(expected));
+      },
+      shellCommandMs: 123,
+      sleep: async () => {},
+      policyReadRetryDelaysMs: [0],
+    });
+
+    assert.deepEqual(await store.loadCloud(), expected);
+    assert.equal(attempts, 2);
+  });
+
+  it("fails immediately and safely for non-transient HTTP and invalid policy responses", async () => {
+    for (const status of [400, 401, 403, 404]) {
+      let attempts = 0;
+      const store = new LocalAndWranglerPolicyStore({
+        cloudflare: configuration.cloudflare,
+        policyFile: "/unused/policy.json",
+        fetch: async () => {
+          attempts += 1;
+          return new Response(`unsafe ${configuration.cloudflare.apiToken}`, { status });
+        },
+        shellCommandMs: 123,
+        sleep: async () => assert.fail(`HTTP ${status} must not be retried`),
+      });
+
+      // eslint-disable-next-line no-await-in-loop
+      await assert.rejects(store.loadCloud(), (error) => {
+        assert.equal(error instanceof CloudflarePolicyReadError, true);
+        assert.equal((error as CloudflarePolicyReadError).retryable, false);
+        assert.doesNotMatch((error as Error).message, /unsafe|cloudflare-secret-token/u);
+        return true;
+      });
+      assert.equal(attempts, 1);
+    }
+
+    const malformed = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      fetch: async () => new Response(`not-json-${configuration.cloudflare.apiToken}`),
+      shellCommandMs: 123,
+      sleep: async () => assert.fail("Malformed policy must not be retried"),
+    });
+    await assert.rejects(malformed.loadCloud(), (error) => {
+      assert.equal(error instanceof CloudflarePolicyReadError, true);
+      assert.equal((error as CloudflarePolicyReadError).reason, "invalid_policy");
+      assert.doesNotMatch((error as Error).message, /not-json|cloudflare-secret-token/u);
+      return true;
+    });
+  });
+
+  it("preserves caller cancellation during a direct policy read", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("stop policy read");
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      fetch: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+            once: true,
+          });
+        }),
+      shellCommandMs: 123,
+      sleep: async () => assert.fail("Cancellation must not be retried"),
+    });
+
+    const loading = store.loadCloud(controller.signal);
+    controller.abort(cancellation);
+    await assert.rejects(loading, cancellation);
+  });
+
+  it("preserves caller cancellation during policy-read backoff", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("stop policy backoff");
+    let attempts = 0;
+    let markBackoffStarted!: () => void;
+    const backoffStarted = new Promise<void>((resolve) => {
+      markBackoffStarted = resolve;
+    });
+    const store = new LocalAndWranglerPolicyStore({
+      cloudflare: configuration.cloudflare,
+      policyFile: "/unused/policy.json",
+      fetch: async () => {
+        attempts += 1;
+        return new Response("transient", { status: 503 });
+      },
+      shellCommandMs: 123,
+      sleep: async (_milliseconds, signal) =>
+        new Promise<void>((_resolve, reject) => {
+          markBackoffStarted();
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+    });
+
+    const loading = store.loadCloud(controller.signal);
+    await backoffStarted;
+    controller.abort(cancellation);
+    await assert.rejects(loading, cancellation);
+    assert.equal(attempts, 1);
   });
 
   it("bounds Wrangler policy writes with the configured shell timeout", async () => {
@@ -391,11 +527,9 @@ describe("Wrangler policy propagation", () => {
       cloudflare: configuration.cloudflare,
       policyFile: "/unused/policy.json",
       shellCommandMs: configuration.timeouts.shellCommandMs,
-      process: {
-        async run() {
-          reads += 1;
-          return { stdout: JSON.stringify(expected), stderr: "" };
-        },
+      fetch: async () => {
+        reads += 1;
+        return new Response(JSON.stringify(expected));
       },
       now: () => now,
       sleep: async (milliseconds) => {
@@ -424,10 +558,8 @@ describe("Wrangler policy propagation", () => {
       cloudflare: configuration.cloudflare,
       policyFile: "/unused/policy.json",
       shellCommandMs: configuration.timeouts.shellCommandMs,
-      process: {
-        async run() {
-          return { stdout: reads.shift() ?? JSON.stringify(expected), stderr: "" };
-        },
+      fetch: async () => {
+        return new Response(reads.shift() ?? JSON.stringify(expected));
       },
       now: () => now,
       sleep: async (milliseconds) => {
@@ -448,11 +580,9 @@ describe("Wrangler policy propagation", () => {
       cloudflare: configuration.cloudflare,
       policyFile: "/unused/policy.json",
       shellCommandMs: configuration.timeouts.shellCommandMs,
-      process: {
-        async run() {
-          reads += 1;
-          return { stdout: "not-json", stderr: "" };
-        },
+      fetch: async () => {
+        reads += 1;
+        return new Response("not-json");
       },
       now: () => now,
       sleep: async (milliseconds) => {

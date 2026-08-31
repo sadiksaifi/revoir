@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { parseReviewQueueJob, ReviewJobSchemaError, type ReviewQueueJob } from "@revoir/contracts";
 
 import { isCallerCancellation } from "../cancellation.js";
+import { CloudflarePolicyReadError } from "../cloudflare-policy.js";
 import type { RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import {
@@ -38,6 +39,8 @@ export type { OperationalFailureState, OperationalFailureStore } from "./failure
 const IDLE_POLL_DELAY_MS = 1_000;
 const MAX_OPERATIONAL_ATTEMPTS = 3;
 const OPERATIONAL_RETRY_DELAYS_SECONDS = [30, 120] as const;
+const MAX_POLICY_PREFLIGHT_DELIVERIES = 3;
+const POLICY_PREFLIGHT_RETRY_DELAYS_SECONDS = [30, 120] as const;
 
 export interface QueueClient {
   pullOne(signal?: AbortSignal): Promise<QueueDelivery | undefined>;
@@ -907,80 +910,32 @@ export class QueueReviewRunner implements QueueRunService {
     error: unknown,
     signal?: AbortSignal,
   ): Promise<QueueConsumption> {
-    const pendingSettlement = this.#pendingStoreSettlements.get(job.deliveryId);
-    if (pendingSettlement !== undefined) {
-      return this.#settleStoreFailure(delivery, job, pendingSettlement, signal);
-    }
-
-    let operationalState: OperationalFailureState;
-    try {
-      operationalState = await this.#loadFailureState(job.deliveryId, signal);
-      throwIfCancelled(signal);
-    } catch (stateError) {
-      throwIfCancelled(signal);
-      return this.#settleStoreFailure(delivery, job, stateError, signal);
-    }
-    if (operationalState.committedFailures === MAX_OPERATIONAL_ATTEMPTS) {
-      return this.#settleTerminalFailure(
-        delivery,
-        job,
-        operationalState.terminalCategory ?? "unknown",
-        signal,
-      );
-    }
-
-    const slot = (operationalState.committedFailures + 1) as OperationalAttemptSlot;
-    const reservation = {
-      slot,
-      ownerToken: `${this.#ownerToken}:${randomUUID()}`,
-      transportAttempt: delivery.attempt,
-    };
-    const reservedState: OperationalFailureState = {
-      committedFailures: operationalState.committedFailures,
-      reservation,
-      ...(slot === MAX_OPERATIONAL_ATTEMPTS ? { terminalCategory: "unknown" as const } : {}),
-    };
-    try {
-      await this.#saveFailureState(job.deliveryId, reservedState, slot, signal);
-      throwIfCancelled(signal);
-    } catch (stateError) {
-      if (isCallerCancellation(stateError, signal)) {
-        await this.#rollbackReservation(job.deliveryId, reservation);
-        throw signal?.reason instanceof Error ? signal.reason : stateError;
-      }
-      if (signal?.aborted === true) {
-        throw signal.reason instanceof Error ? signal.reason : stateError;
-      }
-      return this.#settleStoreFailure(delivery, job, stateError, signal);
-    }
-
-    const failure = classifyReviewFailure(error);
-    try {
-      await this.#saveFailureState(
-        job.deliveryId,
-        committedState(slot, failure.category),
-        slot,
-        signal,
-      );
-    } catch (stateError) {
-      if (signal?.aborted === true) {
-        throw signal.reason instanceof Error ? signal.reason : stateError;
-      }
-      return this.#settleStoreFailure(delivery, job, stateError, signal);
-    }
-    throwIfCancelled(signal);
-    if (slot >= MAX_OPERATIONAL_ATTEMPTS) {
-      return this.#settleTerminalFailure(delivery, job, failure.category, signal);
-    }
-
-    await this.#reportFailure(referenceFor(job), failure, slot, signal);
-    throwIfCancelled(signal);
-    await this.#queue.retry(delivery.leaseId, OPERATIONAL_RETRY_DELAYS_SECONDS[slot - 1]!, signal);
-    await this.#logger.write("queue_review_retried", {
+    const attempt = Math.max(1, delivery.attempt);
+    const knownFailure = error instanceof CloudflarePolicyReadError ? error : undefined;
+    const reason = knownFailure?.reason ?? "policy_unavailable";
+    const failureMetadata = {
       deliveryId: job.deliveryId,
-      reason: "local_policy_unavailable",
-      error,
-    });
+      attempt,
+      reason,
+      retryable: knownFailure?.retryable ?? false,
+      ...(knownFailure?.status === undefined ? {} : { status: knownFailure.status }),
+    };
+    if (knownFailure?.retryable === true && attempt < MAX_POLICY_PREFLIGHT_DELIVERIES) {
+      const delaySeconds = POLICY_PREFLIGHT_RETRY_DELAYS_SECONDS[attempt - 1]!;
+      await this.#queue.retry(delivery.leaseId, delaySeconds, signal);
+      await this.#logger.write("queue_review_deferred", {
+        deliveryId: job.deliveryId,
+        attempt,
+        delaySeconds,
+        reason,
+        ...(knownFailure.status === undefined ? {} : { status: knownFailure.status }),
+      });
+      return "settled";
+    }
+
+    await this.#logger.write("queue_review_abandoned", failureMetadata);
+    await this.#queue.acknowledge(delivery.leaseId, signal);
+    await this.#clearFailureState(job.deliveryId);
     return "settled";
   }
 

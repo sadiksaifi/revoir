@@ -241,23 +241,21 @@ describe("CLI", () => {
     assert.doesNotMatch(stdout.output + stderr.output, /cli-cloudflare-secret/u);
   });
 
-  it("scopes standalone diagnose policy reads to the configured Cloudflare account", async () => {
+  it("reads standalone diagnostic policy with the configured Cloudflare token", async () => {
     const { root, io } = await createIo();
     await writeCredentials(root);
     const paths = resolveApplicationPaths(io.environment, root);
     const configuration = createTestConfiguration(paths, {
       apiToken: "cli-cloudflare-secret",
     });
-    let environment: Readonly<Record<string, string>> | undefined;
-    const policyGateway = createDefaultDiagnosticGateway(
-      async () => {
-        throw new Error("unexpected network request");
-      },
-      async (_executable, _arguments, options) => {
-        environment = options.environment;
-        return { stdout: JSON.stringify(configuration.policy), stderr: "" };
-      },
-    );
+    let request: { url: string; authorization: string | null } | undefined;
+    const policyGateway = createDefaultDiagnosticGateway(async (input, init) => {
+      request = {
+        url: input.toString(),
+        authorization: new Headers(init?.headers).get("Authorization"),
+      };
+      return new Response(JSON.stringify(configuration.policy));
+    });
 
     assert.equal(
       await runCli(["diagnose"], {
@@ -266,7 +264,11 @@ describe("CLI", () => {
       }),
       0,
     );
-    assert.equal(environment?.CLOUDFLARE_ACCOUNT_ID, configuration.cloudflare.accountId);
+    assert.match(
+      request?.url ?? "",
+      new RegExp(`/accounts/${configuration.cloudflare.accountId}/storage/kv/namespaces/`),
+    );
+    assert.equal(request?.authorization, `Bearer ${configuration.cloudflare.apiToken}`);
   });
 
   it("returns actionable errors for invalid input and missing configuration", async () => {

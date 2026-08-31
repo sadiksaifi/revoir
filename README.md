@@ -111,14 +111,16 @@ Setup is interactive, browser-assisted, and resumable. It:
 4. deploys the Worker embedded in the executable;
 5. creates a personal **Any account** GitHub App through GitHub's App Manifest flow;
 6. opens the App settings so you can confirm that its webhook is active;
-7. opens a Cloudflare API-token template limited to the selected account and
-   `Account > Queues > Edit`, then privately prompts for that Queue token;
+7. opens a Cloudflare API-token template limited to the selected account with
+   `Account > Queues > Edit` and `Account > Workers KV Storage > Read`, then privately
+   prompts for that runtime token;
 8. writes an empty local/KV repository policy;
 9. installs and starts the per-user LaunchAgent;
 10. runs end-to-end diagnostics.
 
-The Queue token is intentionally separate from Wrangler authentication. It grants only
-the read/write access needed by the local HTTP pull consumer. Do not broaden its scope.
+The runtime token is intentionally separate from Wrangler authentication. It grants only
+the Queue access needed by the local HTTP pull consumer and read-only access to the
+repository policy in KV. Do not broaden its scope.
 
 On a brand-new Cloudflare account, Wrangler cannot create the `workers.dev` subdomain
 noninteractively. Revoir opens the account's Workers onboarding page. Complete that
@@ -268,16 +270,16 @@ Use `--verbose` on commands for redacted stack traces; secrets remain filtered.
 
 Default paths follow XDG conventions:
 
-| Path                                                       | Purpose                                                                                                                |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `~/.config/revoir/config.json`                             | GitHub App credentials, Cloudflare resource identities and Queue token, relay URL, model, timeouts, and runtime paths. |
-| `~/.config/revoir/policy.json`                             | Repository policy mirrored to Cloudflare KV.                                                                           |
-| `~/.config/revoir/setup-checkpoint.json`                   | Temporary resumable setup state; removed after success.                                                                |
-| `~/.local/state/revoir/pending-repositories.json`          | Resumable repository approval operations.                                                                              |
-| `~/.local/state/revoir/`                                   | Redacted logs, review locks, retry state, and completed request markers.                                               |
-| `~/.cache/revoir/checkouts/`                               | Temporary review worktrees.                                                                                            |
-| `~/.local/share/revoir/`                                   | Reserved application data directory.                                                                                   |
-| `~/Library/LaunchAgents/io.github.sadiksaifi.revoir.plist` | Generated per-user service definition.                                                                                 |
+| Path                                                       | Purpose                                                                                                                  |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `~/.config/revoir/config.json`                             | GitHub App credentials, Cloudflare resource identities and runtime token, relay URL, model, timeouts, and runtime paths. |
+| `~/.config/revoir/policy.json`                             | Repository policy mirrored to Cloudflare KV.                                                                             |
+| `~/.config/revoir/setup-checkpoint.json`                   | Temporary resumable setup state; removed after success.                                                                  |
+| `~/.local/state/revoir/pending-repositories.json`          | Resumable repository approval operations.                                                                                |
+| `~/.local/state/revoir/`                                   | Redacted logs, review locks, retry state, and completed request markers.                                                 |
+| `~/.cache/revoir/checkouts/`                               | Temporary review worktrees.                                                                                              |
+| `~/.local/share/revoir/`                                   | Reserved application data directory.                                                                                     |
+| `~/Library/LaunchAgents/io.github.sadiksaifi.revoir.plist` | Generated per-user service definition.                                                                                   |
 
 Configuration, policy, checkpoints, and mutable state are private files in private
 directories. Revoir rejects unexpected owners, modes, file types, and symlinks rather
@@ -318,7 +320,7 @@ For a complete manual teardown:
    in GitHub;
 3. verify and remove the Revoir Worker, Queue, HTTP pull consumer, and KV namespace in
    the selected Cloudflare account;
-4. revoke the dedicated Queue API token;
+4. revoke the dedicated Cloudflare runtime API token;
 5. remove the standalone executable and the Revoir config, state, cache, and data
    directories.
 

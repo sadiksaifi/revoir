@@ -119,10 +119,10 @@ function platform(
         appSlug: configuration.github.appSlug,
       };
     },
-    async requestQueueApiToken() {
-      return stage("queue-token", "queue-token-secret");
+    async requestRuntimeApiToken() {
+      return stage("runtime-token", "runtime-token-secret");
     },
-    async validateQueueApiToken() {},
+    async validateRuntimeApiToken() {},
     async putCloudPolicy() {
       cloudPolicyMutations.push("write");
       await stage("local-state", undefined);
@@ -171,7 +171,7 @@ describe("greenfield end-to-end setup", () => {
     });
     assert.equal(state.finalConfiguration?.github.privateKey, TEST_PRIVATE_KEY);
     assert.equal(state.finalConfiguration?.github.webhookSecret, "github-generated-secret");
-    assert.equal(state.finalConfiguration?.cloudflare.apiToken, "queue-token-secret");
+    assert.equal(state.finalConfiguration?.cloudflare.apiToken, "runtime-token-secret");
     assert.equal(
       state.finalConfiguration?.service.executablePath,
       "/Users/test/.local/share/mise/shims:/usr/bin:/bin",
@@ -182,7 +182,7 @@ describe("greenfield end-to-end setup", () => {
       "cloudflare-resources",
       "relay-deployed",
       "github-app",
-      "queue-token",
+      "runtime-token",
       "local-state",
       "service-installed",
       "diagnostics",
@@ -211,7 +211,7 @@ describe("greenfield end-to-end setup", () => {
     assert.deepEqual(resumedPlatform.calls, [
       "prerequisites",
       "github-app",
-      "queue-token",
+      "runtime-token",
       "local-state",
       "service-installed",
       "diagnostics",
@@ -250,7 +250,7 @@ describe("greenfield end-to-end setup", () => {
       "cloudflare-resources",
       "relay-deployed",
       "github-app",
-      "queue-token",
+      "runtime-token",
       "local-state",
       "service-installed",
       "diagnostics",
@@ -442,27 +442,27 @@ describe("greenfield end-to-end setup", () => {
     assert.deepEqual(reconciliation.relayMutations, ["secret-and-deploy"]);
   });
 
-  it("refreshes a revoked Queue token during completed setup reconciliation", async () => {
+  it("refreshes a revoked runtime token during completed setup reconciliation", async () => {
     const state = new MemorySetupState();
     await setup(state, platform(state)).run();
     const reconciliation = platform(state);
     let requested = 0;
-    reconciliation.validateQueueApiToken = async (_resources, token) => {
-      if (token !== "refreshed-queue-token") throw new Error("Queue token revoked");
+    reconciliation.validateRuntimeApiToken = async (_resources, token) => {
+      if (token !== "refreshed-runtime-token") throw new Error("Runtime token revoked");
     };
-    reconciliation.requestQueueApiToken = async () => {
+    reconciliation.requestRuntimeApiToken = async () => {
       requested += 1;
-      return "refreshed-queue-token";
+      return "refreshed-runtime-token";
     };
     reconciliation.runDiagnostics = async (configuration) => {
-      assert.equal(configuration.cloudflare.apiToken, "refreshed-queue-token");
+      assert.equal(configuration.cloudflare.apiToken, "refreshed-runtime-token");
     };
 
     const result = await setup(state, reconciliation).run();
 
     assert.equal(requested, 1);
-    assert.equal(result.configuration.cloudflare.apiToken, "refreshed-queue-token");
-    assert.equal(state.finalConfiguration?.cloudflare.apiToken, "refreshed-queue-token");
+    assert.equal(result.configuration.cloudflare.apiToken, "refreshed-runtime-token");
+    assert.equal(state.finalConfiguration?.cloudflare.apiToken, "refreshed-runtime-token");
   });
 
   it("checkpoints a live renamed App slug before reconciliation can be interrupted", async () => {

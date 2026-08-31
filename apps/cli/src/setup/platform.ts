@@ -834,30 +834,35 @@ export class DefaultSetupPlatform implements SetupPlatform {
     return identity;
   }
 
-  async requestQueueApiToken(resources: SetupCloudflareResources): Promise<string> {
+  async requestRuntimeApiToken(resources: SetupCloudflareResources): Promise<string> {
     const tokenTemplate = new URL("https://dash.cloudflare.com/profile/api-tokens");
     tokenTemplate.searchParams.set(
       "permissionGroupKeys",
-      JSON.stringify([{ key: "queues", type: "edit" }]),
+      JSON.stringify([
+        { key: "queues", type: "edit" },
+        { key: "workers_kv_storage", type: "read" },
+      ]),
     );
     tokenTemplate.searchParams.set("accountId", resources.accountId);
     tokenTemplate.searchParams.set("zoneId", "all");
-    tokenTemplate.searchParams.set("name", "Revoir Queue Pull");
+    tokenTemplate.searchParams.set("name", "Revoir Runtime");
     await this.#browser.open(tokenTemplate.toString());
-    const token = (await this.#secretPrompt("Cloudflare Queue read/write API token: ")).trim();
+    const token = (
+      await this.#secretPrompt("Cloudflare Queue edit and Workers KV read API token: ")
+    ).trim();
     if (token === "") {
-      throw new Error("Cloudflare Queue API token cannot be empty.");
+      throw new Error("Cloudflare runtime API token cannot be empty.");
     }
     return token;
   }
 
-  async validateQueueApiToken(resources: SetupCloudflareResources, token: string): Promise<void> {
+  async validateRuntimeApiToken(resources: SetupCloudflareResources, token: string): Promise<void> {
     const queueUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(resources.accountId)}/queues/${encodeURIComponent(resources.queueId)}`;
     const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
     const response = await this.#request(queueUrl, { headers });
     if (!response.ok || ((await response.json()) as Record<string, unknown>).success !== true) {
       throw new Error(
-        "Cloudflare rejected the Queue token. Grant only Account > Queues > Edit and retry.",
+        "Cloudflare rejected Queue access for the runtime token. Grant Account > Queues > Edit and retry.",
       );
     }
     const acknowledgement = await this.#request(`${queueUrl}/messages/ack`, {
@@ -871,6 +876,24 @@ export class DefaultSetupPlatform implements SetupPlatform {
     ) {
       throw new Error(
         "Cloudflare rejected Queue acknowledgement access. Grant Account > Queues > Edit and retry.",
+      );
+    }
+    const namespaceResponse = await this.#request(
+      `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(resources.accountId)}/storage/kv/namespaces/${encodeURIComponent(resources.kvNamespaceId)}`,
+      { headers },
+    );
+    let namespaceAccepted = false;
+    if (namespaceResponse.ok) {
+      try {
+        namespaceAccepted =
+          ((await namespaceResponse.json()) as Record<string, unknown>).success === true;
+      } catch {
+        namespaceAccepted = false;
+      }
+    }
+    if (!namespaceAccepted) {
+      throw new Error(
+        "Cloudflare rejected runtime policy access. Grant Account > Queues > Edit and Account > Workers KV Storage > Read for the configured account, then retry.",
       );
     }
   }

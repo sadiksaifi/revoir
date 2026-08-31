@@ -415,10 +415,10 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
         appSlug: configuration.github.appSlug,
       };
     },
-    async requestQueueApiToken() {
+    async requestRuntimeApiToken() {
       return "package-smoke-cloudflare-token";
     },
-    async validateQueueApiToken() {},
+    async validateRuntimeApiToken() {},
     async putCloudPolicy() {},
     async getCloudPolicy() {
       return createEmptyPolicy(1);
