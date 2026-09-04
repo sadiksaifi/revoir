@@ -58,6 +58,7 @@ export type ReviewThreadResolution =
   | { readonly status: "stale"; readonly currentSha: string };
 
 export interface ReviewCancellationBoundary {
+  readonly expectedHeadSha?: string;
   readonly localCancelledAt?: string;
   readonly triggeredAt: string;
   readonly requestedCommentId?: number;
@@ -1038,16 +1039,36 @@ class InstallationSession implements GitHubReviewSession {
             throw new Error("GitHub cancellation comment lookup returned an invalid response.");
           }
           const comments = value.map(parseCancellationComment);
-          const cancellation = comments.find(
-            (comment) =>
-              comment.userId === this.#userId &&
-              comment.body.trim() === "@revoirapp cancel" &&
-              (requestedCommentId === undefined
+          for (const comment of comments) {
+            if (
+              comment.userId !== this.#userId ||
+              comment.body.trim() !== "@revoirapp cancel"
+            ) {
+              continue;
+            }
+            let cancels =
+              requestedCommentId === undefined
                 ? Date.parse(comment.createdAt) > Date.parse(boundary.triggeredAt)
-                : comment.id > requestedCommentId),
-          );
-          if (cancellation !== undefined) {
-            throw new TargetedReviewCancellationError();
+                : comment.id > requestedCommentId;
+            if (
+              !cancels &&
+              requestedCommentId === undefined &&
+              boundary.expectedHeadSha !== undefined &&
+              Date.parse(comment.createdAt) === Date.parse(boundary.triggeredAt)
+            ) {
+              // Equal GitHub timestamps require the ordered PR timeline to preserve both
+              // later-cancellation and later-commit semantics.
+              // eslint-disable-next-line no-await-in-loop
+              cancels = await this.#cancellationFollowsAutomaticTrigger(
+                reference,
+                comment.id,
+                boundary.expectedHeadSha,
+                signal,
+              );
+            }
+            if (cancels) {
+              throw new TargetedReviewCancellationError();
+            }
           }
           const reachedBoundary =
             comments.length === 0 ||
@@ -1100,6 +1121,92 @@ class InstallationSession implements GitHubReviewSession {
     }
     const serverCancelledAt = localCancelledAt + (serverNow - localNow);
     return Math.floor(triggeredAt / 1_000) < Math.floor(serverCancelledAt / 1_000);
+  }
+
+  async #cancellationFollowsAutomaticTrigger(
+    reference: PullRequestReference,
+    cancellationCommentId: number,
+    expectedHeadSha: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    let before: string | null = null;
+    let sawCancellation = false;
+    for (;;) {
+      // Timeline pages must remain serial so their reverse chronology is authoritative.
+      // eslint-disable-next-line no-await-in-loop
+      const data = await this.#graphql(
+        `query RevoirCancellationOrder(
+          $owner: String!
+          $repository: String!
+          $number: Int!
+          $before: String
+        ) {
+          repository(owner: $owner, name: $repository) {
+            pullRequest(number: $number) {
+              timelineItems(
+                last: 100
+                before: $before
+                itemTypes: [ISSUE_COMMENT, PULL_REQUEST_COMMIT]
+              ) {
+                nodes {
+                  __typename
+                  ... on IssueComment { databaseId }
+                  ... on PullRequestCommit { commit { oid } }
+                }
+                pageInfo { hasPreviousPage startCursor }
+              }
+            }
+          }
+        }`,
+        {
+          owner: reference.owner,
+          repository: reference.repository,
+          number: reference.number,
+          before,
+        },
+        "cancellation timeline lookup",
+        signal,
+      );
+      const repository = record(data.repository, "cancellation timeline repository");
+      const pullRequest = record(repository.pullRequest, "cancellation timeline pull request");
+      const timeline = record(
+        pullRequest.timelineItems,
+        "cancellation timeline items",
+      );
+      if (!Array.isArray(timeline.nodes)) {
+        throw new Error("GitHub cancellation timeline lookup returned invalid nodes.");
+      }
+      for (const value of timeline.nodes.toReversed()) {
+        const item = record(value, "cancellation timeline item");
+        if (
+          item.__typename === "IssueComment" &&
+          positiveInteger(item.databaseId, "cancellation timeline comment id") ===
+            cancellationCommentId
+        ) {
+          sawCancellation = true;
+          continue;
+        }
+        if (
+          item.__typename === "PullRequestCommit" &&
+          string(
+            record(item.commit, "cancellation timeline commit").oid,
+            "cancellation timeline commit SHA",
+          ) === expectedHeadSha
+        ) {
+          return sawCancellation;
+        }
+      }
+      const pageInfo = record(timeline.pageInfo, "cancellation timeline page info");
+      if (typeof pageInfo.hasPreviousPage !== "boolean") {
+        throw new Error("GitHub cancellation timeline lookup returned invalid pagination.");
+      }
+      if (!pageInfo.hasPreviousPage) {
+        throw new Error("GitHub cancellation timeline lookup could not establish event order.");
+      }
+      before = string(pageInfo.startCursor, "cancellation timeline start cursor");
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
   }
 
   #reviewCheckExternalId(reference: PullRequestReference, headSha: string): string {

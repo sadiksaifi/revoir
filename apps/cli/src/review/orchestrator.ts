@@ -346,6 +346,9 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     }
     const boundary = {
       triggeredAt: options?.triggeredAt ?? new Date().toISOString(),
+      ...(options?.expectedHeadSha === undefined
+        ? {}
+        : { expectedHeadSha: options.expectedHeadSha }),
       ...(initialCancellation === undefined
         ? {}
         : { localCancelledAt: initialCancellation.cancelledAt }),

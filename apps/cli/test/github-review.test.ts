@@ -171,16 +171,35 @@ describe("GitHub App review gateway", () => {
 
   it("keeps a same-second automatic trigger eligible after a cancellation comment", async () => {
     const controller = new AbortController();
+    const headSha = "2".repeat(40);
     const session = await cancellationSession(
-      async () =>
-        json([
+      async (input) => {
+        if (String(input).endsWith("/graphql")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  timelineItems: {
+                    nodes: [
+                      { __typename: "IssueComment", databaseId: 123 },
+                      { __typename: "PullRequestCommit", commit: { oid: headSha } },
+                    ],
+                    pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                  },
+                },
+              },
+            },
+          });
+        }
+        return json([
           {
             id: 123,
             body: "@revoirapp cancel",
             created_at: "2026-09-04T10:00:00Z",
             user: { id: 42 },
           },
-        ]),
+        ]);
+      },
       async () => {
         controller.abort(new Error("automatic trigger remains eligible"));
       },
@@ -189,11 +208,63 @@ describe("GitHub App review gateway", () => {
     await assert.rejects(
       session.monitorCancellation!(
         reference,
-        { triggeredAt: "2026-09-04T10:00:00.000Z" },
+        { triggeredAt: "2026-09-04T10:00:00.000Z", expectedHeadSha: headSha },
         controller.signal,
       ),
       /automatic trigger remains eligible/u,
     );
+  });
+
+  it("accepts a same-second cancellation after an automatic trigger", async () => {
+    const headSha = "2".repeat(40);
+    const controller = new AbortController();
+    let timelinePage = 0;
+    const session = await cancellationSession(
+      async (input) => {
+        if (String(input).endsWith("/graphql")) {
+          timelinePage += 1;
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  timelineItems: {
+                    nodes:
+                      timelinePage === 1
+                        ? [{ __typename: "IssueComment", databaseId: 123 }]
+                        : [{ __typename: "PullRequestCommit", commit: { oid: headSha } }],
+                    pageInfo:
+                      timelinePage === 1
+                        ? { hasPreviousPage: true, startCursor: "previous" }
+                        : { hasPreviousPage: false, startCursor: "start" },
+                  },
+                },
+              },
+            },
+          });
+        }
+        return json([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: "2026-09-04T10:00:00Z",
+            user: { id: 42 },
+          },
+        ]);
+      },
+      async () => {
+        controller.abort(new Error("same-second cancellation was missed"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T10:00:00.000Z", expectedHeadSha: headSha },
+        controller.signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.equal(timelinePage, 2);
   });
 
   it("uses reverse pagination and conditional ETags while polling comments", async () => {
