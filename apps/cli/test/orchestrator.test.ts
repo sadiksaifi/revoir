@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { TargetedReviewCancellationError } from "../src/cancellation.js";
 import { withRepository, type RevoirPolicy } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
+import type { ReviewCancellationStore } from "../src/review/cancellation-store.js";
 import type { GitHubReviewEvidence } from "../src/review/evidence.js";
 import type { ReviewFindingV2 } from "../src/review/findings.js";
 import type {
@@ -188,6 +190,8 @@ function harness(
     lock?: ReviewLock;
     loadPolicy?: (signal?: AbortSignal) => Promise<RevoirPolicy>;
     workspaces?: WorkspacePreparer;
+    cancellations?: ReviewCancellationStore;
+    monitorCancellation?: NonNullable<GitHubReviewSession["monitorCancellation"]>;
     reviewMs?: number;
   } = {},
 ) {
@@ -218,6 +222,9 @@ function harness(
   const ownedReactions = new Set<ReviewReaction>();
   let pendingReviewRemoved = false;
   const session: GitHubReviewSession = {
+    ...(options.monitorCancellation === undefined
+      ? {}
+      : { monitorCancellation: options.monitorCancellation }),
     installationToken: "installation-secret",
     async startReviewCheck(_reference, headSha) {
       checkStartedShas.push(headSha);
@@ -445,6 +452,7 @@ function harness(
     ownedReactions,
     orchestrator: new CleanReviewOrchestrator(configuration(options.reviewMs), {
       github,
+      ...(options.cancellations === undefined ? {} : { cancellations: options.cancellations }),
       lock: options.lock ?? {
         async acquire() {
           return { async release() {} };
@@ -480,6 +488,69 @@ function validatedFinding(): ReviewFindingV2 {
 }
 
 describe("clean review orchestrator", () => {
+  it("observes a local cancellation while waiting for the process lock", async () => {
+    const test = harness({
+      cancellations: {
+        async read() {
+          return { cancelledAt: "2026-09-04T10:01:00.000Z" };
+        },
+        async record() {
+          return { cancelledAt: "2026-09-04T10:01:00.000Z" };
+        },
+      },
+      lock: {
+        async acquire(signal) {
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        },
+      },
+    });
+
+    await assert.rejects(
+      test.orchestrator.review(reference, { triggeredAt: "2026-09-04T10:00:00.000Z" }),
+      TargetedReviewCancellationError,
+    );
+    assert.deepEqual(test.events, []);
+  });
+
+  it("cancels active model work, cleans artifacts, and completes the check as cancelled", async () => {
+    let signalReviewStarted!: () => void;
+    const reviewStarted = new Promise<void>((resolve) => {
+      signalReviewStarted = resolve;
+    });
+    const test = harness({
+      async monitorCancellation() {
+        await reviewStarted;
+        throw new TargetedReviewCancellationError();
+      },
+      async review(_context, signal) {
+        signalReviewStarted();
+        if (!signal.aborted) {
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        throw signal.reason;
+      },
+    });
+
+    await assert.rejects(
+      test.orchestrator.review(reference, { triggeredAt: "2026-09-04T10:00:00.000Z" }),
+      TargetedReviewCancellationError,
+    );
+    assert.equal(test.events.includes("cleanup"), true);
+    assert.equal(test.events.includes("delete-10"), true);
+    assert.equal(test.events.includes("upsert-failure-comment"), false);
+    assert.deepEqual(test.checkCompletions, [
+      {
+        conclusion: "cancelled",
+        title: "Review cancelled",
+        summary: "An authorized cancellation request stopped this review.",
+      },
+    ]);
+  });
+
   it("runs the exact clean lifecycle after eligibility and cleans before completion", async () => {
     const { checkCompletions, checkStartedShas, events, orchestrator } = harness();
     assert.deepEqual(await orchestrator.review(reference), {

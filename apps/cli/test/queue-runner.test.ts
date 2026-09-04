@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { TargetedReviewCancellationError } from "../src/cancellation.js";
 import { CloudflarePolicyReadError } from "../src/cloudflare-policy.js";
 import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
@@ -152,6 +153,63 @@ class MemoryReviewRequestCompletionStore implements ReviewRequestCompletionStore
 }
 
 describe("queue review runner", () => {
+  it("acknowledges targeted cancellation without retrying or reporting failure", async () => {
+    const acknowledgements: string[] = [];
+    const retries: string[] = [];
+    const reports: string[] = [];
+    const events: string[] = [];
+    const completions = new MemoryReviewRequestCompletionStore();
+    let receivedOptions: Parameters<ManualReviewService["review"]>[1];
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return delivery(
+            "cancelled",
+            requestedReviewJob({
+              version: 2,
+              triggeredAt: "2026-08-04T23:59:00.000Z",
+            }),
+          );
+        },
+        async acknowledge(leaseId) {
+          acknowledgements.push(leaseId);
+        },
+        async retry(leaseId) {
+          retries.push(leaseId);
+        },
+      },
+      {
+        async review(_reference, options) {
+          receivedOptions = options;
+          throw new TargetedReviewCancellationError();
+        },
+      },
+      {
+        async report() {
+          reports.push("reported");
+        },
+      },
+      new MemoryOperationalFailureStore(),
+      {
+        async write(event) {
+          events.push(event);
+        },
+      },
+      completions,
+      async () => configuration().policy,
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.deepEqual(acknowledgements, ["cancelled"]);
+    assert.deepEqual(retries, []);
+    assert.deepEqual(reports, []);
+    assert.deepEqual(events, ["queue_review_started", "queue_review_cancelled"]);
+    assert.equal(receivedOptions?.triggeredAt, "2026-08-04T23:59:00.000Z");
+    assert.equal(receivedOptions?.requestedCommentId, 123456789);
+    assert.equal(completions.completions.has("99:123456789"), true);
+  });
+
   it("rejects a queued job after current cloud policy revokes it", async () => {
     let reviewed = false;
     let acknowledged = false;

@@ -1,4 +1,4 @@
-export const REVIEW_QUEUE_JOB_CONTRACT_VERSION = 1 as const;
+export const REVIEW_QUEUE_JOB_CONTRACT_VERSION = 2 as const;
 
 export const REVIEW_JOB_ACTIONS = [
   "opened",
@@ -34,7 +34,7 @@ export interface RequestedReviewTrigger {
 }
 
 export interface ReviewQueueJobV1 {
-  version: typeof REVIEW_QUEUE_JOB_CONTRACT_VERSION;
+  version: 1;
   deliveryId: string;
   installationId: number;
   repository: ReviewJobRepository;
@@ -45,7 +45,12 @@ export interface ReviewQueueJobV1 {
   enqueuedAt: string;
 }
 
-export type ReviewQueueJob = ReviewQueueJobV1;
+export interface ReviewQueueJobV2 extends Omit<ReviewQueueJobV1, "version"> {
+  version: typeof REVIEW_QUEUE_JOB_CONTRACT_VERSION;
+  triggeredAt: string;
+}
+
+export type ReviewQueueJob = ReviewQueueJobV1 | ReviewQueueJobV2;
 
 export class ReviewJobSchemaError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -58,7 +63,7 @@ const DELIVERY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const GITHUB_OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
 const GITHUB_REPOSITORY = /^[A-Za-z0-9._-]+$/u;
 const SHA = /^[0-9a-f]{40}$/u;
-const TOP_LEVEL_FIELDS = [
+const V1_TOP_LEVEL_FIELDS = [
   "version",
   "deliveryId",
   "installationId",
@@ -67,6 +72,7 @@ const TOP_LEVEL_FIELDS = [
   "trigger",
   "enqueuedAt",
 ] as const;
+const V2_TOP_LEVEL_FIELDS = [...V1_TOP_LEVEL_FIELDS, "triggeredAt"] as const;
 const REPOSITORY_FIELDS = ["id", "owner", "name"] as const;
 const PULL_REQUEST_FIELDS = ["number"] as const;
 const AUTOMATIC_TRIGGER_FIELDS = [
@@ -149,14 +155,14 @@ function parseRepository(value: unknown): ReviewJobRepository {
   return { id, owner, name };
 }
 
-function parseEnqueuedAt(value: unknown): string {
-  const parsed = string(value, "review job.enqueuedAt");
+function parseTimestamp(value: unknown, path: string): string {
+  const parsed = string(value, path);
   if (
     !parsed.endsWith("Z") ||
     Number.isNaN(Date.parse(parsed)) ||
     new Date(parsed).toISOString() !== parsed
   ) {
-    throw new ReviewJobSchemaError("review job.enqueuedAt must be a canonical UTC timestamp.");
+    throw new ReviewJobSchemaError(`${path} must be a canonical UTC timestamp.`);
   }
   return parsed;
 }
@@ -213,21 +219,18 @@ function parseRequestedTrigger(value: Record<string, unknown>): RequestedReviewT
   };
 }
 
-export function parseReviewQueueJob(value: unknown): ReviewQueueJobV1 {
+export function parseReviewQueueJob(value: unknown): ReviewQueueJob {
   const job = record(candidate(value), "review job");
-  checkKeys(job, "review job", TOP_LEVEL_FIELDS);
-  if (job.version !== REVIEW_QUEUE_JOB_CONTRACT_VERSION) {
-    throw new ReviewJobSchemaError(
-      `review job.version must be ${REVIEW_QUEUE_JOB_CONTRACT_VERSION}.`,
-    );
+  if (job.version !== 1 && job.version !== REVIEW_QUEUE_JOB_CONTRACT_VERSION) {
+    throw new ReviewJobSchemaError("review job.version must be 1 or 2.");
   }
+  checkKeys(job, "review job", job.version === 1 ? V1_TOP_LEVEL_FIELDS : V2_TOP_LEVEL_FIELDS);
   const repository = parseRepository(job.repository);
   const pullRequest = record(job.pullRequest, "review job.pullRequest");
   checkKeys(pullRequest, "review job.pullRequest", PULL_REQUEST_FIELDS);
   const trigger = record(job.trigger, "review job.trigger");
 
-  return {
-    version: REVIEW_QUEUE_JOB_CONTRACT_VERSION,
+  const shared = {
     deliveryId: parseDeliveryId(job.deliveryId),
     installationId: positiveInteger(job.installationId, "review job.installationId"),
     repository,
@@ -242,6 +245,13 @@ export function parseReviewQueueJob(value: unknown): ReviewQueueJobV1 {
           : (() => {
               throw new ReviewJobSchemaError("review job.trigger.kind is not supported.");
             })(),
-    enqueuedAt: parseEnqueuedAt(job.enqueuedAt),
+    enqueuedAt: parseTimestamp(job.enqueuedAt, "review job.enqueuedAt"),
   };
+  return job.version === 1
+    ? { version: 1, ...shared }
+    : {
+        version: REVIEW_QUEUE_JOB_CONTRACT_VERSION,
+        ...shared,
+        triggeredAt: parseTimestamp(job.triggeredAt, "review job.triggeredAt"),
+      };
 }

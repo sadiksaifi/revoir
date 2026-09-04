@@ -10,7 +10,7 @@ import {
   scopeApplicationPathsToConfig,
   type PathEnvironment,
 } from "./config/paths.js";
-import { loadPolicy, writePolicy } from "./config/policy.js";
+import { installationForRepository, loadPolicy, writePolicy } from "./config/policy.js";
 import {
   DEFAULT_MODEL,
   DEFAULT_REASONING,
@@ -44,6 +44,10 @@ import {
   parseRepositoryReference,
   RepositoryManager,
 } from "./repository.js";
+import {
+  FileReviewCancellationStore,
+  type ReviewCancellationStore,
+} from "./review/cancellation-store.js";
 import { FindingContractError } from "./review/findings.js";
 import {
   createDefaultManualReviewService,
@@ -84,6 +88,7 @@ Usage:
   revoir repository list
   revoir diagnose [--config <path>] [--json] [--verbose]
   revoir review <GitHub PR URL> [--config <path>] [--verbose]
+  revoir review cancel <GitHub PR URL> [--config <path>] [--verbose]
   revoir run [--config <path>] [--verbose]
   revoir install [--config <path>] [--verbose]
   revoir start [--config <path>] [--verbose]
@@ -98,7 +103,7 @@ Commands:
   setup       Provision and reconcile the complete personal Revoir installation.
   repository  Explicitly authorize, revoke, or inspect repositories across both policy gates.
   diagnose    Non-interactively validate the configured installations.
-  review      Review one eligible pull request and publish validated findings or a clean result.
+  review      Review or cancel review work for one eligible pull request.
   run         Pull and settle eligible webhook review jobs one at a time.
   install     Generate, load, and start the per-user macOS LaunchAgent.
   start       Start the installed LaunchAgent without creating a duplicate worker.
@@ -125,6 +130,7 @@ export interface CliIo {
 export interface CliDependencies {
   io: CliIo;
   gateway?: DiagnosticGateway;
+  cancellationStore?: ReviewCancellationStore;
   reviewService?: ManualReviewService;
   runService?: QueueRunService;
   serviceManager?: ServiceManager;
@@ -326,7 +332,7 @@ export async function runCli(
     return 0;
   }
   if (
-    (arguments_[0] === "setup" ||
+    ((arguments_[0] === "setup" ||
       arguments_[0] === "repository" ||
       arguments_[0] === "diagnose" ||
       arguments_[0] === "review" ||
@@ -337,7 +343,10 @@ export async function runCli(
       arguments_[0] === "status" ||
       arguments_[0] === "logs" ||
       arguments_[0] === "uninstall") &&
-    (arguments_[1] === "--help" || arguments_[1] === "-h")
+      (arguments_[1] === "--help" || arguments_[1] === "-h")) ||
+    (arguments_[0] === "review" &&
+      arguments_[1] === "cancel" &&
+      (arguments_[2] === "--help" || arguments_[2] === "-h"))
   ) {
     write(io.stdout, HELP);
     return 0;
@@ -811,14 +820,21 @@ export async function runCli(
       write(io.stderr, "Error: --json is not supported by the review command.\n");
       return 2;
     }
-    if (common.arguments.length !== 1 || common.arguments[0] === undefined) {
-      write(io.stderr, "Error: review requires exactly one canonical GitHub pull-request URL.\n");
+    const cancellationRequested = common.arguments[0] === "cancel";
+    const urlArgument = cancellationRequested ? common.arguments[1] : common.arguments[0];
+    if (common.arguments.length !== (cancellationRequested ? 2 : 1) || urlArgument === undefined) {
+      write(
+        io.stderr,
+        cancellationRequested
+          ? "Error: review cancel requires exactly one canonical GitHub pull-request URL.\n"
+          : "Error: review requires exactly one canonical GitHub pull-request URL.\n",
+      );
       return 2;
     }
 
     let reference;
     try {
-      reference = parsePullRequestUrl(common.arguments[0]);
+      reference = parsePullRequestUrl(urlArgument);
     } catch (error) {
       write(io.stderr, `Error: ${new SecretRedactor().error(error, common.verbose)}\n`);
       return 2;
@@ -833,6 +849,22 @@ export async function runCli(
     }
     const redactor = new SecretRedactor(configuration);
     try {
+      if (cancellationRequested) {
+        const policy = await loadPolicy(paths.policyFile);
+        if (
+          installationForRepository(policy, reference.owner, reference.repository) === undefined
+        ) {
+          throw new PullRequestEligibilityError(
+            `${reference.owner}/${reference.repository} is not in the configured repository allowlist.`,
+          );
+        }
+        await (
+          dependencies.cancellationStore ??
+          new FileReviewCancellationStore(configuration.paths.stateDir)
+        ).record(reference);
+        write(io.stdout, `Cancellation recorded for ${reference.url}.\n`);
+        return 0;
+      }
       const result = await (
         dependencies.reviewService ??
         createDefaultManualReviewService(

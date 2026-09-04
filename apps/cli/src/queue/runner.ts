@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { parseReviewQueueJob, ReviewJobSchemaError, type ReviewQueueJob } from "@revoir/contracts";
 
-import { isCallerCancellation } from "../cancellation.js";
+import { isCallerCancellation, isTargetedReviewCancellation } from "../cancellation.js";
 import { CloudflarePolicyReadError } from "../cloudflare-policy.js";
 import type { RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
@@ -450,9 +450,28 @@ export class QueueReviewRunner implements QueueRunService {
     try {
       result = await this.#reviews.review(referenceFor(job), {
         ...(job.trigger.kind === "automatic" ? { expectedHeadSha: job.trigger.headSha } : {}),
+        ...(job.trigger.kind === "requested" ? { requestedCommentId: job.trigger.commentId } : {}),
+        triggeredAt: job.version === 2 ? job.triggeredAt : job.enqueuedAt,
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
+      if (isTargetedReviewCancellation(error)) {
+        if (signal?.aborted === true) {
+          await this.#rollbackReservation(job.deliveryId, reservation);
+          throw signal.reason instanceof Error ? signal.reason : error;
+        }
+        if (requestedReview !== undefined) {
+          this.#knownCompletedRequests.add(requestKey(requestedReview));
+          await this.#markRequestCompletion(requestedReview);
+        }
+        await this.#queue.acknowledge(delivery.leaseId, signal);
+        await this.#clearFailureState(job.deliveryId);
+        await this.#logger.write("queue_review_cancelled", {
+          ...metadata,
+          durationMs: Date.now() - startedAt,
+        });
+        return "settled";
+      }
       if (isCallerCancellation(error, signal)) {
         await this.#rollbackReservation(job.deliveryId, reservation);
         throw signal?.reason instanceof Error ? signal.reason : error;

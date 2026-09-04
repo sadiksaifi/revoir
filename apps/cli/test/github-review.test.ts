@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createPublicKey, createVerify } from "node:crypto";
 import { describe, it } from "node:test";
 
+import { TargetedReviewCancellationError } from "../src/cancellation.js";
 import type { ReviewFindingV2 } from "../src/review/findings.js";
 import {
   createGitHubAppJwt,
@@ -108,6 +109,153 @@ function markerOnlyExplicitReviewBody(candidate: ReviewFindingV2): string {
 }
 
 describe("GitHub App review gateway", () => {
+  async function cancellationSession(
+    fetchImplementation: FetchLike,
+    waitForPoll: (delayMs: number, signal: AbortSignal) => Promise<void> = async () => {},
+  ) {
+    return new GitHubAppReviewGateway(
+      async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/app")) return json({ slug: "revoir-test" });
+        if (url.endsWith("/access_tokens")) return json({ token: "installation-secret" });
+        return fetchImplementation(input, init);
+      },
+      "https://api.test",
+      () => 1_000,
+      1_000,
+      waitForPoll,
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
+  }
+
+  it("accepts only an exact authorized cancellation newer than a review comment", async () => {
+    const session = await cancellationSession(async () =>
+      json([
+        {
+          id: 125,
+          body: "@revoirapp cancel now",
+          created_at: "2026-09-04T10:02:00Z",
+          user: { id: 42 },
+        },
+        {
+          id: 124,
+          body: "@revoirapp cancel",
+          created_at: "2026-09-04T10:01:00Z",
+          user: { id: 99 },
+        },
+        {
+          id: 123,
+          body: " @revoirapp cancel \n",
+          created_at: "2026-09-04T10:00:00Z",
+          user: { id: 42 },
+        },
+      ]),
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z", requestedCommentId: 122 },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+  });
+
+  it("uses reverse pagination and conditional ETags while polling comments", async () => {
+    const requests: Array<{ init: RequestInit | undefined; url: string }> = [];
+    const pollDelays: number[] = [];
+    let requestCount = 0;
+    const controller = new AbortController();
+    const session = await cancellationSession(
+      async (input, init) => {
+        requests.push({ url: String(input), init });
+        requestCount += 1;
+        if (requestCount === 1) {
+          return new Response("[]", {
+            headers: { ETag: '"comments-v1"', "X-Poll-Interval": "7" },
+          });
+        }
+        queueMicrotask(() => controller.abort(new Error("test complete")));
+        return new Response(null, { status: 304 });
+      },
+      async (delayMs) => {
+        pollDelays.push(delayMs);
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z" },
+        controller.signal,
+      ),
+      /test complete/u,
+    );
+    assert.match(requests[0]!.url, /sort=created&direction=desc/u);
+    assert.equal(new Headers(requests[1]!.init?.headers).get("If-None-Match"), '"comments-v1"');
+    assert.deepEqual(pollDelays, [7_000]);
+  });
+
+  it("turns three consecutive comment-monitor failures into a GitHub failure", async () => {
+    let attempts = 0;
+    const session = await cancellationSession(async () => {
+      attempts += 1;
+      throw new Error("network unavailable");
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z" },
+        new AbortController().signal,
+      ),
+      /GitHub cancellation monitoring failed three consecutive times/u,
+    );
+    assert.equal(attempts, 3);
+  });
+
+  it("finds an authorized cancellation on a later reverse-ordered page", async () => {
+    const requestedPages: number[] = [];
+    const session = await cancellationSession(async (input) => {
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get("page"));
+      requestedPages.push(page);
+      if (page === 1) {
+        return json(
+          Array.from({ length: 100 }, (_, index) => ({
+            id: 300 - index,
+            body: "ordinary comment",
+            created_at: "2026-09-04T10:01:00Z",
+            user: { id: 42 },
+          })),
+        );
+      }
+      return json([
+        {
+          id: 199,
+          body: "@revoirapp cancel",
+          created_at: "2026-09-04T10:00:00Z",
+          user: { id: 42 },
+        },
+      ]);
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z", requestedCommentId: 100 },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.deepEqual(requestedPages, [1, 2]);
+  });
+
   it("signs a short-lived RS256 GitHub App JWT", () => {
     const jwt = createGitHubAppJwt(7, TEST_PRIVATE_KEY, 1_000);
     const [encodedHeader, encodedPayload, encodedSignature] = jwt.split(".");
