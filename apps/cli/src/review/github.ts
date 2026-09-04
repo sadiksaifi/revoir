@@ -347,6 +347,12 @@ function positiveInteger(value: unknown, path: string): number {
   return value as number;
 }
 
+function positiveDatabaseId(value: unknown, path: string): number {
+  const parsed =
+    typeof value === "string" && /^[1-9][0-9]*$/u.test(value) ? Number(value) : value;
+  return positiveInteger(parsed, path);
+}
+
 function string(value: unknown, path: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`GitHub returned an invalid ${path}.`);
@@ -1156,7 +1162,7 @@ class InstallationSession implements GitHubReviewSession {
               ) {
                 nodes {
                   __typename
-                  ... on IssueComment { databaseId }
+                  ... on IssueComment { fullDatabaseId }
                   ... on PullRequestCommit { commit { oid } }
                   ... on ReadyForReviewEvent { createdAt }
                   ... on ReopenedEvent { createdAt }
@@ -1185,7 +1191,10 @@ class InstallationSession implements GitHubReviewSession {
         const item = record(value, "cancellation timeline item");
         if (
           item["__typename"] === "IssueComment" &&
-          positiveInteger(item.databaseId, "cancellation timeline comment id") ===
+          positiveDatabaseId(
+            item.fullDatabaseId ?? item.databaseId,
+            "cancellation timeline comment id",
+          ) ===
             cancellationCommentId
         ) {
           sawCancellation = true;

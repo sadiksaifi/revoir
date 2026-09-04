@@ -364,6 +364,47 @@ describe("GitHub App review gateway", () => {
     assert.equal(timelinePage, 2);
   });
 
+  it("orders automatic cancellation comments with IDs above GraphQL Int range", async () => {
+    const headSha = "2".repeat(40);
+    const commentId = 3_936_268_441;
+    const session = await cancellationSession(async (input) => {
+      if (String(input).endsWith("/graphql")) {
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                timelineItems: {
+                  nodes: [
+                    { __typename: "PullRequestCommit", commit: { oid: headSha } },
+                    { __typename: "IssueComment", fullDatabaseId: String(commentId) },
+                  ],
+                  pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                },
+              },
+            },
+          },
+        });
+      }
+      return json([
+        {
+          id: commentId,
+          body: "@revoirapp cancel",
+          created_at: "2026-09-04T10:00:00Z",
+          user: { id: 42 },
+        },
+      ]);
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T10:00:00.000Z", expectedHeadSha: headSha },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+  });
+
   it("uses reverse pagination and conditional ETags while polling comments", async () => {
     const requests: Array<{ init: RequestInit | undefined; url: string }> = [];
     const pollDelays: number[] = [];
