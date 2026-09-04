@@ -420,16 +420,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     }
 
     const finalization = this.#retainFinalization(
-      this.#finalizeReview(
-        reference,
-        options,
-        policy,
-        github,
-        reviewSignal,
-        lease,
-        monitorStop,
-        monitorPromises,
-      ),
+      this.#finalizeReview(reference, options, reviewSignal, lease, monitorStop, monitorPromises),
     );
     try {
       return await deadline.wait(finalization);
@@ -489,8 +480,6 @@ export class CleanReviewOrchestrator implements ManualReviewService {
   async #finalizeReview(
     reference: PullRequestReference,
     options: ManualReviewOptions | undefined,
-    policy: RevoirPolicy,
-    github: GitHubReviewSession,
     signal: AbortSignal,
     lease: Awaited<ReturnType<ReviewLock["acquire"]>>,
     monitorStop: AbortController,
@@ -499,6 +488,13 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     let result: ManualReviewResult | undefined;
     let failure: unknown;
     try {
+      const policy = await this.#loadPolicy(signal);
+      const github = await this.#github.authenticate(
+        this.#configuration.github,
+        policy,
+        reference,
+        signal,
+      );
       result = await this.#reviewWithLease(
         reference,
         options,

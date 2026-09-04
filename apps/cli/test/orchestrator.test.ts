@@ -572,6 +572,39 @@ describe("clean review orchestrator", () => {
     assert.equal(test.events.includes("get-pr"), false);
   });
 
+  it("revalidates repository authorization after waiting for the process lock", async () => {
+    let releaseLockWait!: () => void;
+    const lockWait = new Promise<void>((resolve) => {
+      releaseLockWait = resolve;
+    });
+    let policy = configuration().policy;
+    const test = harness({
+      loadPolicy: async () => policy,
+      lock: {
+        async acquire() {
+          await lockWait;
+          return { async release() {} };
+        },
+      },
+    });
+
+    const review = test.orchestrator.review(reference);
+    await waitFor(
+      () => test.events.includes("authenticate"),
+      "review did not reach authentication",
+    );
+    policy = { version: 1, revision: 1, userId: 42, installations: [] };
+    releaseLockWait();
+
+    await assert.rejects(review, /not in the configured repository allowlist/u);
+    assert.equal(test.events.includes("review"), false);
+    assert.equal(
+      test.events.some((event) => event.startsWith("prepare-")),
+      false,
+    );
+    assert.deepEqual(test.checkStartedShas, []);
+  });
+
   it("cancels active model work, cleans artifacts, and completes the check as cancelled", async () => {
     let signalReviewStarted!: () => void;
     const reviewStarted = new Promise<void>((resolve) => {
@@ -692,6 +725,7 @@ describe("clean review orchestrator", () => {
       },
     ]);
     assert.deepEqual(events, [
+      "authenticate",
       "authenticate",
       "get-pr",
       "get-head",
@@ -882,7 +916,7 @@ describe("clean review orchestrator", () => {
       reviewedSha: "2".repeat(40),
       currentSha: "3".repeat(40),
     });
-    assert.deepEqual(events, ["authenticate", "get-pr", "get-head"]);
+    assert.deepEqual(events, ["authenticate", "authenticate", "get-pr", "get-head"]);
   });
 
   it("settles an obsolete queued head before reading live lifecycle state", async () => {
@@ -898,7 +932,7 @@ describe("clean review orchestrator", () => {
         currentSha: "2".repeat(40),
       },
     );
-    assert.deepEqual(events, ["authenticate", "get-pr"]);
+    assert.deepEqual(events, ["authenticate", "authenticate", "get-pr"]);
   });
 
   it("skips Pi when the head changes while preparing the complete current diff", async () => {
@@ -1330,7 +1364,7 @@ describe("clean review orchestrator", () => {
   it("removes the active reaction and publishes no completion for stale output", async () => {
     const { events, orchestrator } = harness({ currentSha: "3".repeat(40) });
     assert.equal((await orchestrator.review(reference)).status, "stale");
-    assert.deepEqual(events, ["authenticate", "get-pr", "get-head"]);
+    assert.deepEqual(events, ["authenticate", "authenticate", "get-pr", "get-head"]);
     assert.equal(events.includes("add-+1"), false);
   });
 
@@ -1394,7 +1428,7 @@ describe("clean review orchestrator", () => {
       cases.map(async (snapshot) => {
         const { events, orchestrator } = harness({ pullRequest: snapshot });
         await assert.rejects(() => orchestrator.review(reference));
-        assert.deepEqual(events, ["authenticate", "get-pr"]);
+        assert.deepEqual(events, ["authenticate", "authenticate", "get-pr"]);
       }),
     );
   });
