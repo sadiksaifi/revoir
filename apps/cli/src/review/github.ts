@@ -996,9 +996,7 @@ class InstallationSession implements GitHubReviewSession {
     let pollIntervalMs = 5_000;
     const requestedCommentId = boundary.requestedCommentId;
     const since =
-      requestedCommentId === undefined
-        ? `&since=${encodeURIComponent(boundary.triggeredAt)}`
-        : "";
+      requestedCommentId === undefined ? `&since=${encodeURIComponent(boundary.triggeredAt)}` : "";
     for (;;) {
       throwIfAborted(signal);
       try {
@@ -1040,10 +1038,7 @@ class InstallationSession implements GitHubReviewSession {
           }
           const comments = value.map(parseCancellationComment);
           for (const comment of comments) {
-            if (
-              comment.userId !== this.#userId ||
-              comment.body.trim() !== "@revoirapp cancel"
-            ) {
+            if (comment.userId !== this.#userId || comment.body.trim() !== "@revoirapp cancel") {
               continue;
             }
             let cancels =
@@ -1167,19 +1162,16 @@ class InstallationSession implements GitHubReviewSession {
         "cancellation timeline lookup",
         signal,
       );
-      const repository = record(data.repository, "cancellation timeline repository");
-      const pullRequest = record(repository.pullRequest, "cancellation timeline pull request");
-      const timeline = record(
-        pullRequest.timelineItems,
-        "cancellation timeline items",
-      );
+      const repositoryValue = record(data.repository, "cancellation timeline repository");
+      const pullRequest = record(repositoryValue.pullRequest, "cancellation timeline pull request");
+      const timeline = record(pullRequest.timelineItems, "cancellation timeline items");
       if (!Array.isArray(timeline.nodes)) {
         throw new Error("GitHub cancellation timeline lookup returned invalid nodes.");
       }
       for (const value of timeline.nodes.toReversed()) {
         const item = record(value, "cancellation timeline item");
         if (
-          item.__typename === "IssueComment" &&
+          item["__typename"] === "IssueComment" &&
           positiveInteger(item.databaseId, "cancellation timeline comment id") ===
             cancellationCommentId
         ) {
@@ -1187,7 +1179,7 @@ class InstallationSession implements GitHubReviewSession {
           continue;
         }
         if (
-          item.__typename === "PullRequestCommit" &&
+          item["__typename"] === "PullRequestCommit" &&
           string(
             record(item.commit, "cancellation timeline commit").oid,
             "cancellation timeline commit SHA",

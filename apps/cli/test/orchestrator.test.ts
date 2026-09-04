@@ -651,6 +651,8 @@ describe("clean review orchestrator", () => {
           : {}),
       });
 
+      // Each case owns lifecycle callbacks that must settle before the next case starts.
+      // eslint-disable-next-line no-await-in-loop
       const result = await test.orchestrator.review(reference);
       assert.equal(result.status, findings ? "findings" : "clean");
       assert.equal(test.checkCompletions[0]?.conclusion, "success");
