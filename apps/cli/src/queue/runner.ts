@@ -372,31 +372,43 @@ export class QueueReviewRunner implements QueueRunService {
       }
     }
 
-    let loadedFailureState: OperationalFailureState;
-    try {
-      loadedFailureState = await this.#loadPersistedFailureState(job.deliveryId, signal);
-      throwIfCancelled(signal);
-    } catch (error) {
-      throwIfCancelled(signal);
-      return this.#settleStoreFailure(delivery, job, error, signal);
-    }
-    if (loadedFailureState.reviewCompleted === true) {
-      if (requestedReview !== undefined) {
+    let loadedFailureState: OperationalFailureState | undefined;
+    if (requestedReview !== undefined) {
+      try {
+        loadedFailureState = await this.#loadPersistedFailureState(job.deliveryId, signal);
+        throwIfCancelled(signal);
+      } catch (error) {
+        throwIfCancelled(signal);
+        return this.#settleStoreFailure(delivery, job, error, signal);
+      }
+      if (loadedFailureState.reviewCompleted === true) {
         return this.#settleCompletedRequest(delivery, job, requestedReview, true, signal);
       }
-      await this.#queue.acknowledge(delivery.leaseId, signal);
-      await this.#clearFailureState(job.deliveryId);
-      await this.#logger.write("queue_review_cancelled", {
-        deliveryId: job.deliveryId,
-        repository: `${job.repository.owner}/${job.repository.name}`,
-        pullRequest: job.pullRequest.number,
-      });
-      return "settled";
     }
 
     const pendingSettlement = this.#pendingStoreSettlements.get(job.deliveryId);
     if (pendingSettlement !== undefined) {
       return this.#settleStoreFailure(delivery, job, pendingSettlement, signal);
+    }
+
+    if (requestedReview === undefined) {
+      try {
+        loadedFailureState = await this.#loadPersistedFailureState(job.deliveryId, signal);
+        throwIfCancelled(signal);
+      } catch (error) {
+        throwIfCancelled(signal);
+        return this.#settleStoreFailure(delivery, job, error, signal);
+      }
+      if (loadedFailureState.reviewCompleted === true) {
+        await this.#queue.acknowledge(delivery.leaseId, signal);
+        await this.#clearFailureState(job.deliveryId);
+        await this.#logger.write("queue_review_cancelled", {
+          deliveryId: job.deliveryId,
+          repository: `${job.repository.owner}/${job.repository.name}`,
+          pullRequest: job.pullRequest.number,
+        });
+        return "settled";
+      }
     }
 
     let operationalState: OperationalFailureState;
