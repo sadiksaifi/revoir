@@ -584,6 +584,39 @@ describe("clean review orchestrator", () => {
     ]);
   });
 
+  it("fails the execution check when cancellation monitoring fails", async () => {
+    const monitoringFailure = new Error("GitHub cancellation monitoring failed");
+    let signalReviewStarted!: () => void;
+    const reviewStarted = new Promise<void>((resolve) => {
+      signalReviewStarted = resolve;
+    });
+    const test = harness({
+      async monitorCancellation() {
+        await reviewStarted;
+        throw monitoringFailure;
+      },
+      async review(_context, signal) {
+        signalReviewStarted();
+        if (!signal.aborted) {
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        }
+        throw signal.reason;
+      },
+    });
+
+    await assert.rejects(test.orchestrator.review(reference), monitoringFailure);
+    assert.deepEqual(test.checkCompletions, [
+      {
+        conclusion: "failure",
+        title: "Review failed",
+        summary:
+          "Revoir could not complete this review. See the failure comment or service logs for details.",
+      },
+    ]);
+  });
+
   it("runs the exact clean lifecycle after eligibility and cleans before completion", async () => {
     const { checkCompletions, checkStartedShas, events, orchestrator } = harness();
     assert.deepEqual(await orchestrator.review(reference), {

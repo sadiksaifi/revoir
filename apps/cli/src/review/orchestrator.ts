@@ -1,4 +1,8 @@
-import { isTargetedReviewCancellation, TargetedReviewCancellationError } from "../cancellation.js";
+import {
+  isCallerCancellation,
+  isTargetedReviewCancellation,
+  TargetedReviewCancellationError,
+} from "../cancellation.js";
 import type { RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import { FileReviewCancellationStore, type ReviewCancellationStore } from "./cancellation-store.js";
@@ -238,6 +242,7 @@ function reviewCheckCompletion(
   result: ManualReviewResult | undefined,
   failure: unknown,
   signal: AbortSignal,
+  callerSignal?: AbortSignal,
 ): GitHubReviewCheckCompletion {
   if (failure !== undefined) {
     if (signal.reason instanceof ReviewTimeoutError) {
@@ -254,7 +259,7 @@ function reviewCheckCompletion(
         summary: "An authorized cancellation request stopped this review.",
       };
     }
-    if (signal.aborted) {
+    if (isCallerCancellation(failure, callerSignal)) {
       return {
         conclusion: "cancelled",
         title: "Review cancelled",
@@ -809,7 +814,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     if (reviewCheck !== undefined) {
       const check = reviewCheck;
       reviewCheck = undefined;
-      const completion = reviewCheckCompletion(result, terminalFailure, signal);
+      const completion = reviewCheckCompletion(result, terminalFailure, signal, options?.signal);
       const checkFailures = await completeReviewCheck(
         createTerminalHandle(() => check.complete(completion, terminalSignal)),
       );
