@@ -58,6 +58,7 @@ export type ReviewThreadResolution =
   | { readonly status: "stale"; readonly currentSha: string };
 
 export interface ReviewCancellationBoundary {
+  readonly localCancelledAt?: string;
   readonly triggeredAt: string;
   readonly requestedCommentId?: number;
 }
@@ -998,6 +999,7 @@ class InstallationSession implements GitHubReviewSession {
       throwIfAborted(signal);
       try {
         let page = 1;
+        let nextEtag = etag;
         for (;;) {
           // Comment pages form one reverse-ordered snapshot and must remain serial.
           // eslint-disable-next-line no-await-in-loop
@@ -1010,8 +1012,19 @@ class InstallationSession implements GitHubReviewSession {
           if (Number.isFinite(configuredPollInterval) && configuredPollInterval > 0) {
             pollIntervalMs = Math.max(pollIntervalMs, configuredPollInterval * 1_000);
           }
+          if (
+            page === 1 &&
+            boundary.localCancelledAt !== undefined &&
+            this.#localCancellationPrecedesTrigger(
+              boundary.localCancelledAt,
+              boundary.triggeredAt,
+              response,
+            )
+          ) {
+            throw new TargetedReviewCancellationError();
+          }
           if (page === 1) {
-            etag = response.headers.get("ETag") ?? etag;
+            nextEtag = response.headers.get("ETag") ?? etag;
           }
           if (response.status === 304) {
             break;
@@ -1046,6 +1059,7 @@ class InstallationSession implements GitHubReviewSession {
           }
           page += 1;
         }
+        etag = nextEtag;
         failures = 0;
       } catch (error) {
         if (error instanceof TargetedReviewCancellationError || signal.aborted) {
@@ -1062,6 +1076,27 @@ class InstallationSession implements GitHubReviewSession {
       // eslint-disable-next-line no-await-in-loop
       await this.#waitForCancellationPoll(pollIntervalMs, signal);
     }
+  }
+
+  #localCancellationPrecedesTrigger(
+    localCancellation: string,
+    trigger: string,
+    response: Response,
+  ): boolean {
+    const serverDate = response.headers.get("Date");
+    const serverNow = serverDate === null ? Number.NaN : Date.parse(serverDate);
+    const localNow = this.#now() * 1_000;
+    const localCancelledAt = Date.parse(localCancellation);
+    const triggeredAt = Date.parse(trigger);
+    if (
+      !Number.isFinite(serverNow) ||
+      !Number.isFinite(localCancelledAt) ||
+      !Number.isFinite(triggeredAt)
+    ) {
+      throw new Error("GitHub cancellation monitoring could not establish a clock boundary.");
+    }
+    const serverCancelledAt = localCancelledAt + (serverNow - localNow);
+    return Math.floor(triggeredAt / 1_000) < Math.floor(serverCancelledAt / 1_000);
   }
 
   #reviewCheckExternalId(reference: PullRequestReference, headSha: string): string {

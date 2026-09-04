@@ -388,8 +388,8 @@ describe("greenfield end-to-end setup", () => {
     assert.deepEqual(reconciliation.cloudPolicyMutations, []);
     assert.deepEqual(reconciliation.calls, [
       "prerequisites",
-      "relay-deployed",
       "service-installed",
+      "relay-deployed",
       "diagnostics",
     ]);
   });
@@ -435,11 +435,21 @@ describe("greenfield end-to-end setup", () => {
     const state = new MemorySetupState();
     await setup(state, platform(state)).run();
     const reconciliation = platform(state);
-    reconciliation.relayIsCurrent = async () => false;
+    const ordering: string[] = [];
+    const installService = reconciliation.installService.bind(reconciliation);
+    reconciliation.installService = async (configuration) => {
+      ordering.push("service-installed");
+      await installService(configuration);
+    };
+    reconciliation.relayIsCurrent = async () => {
+      ordering.push("relay-deployed");
+      return false;
+    };
 
     await setup(state, reconciliation).run();
 
     assert.deepEqual(reconciliation.relayMutations, ["secret-and-deploy"]);
+    assert.deepEqual(ordering, ["service-installed", "relay-deployed"]);
   });
 
   it("refreshes a revoked runtime token during completed setup reconciliation", async () => {

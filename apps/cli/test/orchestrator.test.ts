@@ -489,10 +489,12 @@ function validatedFinding(): ReviewFindingV2 {
 
 describe("clean review orchestrator", () => {
   it("observes a local cancellation while waiting for the process lock", async () => {
+    let reads = 0;
     const test = harness({
       cancellations: {
         async read() {
-          return { cancelledAt: "2026-09-04T10:01:00.000Z" };
+          reads += 1;
+          return reads === 1 ? undefined : { cancelledAt: "2026-09-04T10:01:00.000Z" };
         },
         async record() {
           return { cancelledAt: "2026-09-04T10:01:00.000Z" };

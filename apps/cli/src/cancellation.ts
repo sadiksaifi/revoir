@@ -52,3 +52,33 @@ export function isTargetedReviewCancellation(error: unknown): boolean {
   }
   return false;
 }
+
+export function isOnlyTargetedReviewCancellation(error: unknown): boolean {
+  let foundCancellation = false;
+  let foundOtherFailure = false;
+  const seen = new Set<unknown>();
+  const pending: unknown[] = [error];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+    if (current instanceof TargetedReviewCancellationError) {
+      foundCancellation = true;
+      continue;
+    }
+    if (!(current instanceof Error)) {
+      foundOtherFailure = true;
+      continue;
+    }
+    if (current instanceof AggregateError) {
+      pending.push(...current.errors);
+    } else if (current.cause !== undefined) {
+      pending.push(current.cause);
+    } else {
+      foundOtherFailure = true;
+    }
+  }
+  return foundCancellation && !foundOtherFailure;
+}

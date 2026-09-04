@@ -210,6 +210,45 @@ describe("queue review runner", () => {
     assert.equal(completions.completions.has("99:123456789"), true);
   });
 
+  it("does not hide cleanup failures behind a targeted cancellation", async () => {
+    const acknowledgements: string[] = [];
+    const retries: number[] = [];
+    const reports: string[] = [];
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return delivery("cancel-cleanup-failed", reviewJob());
+        },
+        async acknowledge(leaseId) {
+          acknowledgements.push(leaseId);
+        },
+        async retry(_leaseId, delaySeconds) {
+          retries.push(delaySeconds);
+        },
+      },
+      {
+        async review() {
+          throw new AggregateError([
+            new TargetedReviewCancellationError(),
+            new Error("workspace cleanup failed"),
+          ]);
+        },
+      },
+      {
+        async report() {
+          reports.push("reported");
+        },
+      },
+      new MemoryOperationalFailureStore(),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.deepEqual(acknowledgements, []);
+    assert.deepEqual(retries, [30]);
+    assert.deepEqual(reports, ["reported"]);
+  });
+
   it("rejects a queued job after current cloud policy revokes it", async () => {
     let reviewed = false;
     let acknowledged = false;

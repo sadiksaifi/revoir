@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { parseReviewQueueJob, ReviewJobSchemaError, type ReviewQueueJob } from "@revoir/contracts";
 
-import { isCallerCancellation, isTargetedReviewCancellation } from "../cancellation.js";
+import { isCallerCancellation, isOnlyTargetedReviewCancellation } from "../cancellation.js";
 import { CloudflarePolicyReadError } from "../cloudflare-policy.js";
 import type { RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
@@ -455,7 +455,7 @@ export class QueueReviewRunner implements QueueRunService {
         ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
-      if (isTargetedReviewCancellation(error)) {
+      if (isOnlyTargetedReviewCancellation(error)) {
         if (signal?.aborted === true) {
           await this.#rollbackReservation(job.deliveryId, reservation);
           throw signal.reason instanceof Error ? signal.reason : error;

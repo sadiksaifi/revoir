@@ -327,15 +327,33 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     const deadline = new ReviewDeadline(this.#configuration.timeouts.reviewMs);
     const monitorStop = new AbortController();
     const monitorFailure = new AbortController();
+    const initialSignal = AbortSignal.any([
+      deadline.signal,
+      ...(options?.signal === undefined ? [] : [options.signal]),
+    ]);
+    let initialCancellation: Awaited<ReturnType<ReviewCancellationStore["read"]>>;
+    try {
+      initialCancellation = await deadline.wait(this.#cancellations.read(reference, initialSignal));
+    } catch (error) {
+      deadline.dispose();
+      throw error;
+    }
     const boundary = {
       triggeredAt: options?.triggeredAt ?? new Date().toISOString(),
+      ...(initialCancellation === undefined
+        ? {}
+        : { localCancelledAt: initialCancellation.cancelledAt }),
       ...(options?.requestedCommentId === undefined
         ? {}
         : { requestedCommentId: options.requestedCommentId }),
     };
     const monitorPromises: Promise<unknown>[] = [];
     this.#startMonitor(
-      this.#monitorLocalCancellation(reference, boundary.triggeredAt, monitorStop.signal),
+      this.#monitorLocalCancellation(
+        reference,
+        initialCancellation?.cancelledAt,
+        monitorStop.signal,
+      ),
       monitorStop,
       monitorFailure,
       monitorPromises,
@@ -400,7 +418,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
 
   async #monitorLocalCancellation(
     reference: PullRequestReference,
-    triggeredAt: string,
+    initialCancelledAt: string | undefined,
     signal: AbortSignal,
   ): Promise<never> {
     for (;;) {
@@ -408,7 +426,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       // Cancellation state is intentionally sampled serially.
       // eslint-disable-next-line no-await-in-loop
       const marker = await this.#cancellations.read(reference, signal);
-      if (marker !== undefined && Date.parse(marker.cancelledAt) >= Date.parse(triggeredAt)) {
+      if (marker !== undefined && marker.cancelledAt !== initialCancelledAt) {
         throw new TargetedReviewCancellationError();
       }
       // eslint-disable-next-line no-await-in-loop
@@ -432,7 +450,11 @@ export class CleanReviewOrchestrator implements ManualReviewService {
   async #finalizeReview(
     reference: PullRequestReference,
     options: ManualReviewOptions | undefined,
-    boundary: { readonly triggeredAt: string; readonly requestedCommentId?: number },
+    boundary: {
+      readonly localCancelledAt?: string;
+      readonly triggeredAt: string;
+      readonly requestedCommentId?: number;
+    },
     signal: AbortSignal,
     lease: Awaited<ReturnType<ReviewLock["acquire"]>>,
     monitorStop: AbortController,
@@ -477,7 +499,11 @@ export class CleanReviewOrchestrator implements ManualReviewService {
   async #reviewWithLease(
     reference: PullRequestReference,
     options: ManualReviewOptions | undefined,
-    boundary: { readonly triggeredAt: string; readonly requestedCommentId?: number },
+    boundary: {
+      readonly localCancelledAt?: string;
+      readonly triggeredAt: string;
+      readonly requestedCommentId?: number;
+    },
     signal: AbortSignal,
     monitorStop: AbortController,
     monitorFailure: AbortController,

@@ -42,7 +42,11 @@ export {
   validateNodeRuntime,
 } from "./diagnostics.js";
 export { SecretRedactor } from "./redaction.js";
-export { isTargetedReviewCancellation, TargetedReviewCancellationError } from "./cancellation.js";
+export {
+  isOnlyTargetedReviewCancellation,
+  isTargetedReviewCancellation,
+  TargetedReviewCancellationError,
+} from "./cancellation.js";
 export {
   FilePendingRepositoryStore,
   inferCurrentRepository,

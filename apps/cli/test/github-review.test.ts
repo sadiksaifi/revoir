@@ -256,6 +256,104 @@ describe("GitHub App review gateway", () => {
     assert.deepEqual(requestedPages, [1, 2]);
   });
 
+  it("does not commit a page-one ETag until every comment page succeeds", async () => {
+    const pageOneConditionalHeaders: Array<string | null> = [];
+    let pageOneAttempts = 0;
+    const session = await cancellationSession(async (input, init) => {
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get("page"));
+      if (page === 1) {
+        pageOneConditionalHeaders.push(new Headers(init?.headers).get("If-None-Match"));
+        pageOneAttempts += 1;
+        if (pageOneAttempts === 2) {
+          return json([
+            {
+              id: 401,
+              body: "@revoirapp cancel",
+              created_at: "2026-09-04T10:02:00Z",
+              user: { id: 42 },
+            },
+          ]);
+        }
+        return new Response(
+          JSON.stringify(
+            Array.from({ length: 100 }, (_, index) => ({
+              id: 300 - index,
+              body: "ordinary comment",
+              created_at: "2026-09-04T10:01:00Z",
+              user: { id: 42 },
+            })),
+          ),
+          { headers: { ETag: '"incomplete-snapshot"' } },
+        );
+      }
+      throw new Error("page two unavailable");
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z", requestedCommentId: 100 },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.deepEqual(pageOneConditionalHeaders, [null, null]);
+  });
+
+  it("calibrates a local cancellation cutoff against GitHub's clock", async () => {
+    const session = await cancellationSession(
+      async () =>
+        new Response("[]", {
+          headers: {
+            "Content-Type": "application/json",
+            Date: new Date(1_000_000 - 5 * 60_000).toUTCString(),
+          },
+        }),
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          localCancelledAt: new Date(1_000_000).toISOString(),
+          triggeredAt: new Date(1_000_000 - 5 * 60_000 - 1_000).toISOString(),
+        },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+  });
+
+  it("keeps a same-second trigger eligible after clock calibration", async () => {
+    const controller = new AbortController();
+    const serverNow = 1_000_000 - 5 * 60_000;
+    const session = await cancellationSession(
+      async () =>
+        new Response("[]", {
+          headers: {
+            "Content-Type": "application/json",
+            Date: new Date(serverNow).toUTCString(),
+          },
+        }),
+      async () => {
+        controller.abort(new Error("trigger remains eligible"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          localCancelledAt: new Date(1_000_000).toISOString(),
+          triggeredAt: new Date(serverNow).toISOString(),
+        },
+        controller.signal,
+      ),
+      /trigger remains eligible/u,
+    );
+  });
+
   it("signs a short-lived RS256 GitHub App JWT", () => {
     const jwt = createGitHubAppJwt(7, TEST_PRIVATE_KEY, 1_000);
     const [encodedHeader, encodedPayload, encodedSignature] = jwt.split(".");

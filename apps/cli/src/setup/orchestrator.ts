@@ -223,16 +223,9 @@ export class EndToEndSetup {
           cause: new Error("Authenticated GitHub or Cloudflare identity differs from this setup."),
         });
       }
-      const relayUrl = await reconcile("relay-deployed", async () => {
-        const webhookSecret = finalState.configuration.github.webhookSecret;
-        if (!(await this.#platform.relayIsCurrent(resources, webhookSecret))) {
-          await this.#platform.configureRelaySecret(resources, webhookSecret);
-        }
-        return resources.relayUrl;
-      });
       let configuration = {
         ...finalState.configuration,
-        cloudflare: { ...resources, relayUrl },
+        cloudflare: { ...resources },
       };
       const cloudPolicy = await reconcile("local-state", () =>
         this.#platform.getCloudPolicy(configuration.cloudflare),
@@ -277,6 +270,12 @@ export class EndToEndSetup {
         }
       });
       await reconcile("service-installed", () => this.#platform.installService(configuration));
+      await reconcile("relay-deployed", async () => {
+        const webhookSecret = configuration.github.webhookSecret;
+        if (!(await this.#platform.relayIsCurrent(resources, webhookSecret))) {
+          await this.#platform.configureRelaySecret(resources, webhookSecret);
+        }
+      });
       await reconcile("diagnostics", () =>
         this.#platform.runDiagnostics(configuration, effectivePolicy),
       );
