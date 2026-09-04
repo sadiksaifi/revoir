@@ -210,6 +210,44 @@ describe("queue review runner", () => {
     assert.equal(completions.completions.has("99:123456789"), true);
   });
 
+  it("does not repeat an automatically triggered cancellation after acknowledgement loss", async () => {
+    const job = reviewJob();
+    const deliveries = [delivery("lost-ack", job), delivery("redelivery", job, 2)];
+    const failures = new MemoryOperationalFailureStore();
+    let acknowledgements = 0;
+    let reviews = 0;
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return deliveries.shift();
+        },
+        async acknowledge() {
+          acknowledgements += 1;
+          if (acknowledgements === 1) {
+            throw new Error("acknowledgement response was lost");
+          }
+        },
+        async retry() {},
+      },
+      {
+        async review() {
+          reviews += 1;
+          throw new TargetedReviewCancellationError();
+        },
+      },
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(), /acknowledgement response was lost/u);
+    assert.equal(failures.failures.get(job.deliveryId)?.reviewCompleted, true);
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(reviews, 1);
+    assert.equal(acknowledgements, 2);
+    assert.equal(failures.failures.size, 0);
+  });
+
   it("does not hide cleanup failures behind a targeted cancellation", async () => {
     const acknowledgements: string[] = [];
     const retries: number[] = [];

@@ -372,18 +372,26 @@ export class QueueReviewRunner implements QueueRunService {
       }
     }
 
-    let loadedFailureState: OperationalFailureState | undefined;
-    if (requestedReview !== undefined) {
-      try {
-        loadedFailureState = await this.#loadPersistedFailureState(job.deliveryId, signal);
-        throwIfCancelled(signal);
-      } catch (error) {
-        throwIfCancelled(signal);
-        return this.#settleStoreFailure(delivery, job, error, signal);
-      }
-      if (loadedFailureState.reviewCompleted === true) {
+    let loadedFailureState: OperationalFailureState;
+    try {
+      loadedFailureState = await this.#loadPersistedFailureState(job.deliveryId, signal);
+      throwIfCancelled(signal);
+    } catch (error) {
+      throwIfCancelled(signal);
+      return this.#settleStoreFailure(delivery, job, error, signal);
+    }
+    if (loadedFailureState.reviewCompleted === true) {
+      if (requestedReview !== undefined) {
         return this.#settleCompletedRequest(delivery, job, requestedReview, true, signal);
       }
+      await this.#queue.acknowledge(delivery.leaseId, signal);
+      await this.#clearFailureState(job.deliveryId);
+      await this.#logger.write("queue_review_cancelled", {
+        deliveryId: job.deliveryId,
+        repository: `${job.repository.owner}/${job.repository.name}`,
+        pullRequest: job.pullRequest.number,
+      });
+      return "settled";
     }
 
     const pendingSettlement = this.#pendingStoreSettlements.get(job.deliveryId);
@@ -463,6 +471,15 @@ export class QueueReviewRunner implements QueueRunService {
         if (requestedReview !== undefined) {
           this.#knownCompletedRequests.add(requestKey(requestedReview));
           await this.#markRequestCompletion(requestedReview);
+        } else {
+          await this.#saveFailureState(
+            job.deliveryId,
+            {
+              committedFailures: operationalState.committedFailures,
+              reviewCompleted: true,
+            },
+            slot,
+          );
         }
         await this.#queue.acknowledge(delivery.leaseId, signal);
         await this.#clearFailureState(job.deliveryId);
