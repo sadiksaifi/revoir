@@ -540,6 +540,59 @@ describe("queue review runner", () => {
     assert.equal(markerAttempts, 2);
   });
 
+  it("does not repeat a cancelled comment review after completion persistence rejects", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    let completed = false;
+    let markerAttempts = 0;
+    const completions: ReviewRequestCompletionStore = {
+      async has() {
+        return completed;
+      },
+      async mark() {
+        markerAttempts += 1;
+        if (markerAttempts === 1) {
+          throw new Error("completion marker failed");
+        }
+        completed = true;
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        throw new TargetedReviewCancellationError();
+      },
+    };
+    function runnerFor(leaseId: string, attempt: number): QueueReviewRunner {
+      let pending: QueueDelivery | undefined = delivery(leaseId, job, attempt);
+      return new QueueReviewRunner(
+        configuration(),
+        {
+          async pullOne() {
+            const next = pending;
+            pending = undefined;
+            return next;
+          },
+          async acknowledge() {},
+          async retry() {},
+        },
+        reviewService,
+        silentFailureReporter,
+        failures,
+        undefined,
+        completions,
+      );
+    }
+
+    await assert.rejects(runnerFor("failed-marker", 1).consumeOne(), /completion marker failed/u);
+    assert.equal(failures.failures.get(job.deliveryId)?.reviewCompleted, true);
+    assert.equal(await runnerFor("redelivery", 2).consumeOne(), "settled");
+
+    assert.equal(reviews, 1);
+    assert.equal(markerAttempts, 2);
+  });
+
   it("persists a successful comment review before honoring cancellation", async () => {
     const job = requestedReviewJob();
     const failures = new MemoryOperationalFailureStore();

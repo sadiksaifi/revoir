@@ -486,18 +486,17 @@ export class QueueReviewRunner implements QueueRunService {
           await this.#rollbackReservation(job.deliveryId, reservation);
           throw signal.reason instanceof Error ? signal.reason : error;
         }
+        await this.#saveFailureState(
+          job.deliveryId,
+          {
+            committedFailures: operationalState.committedFailures,
+            reviewCompleted: true,
+          },
+          slot,
+        );
         if (requestedReview !== undefined) {
           this.#knownCompletedRequests.add(requestKey(requestedReview));
           await this.#markRequestCompletion(requestedReview);
-        } else {
-          await this.#saveFailureState(
-            job.deliveryId,
-            {
-              committedFailures: operationalState.committedFailures,
-              reviewCompleted: true,
-            },
-            slot,
-          );
         }
         await this.#queue.acknowledge(delivery.leaseId, signal);
         await this.#clearFailureState(job.deliveryId);
