@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createPublicKey, createVerify } from "node:crypto";
 import { describe, it } from "node:test";
 
+import { TargetedReviewCancellationError } from "../src/cancellation.js";
 import type { ReviewFindingV2 } from "../src/review/findings.js";
 import {
   createGitHubAppJwt,
@@ -108,6 +109,588 @@ function markerOnlyExplicitReviewBody(candidate: ReviewFindingV2): string {
 }
 
 describe("GitHub App review gateway", () => {
+  async function cancellationSession(
+    fetchImplementation: FetchLike,
+    waitForPoll: (delayMs: number, signal: AbortSignal) => Promise<void> = async () => {},
+  ) {
+    return new GitHubAppReviewGateway(
+      async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/app")) return json({ slug: "revoir-test" });
+        if (url.endsWith("/access_tokens")) return json({ token: "installation-secret" });
+        return fetchImplementation(input, init);
+      },
+      "https://api.test",
+      () => 1_000,
+      1_000,
+      waitForPoll,
+    ).authenticate(
+      configuration.github,
+      configuration.policy,
+      reference,
+      new AbortController().signal,
+    );
+  }
+
+  it("accepts only an exact authorized cancellation newer than a review comment", async () => {
+    let requestedUrl: string | undefined;
+    const session = await cancellationSession(async (input) => {
+      requestedUrl = String(input);
+      return json([
+        {
+          id: 125,
+          body: "@revoirapp cancel now",
+          created_at: "2026-09-04T10:02:00Z",
+          user: { id: 42 },
+        },
+        {
+          id: 124,
+          body: "@revoirapp cancel",
+          created_at: "2026-09-04T10:01:00Z",
+          user: { id: 99 },
+        },
+        {
+          id: 123,
+          body: " @revoirapp cancel \n",
+          created_at: "2026-09-04T10:00:00Z",
+          user: { id: 42 },
+        },
+      ]);
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z", requestedCommentId: 122 },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.equal(new URL(requestedUrl!).searchParams.has("since"), false);
+  });
+
+  it("keeps a same-second automatic trigger eligible after a cancellation comment", async () => {
+    const controller = new AbortController();
+    const headSha = "2".repeat(40);
+    const session = await cancellationSession(
+      async (input) => {
+        if (String(input).endsWith("/graphql")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  timelineItems: {
+                    nodes: [
+                      { __typename: "IssueComment", databaseId: 123 },
+                      { __typename: "PullRequestCommit", commit: { oid: headSha } },
+                    ],
+                    pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                  },
+                },
+              },
+            },
+          });
+        }
+        return json([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: "2026-09-04T10:00:00Z",
+            user: { id: 42 },
+          },
+        ]);
+      },
+      async () => {
+        controller.abort(new Error("automatic trigger remains eligible"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T10:00:00.000Z", expectedHeadSha: headSha },
+        controller.signal,
+      ),
+      /automatic trigger remains eligible/u,
+    );
+  });
+
+  it("finds a legacy automatic cancellation that predates delayed enqueueing", async () => {
+    const headSha = "2".repeat(40);
+    let requestedUrl: string | undefined;
+    const session = await cancellationSession(async (input) => {
+      if (String(input).endsWith("/graphql")) {
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                timelineItems: {
+                  nodes: [
+                    { __typename: "PullRequestCommit", commit: { oid: headSha } },
+                    { __typename: "IssueComment", databaseId: 123 },
+                  ],
+                  pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                },
+              },
+            },
+          },
+        });
+      }
+      requestedUrl = String(input);
+      return json([
+        {
+          id: 123,
+          body: "@revoirapp cancel",
+          created_at: "2026-09-04T10:00:00Z",
+          user: { id: 42 },
+        },
+      ]);
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          automaticAction: "synchronize",
+          expectedHeadSha: headSha,
+          legacyAutomatic: true,
+          triggeredAt: "2026-09-04T10:05:00.000Z",
+        },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.equal(new URL(requestedUrl!).searchParams.has("since"), false);
+  });
+
+  it("keeps a same-second ready-for-review trigger eligible after an older cancellation", async () => {
+    const controller = new AbortController();
+    const session = await cancellationSession(
+      async (input) => {
+        if (String(input).endsWith("/graphql")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  timelineItems: {
+                    nodes: [
+                      { __typename: "IssueComment", databaseId: 123 },
+                      { __typename: "ReadyForReviewEvent", createdAt: "2026-09-04T10:00:00Z" },
+                    ],
+                    pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                  },
+                },
+              },
+            },
+          });
+        }
+        return json([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: "2026-09-04T10:00:00Z",
+            user: { id: 42 },
+          },
+        ]);
+      },
+      async () => {
+        controller.abort(new Error("ready-for-review trigger remains eligible"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          automaticAction: "ready_for_review",
+          expectedHeadSha: "2".repeat(40),
+          triggeredAt: "2026-09-04T10:00:00.000Z",
+        },
+        controller.signal,
+      ),
+      /ready-for-review trigger remains eligible/u,
+    );
+  });
+
+  it("accepts a same-second cancellation after an automatic trigger", async () => {
+    const headSha = "2".repeat(40);
+    const controller = new AbortController();
+    let timelinePage = 0;
+    const session = await cancellationSession(
+      async (input) => {
+        if (String(input).endsWith("/graphql")) {
+          timelinePage += 1;
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  timelineItems: {
+                    nodes:
+                      timelinePage === 1
+                        ? [{ __typename: "IssueComment", databaseId: 123 }]
+                        : [{ __typename: "PullRequestCommit", commit: { oid: headSha } }],
+                    pageInfo:
+                      timelinePage === 1
+                        ? { hasPreviousPage: true, startCursor: "previous" }
+                        : { hasPreviousPage: false, startCursor: "start" },
+                  },
+                },
+              },
+            },
+          });
+        }
+        return json([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: "2026-09-04T10:00:00Z",
+            user: { id: 42 },
+          },
+        ]);
+      },
+      async () => {
+        controller.abort(new Error("same-second cancellation was missed"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T10:00:00.000Z", expectedHeadSha: headSha },
+        controller.signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.equal(timelinePage, 2);
+  });
+
+  it("orders automatic cancellation comments with IDs above GraphQL Int range", async () => {
+    const headSha = "2".repeat(40);
+    const commentId = 3_936_268_441;
+    const session = await cancellationSession(async (input) => {
+      if (String(input).endsWith("/graphql")) {
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                timelineItems: {
+                  nodes: [
+                    { __typename: "PullRequestCommit", commit: { oid: headSha } },
+                    { __typename: "IssueComment", fullDatabaseId: String(commentId) },
+                  ],
+                  pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                },
+              },
+            },
+          },
+        });
+      }
+      return json([
+        {
+          id: commentId,
+          body: "@revoirapp cancel",
+          created_at: "2026-09-04T10:00:00Z",
+          user: { id: 42 },
+        },
+      ]);
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T10:00:00.000Z", expectedHeadSha: headSha },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+  });
+
+  it("uses reverse pagination and conditional ETags while polling comments", async () => {
+    const requests: Array<{ init: RequestInit | undefined; url: string }> = [];
+    const pollDelays: number[] = [];
+    let requestCount = 0;
+    const controller = new AbortController();
+    const session = await cancellationSession(
+      async (input, init) => {
+        requests.push({ url: String(input), init });
+        requestCount += 1;
+        if (requestCount === 1) {
+          return new Response("[]", {
+            headers: { ETag: '"comments-v1"', "X-Poll-Interval": "7" },
+          });
+        }
+        queueMicrotask(() => controller.abort(new Error("test complete")));
+        return new Response(null, { status: 304 });
+      },
+      async (delayMs) => {
+        pollDelays.push(delayMs);
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z" },
+        controller.signal,
+      ),
+      /test complete/u,
+    );
+    assert.match(requests[0]!.url, /sort=created&direction=desc/u);
+    assert.equal(new Headers(requests[1]!.init?.headers).get("If-None-Match"), '"comments-v1"');
+    assert.deepEqual(pollDelays, [7_000]);
+  });
+
+  it("continues pagination across a full page at the automatic boundary second", async () => {
+    const headSha = "2".repeat(40);
+    const requestedPages: number[] = [];
+    const controller = new AbortController();
+    const session = await cancellationSession(
+      async (input) => {
+        if (String(input).endsWith("/graphql")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  timelineItems: {
+                    nodes: [
+                      { __typename: "PullRequestCommit", commit: { oid: headSha } },
+                      { __typename: "IssueComment", fullDatabaseId: "123" },
+                    ],
+                    pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                  },
+                },
+              },
+            },
+          });
+        }
+        const page = Number(new URL(String(input)).searchParams.get("page"));
+        requestedPages.push(page);
+        if (page === 1) {
+          return json(
+            Array.from({ length: 100 }, (_, index) => ({
+              id: 300 - index,
+              body: "ordinary comment",
+              created_at: "2026-09-04T10:00:00Z",
+              user: { id: 42 },
+            })),
+          );
+        }
+        return json([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: "2026-09-04T10:00:00Z",
+            user: { id: 42 },
+          },
+        ]);
+      },
+      async () => {
+        controller.abort(new Error("boundary page was skipped"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T10:00:00.000Z", expectedHeadSha: headSha },
+        controller.signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.deepEqual(requestedPages, [1, 2]);
+  });
+
+  it("turns three consecutive comment-monitor failures into a GitHub failure", async () => {
+    let attempts = 0;
+    const session = await cancellationSession(async () => {
+      attempts += 1;
+      throw new Error("network unavailable");
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z" },
+        new AbortController().signal,
+      ),
+      /GitHub cancellation monitoring failed three consecutive times/u,
+    );
+    assert.equal(attempts, 3);
+  });
+
+  it("finds an authorized cancellation on a later reverse-ordered page", async () => {
+    const requestedPages: number[] = [];
+    const session = await cancellationSession(async (input) => {
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get("page"));
+      requestedPages.push(page);
+      if (page === 1) {
+        return json(
+          Array.from({ length: 100 }, (_, index) => ({
+            id: 300 - index,
+            body: "ordinary comment",
+            created_at: "2026-09-04T10:01:00Z",
+            user: { id: 42 },
+          })),
+        );
+      }
+      return json([
+        {
+          id: 199,
+          body: "@revoirapp cancel",
+          created_at: "2026-09-04T10:00:00Z",
+          user: { id: 42 },
+        },
+      ]);
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z", requestedCommentId: 100 },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.deepEqual(requestedPages, [1, 2]);
+  });
+
+  it("does not commit a page-one ETag until every comment page succeeds", async () => {
+    const pageOneConditionalHeaders: Array<string | null> = [];
+    let pageOneAttempts = 0;
+    const session = await cancellationSession(async (input, init) => {
+      const url = new URL(String(input));
+      const page = Number(url.searchParams.get("page"));
+      if (page === 1) {
+        pageOneConditionalHeaders.push(new Headers(init?.headers).get("If-None-Match"));
+        pageOneAttempts += 1;
+        if (pageOneAttempts === 2) {
+          return json([
+            {
+              id: 401,
+              body: "@revoirapp cancel",
+              created_at: "2026-09-04T10:02:00Z",
+              user: { id: 42 },
+            },
+          ]);
+        }
+        return new Response(
+          JSON.stringify(
+            Array.from({ length: 100 }, (_, index) => ({
+              id: 300 - index,
+              body: "ordinary comment",
+              created_at: "2026-09-04T10:01:00Z",
+              user: { id: 42 },
+            })),
+          ),
+          { headers: { ETag: '"incomplete-snapshot"' } },
+        );
+      }
+      throw new Error("page two unavailable");
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T09:59:00.000Z", requestedCommentId: 100 },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.deepEqual(pageOneConditionalHeaders, [null, null]);
+  });
+
+  it("calibrates a local cancellation cutoff against GitHub's clock", async () => {
+    const session = await cancellationSession(
+      async () =>
+        new Response("[]", {
+          headers: {
+            "Content-Type": "application/json",
+            Date: new Date(1_000_000 - 5 * 60_000).toUTCString(),
+          },
+        }),
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          localCancelledAt: new Date(1_000_000).toISOString(),
+          triggeredAt: new Date(1_000_000 - 5 * 60_000 - 1_000).toISOString(),
+        },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+  });
+
+  it("keeps a same-second trigger eligible after clock calibration", async () => {
+    const controller = new AbortController();
+    const serverNow = 1_000_000 - 5 * 60_000;
+    const session = await cancellationSession(
+      async () =>
+        new Response("[]", {
+          headers: {
+            "Content-Type": "application/json",
+            Date: new Date(serverNow).toUTCString(),
+          },
+        }),
+      async () => {
+        controller.abort(new Error("trigger remains eligible"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          localCancelledAt: new Date(1_000_000).toISOString(),
+          triggeredAt: new Date(serverNow).toISOString(),
+        },
+        controller.signal,
+      ),
+      /trigger remains eligible/u,
+    );
+  });
+
+  it("accepts a same-second manual cancellation when the local clock is ahead", async () => {
+    const localNow = 1_000_000;
+    const serverNow = localNow - 5 * 60_000;
+    let requestedUrl: string | undefined;
+    const session = await cancellationSession(async (input) => {
+      requestedUrl = String(input);
+      return new Response(
+        JSON.stringify([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: new Date(serverNow).toISOString(),
+            user: { id: 42 },
+          },
+        ]),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Date: new Date(serverNow).toUTCString(),
+          },
+        },
+      );
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          localTriggeredAt: new Date(localNow).toISOString(),
+          triggeredAt: new Date(localNow).toISOString(),
+        },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.equal(new URL(requestedUrl!).searchParams.has("since"), false);
+  });
+
   it("signs a short-lived RS256 GitHub App JWT", () => {
     const jwt = createGitHubAppJwt(7, TEST_PRIVATE_KEY, 1_000);
     const [encodedHeader, encodedPayload, encodedSignature] = jwt.split(".");

@@ -224,6 +224,7 @@ async function enqueueSignedReviewRequest(deliveryId: string): Promise<ReviewQue
     comment: {
       id: 123456789,
       body: "@revoirapp review",
+      created_at: "2026-08-04T23:59:00Z",
       user: { id: 42 },
     },
   });

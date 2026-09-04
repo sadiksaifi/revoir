@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { TargetedReviewCancellationError } from "../src/cancellation.js";
 import { CloudflarePolicyReadError } from "../src/cloudflare-policy.js";
 import { createEmptyPolicy, withRepository } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
@@ -152,6 +153,143 @@ class MemoryReviewRequestCompletionStore implements ReviewRequestCompletionStore
 }
 
 describe("queue review runner", () => {
+  it("acknowledges targeted cancellation without retrying or reporting failure", async () => {
+    const acknowledgements: string[] = [];
+    const retries: string[] = [];
+    const reports: string[] = [];
+    const events: string[] = [];
+    const completions = new MemoryReviewRequestCompletionStore();
+    let receivedOptions: Parameters<ManualReviewService["review"]>[1];
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return delivery(
+            "cancelled",
+            requestedReviewJob({
+              version: 2,
+              triggeredAt: "2026-08-04T23:59:00.000Z",
+            }),
+          );
+        },
+        async acknowledge(leaseId) {
+          acknowledgements.push(leaseId);
+        },
+        async retry(leaseId) {
+          retries.push(leaseId);
+        },
+      },
+      {
+        async review(_reference, options) {
+          receivedOptions = options;
+          throw new TargetedReviewCancellationError();
+        },
+      },
+      {
+        async report() {
+          reports.push("reported");
+        },
+      },
+      new MemoryOperationalFailureStore(),
+      {
+        async write(event) {
+          events.push(event);
+        },
+      },
+      completions,
+      async () => configuration().policy,
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.deepEqual(acknowledgements, ["cancelled"]);
+    assert.deepEqual(retries, []);
+    assert.deepEqual(reports, []);
+    assert.deepEqual(events, ["queue_review_started", "queue_review_cancelled"]);
+    assert.equal(receivedOptions?.triggeredAt, "2026-08-04T23:59:00.000Z");
+    assert.equal(receivedOptions?.requestedCommentId, 123456789);
+    assert.equal(completions.completions.has("99:123456789"), true);
+  });
+
+  it("does not repeat an automatically triggered cancellation after acknowledgement loss", async () => {
+    const job = reviewJob();
+    const deliveries = [delivery("lost-ack", job), delivery("redelivery", job, 2)];
+    const failures = new MemoryOperationalFailureStore();
+    let acknowledgements = 0;
+    let reviews = 0;
+    let receivedOptions: Parameters<ManualReviewService["review"]>[1];
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return deliveries.shift();
+        },
+        async acknowledge() {
+          acknowledgements += 1;
+          if (acknowledgements === 1) {
+            throw new Error("acknowledgement response was lost");
+          }
+        },
+        async retry() {},
+      },
+      {
+        async review(_reference, options) {
+          reviews += 1;
+          receivedOptions = options;
+          throw new TargetedReviewCancellationError();
+        },
+      },
+      silentFailureReporter,
+      failures,
+    );
+
+    await assert.rejects(runner.consumeOne(), /acknowledgement response was lost/u);
+    assert.equal(failures.failures.get(job.deliveryId)?.reviewCompleted, true);
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.equal(reviews, 1);
+    assert.equal(receivedOptions?.legacyAutomatic, true);
+    assert.equal(acknowledgements, 2);
+    assert.equal(failures.failures.size, 0);
+  });
+
+  it("does not hide cleanup failures behind a targeted cancellation", async () => {
+    const acknowledgements: string[] = [];
+    const retries: number[] = [];
+    const reports: string[] = [];
+    const runner = new QueueReviewRunner(
+      configuration(),
+      {
+        async pullOne() {
+          return delivery("cancel-cleanup-failed", reviewJob());
+        },
+        async acknowledge(leaseId) {
+          acknowledgements.push(leaseId);
+        },
+        async retry(_leaseId, delaySeconds) {
+          retries.push(delaySeconds);
+        },
+      },
+      {
+        async review() {
+          throw new AggregateError([
+            new TargetedReviewCancellationError(),
+            new Error("workspace cleanup failed"),
+          ]);
+        },
+      },
+      {
+        async report() {
+          reports.push("reported");
+        },
+      },
+      new MemoryOperationalFailureStore(),
+    );
+
+    assert.equal(await runner.consumeOne(), "settled");
+    assert.deepEqual(acknowledgements, []);
+    assert.deepEqual(retries, [30]);
+    assert.deepEqual(reports, ["reported"]);
+  });
+
   it("rejects a queued job after current cloud policy revokes it", async () => {
     let reviewed = false;
     let acknowledged = false;
@@ -396,6 +534,59 @@ describe("queue review runner", () => {
     }
 
     await assert.rejects(runnerFor("failed-marker", 1).consumeOne(), /completion marker failed/u);
+    assert.equal(await runnerFor("redelivery", 2).consumeOne(), "settled");
+
+    assert.equal(reviews, 1);
+    assert.equal(markerAttempts, 2);
+  });
+
+  it("does not repeat a cancelled comment review after completion persistence rejects", async () => {
+    const job = requestedReviewJob();
+    const failures = new MemoryOperationalFailureStore();
+    let completed = false;
+    let markerAttempts = 0;
+    const completions: ReviewRequestCompletionStore = {
+      async has() {
+        return completed;
+      },
+      async mark() {
+        markerAttempts += 1;
+        if (markerAttempts === 1) {
+          throw new Error("completion marker failed");
+        }
+        completed = true;
+      },
+    };
+    let reviews = 0;
+    const reviewService: ManualReviewService = {
+      async review() {
+        reviews += 1;
+        throw new TargetedReviewCancellationError();
+      },
+    };
+    function runnerFor(leaseId: string, attempt: number): QueueReviewRunner {
+      let pending: QueueDelivery | undefined = delivery(leaseId, job, attempt);
+      return new QueueReviewRunner(
+        configuration(),
+        {
+          async pullOne() {
+            const next = pending;
+            pending = undefined;
+            return next;
+          },
+          async acknowledge() {},
+          async retry() {},
+        },
+        reviewService,
+        silentFailureReporter,
+        failures,
+        undefined,
+        completions,
+      );
+    }
+
+    await assert.rejects(runnerFor("failed-marker", 1).consumeOne(), /completion marker failed/u);
+    assert.equal(failures.failures.get(job.deliveryId)?.reviewCompleted, true);
     assert.equal(await runnerFor("redelivery", 2).consumeOne(), "settled");
 
     assert.equal(reviews, 1);

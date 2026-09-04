@@ -1,5 +1,8 @@
 import { createSign } from "node:crypto";
 
+import type { ReviewJobAction } from "@revoir/contracts";
+
+import { TargetedReviewCancellationError } from "../cancellation.js";
 import { installationForRepository, type RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import { SecretRedactor } from "../redaction.js";
@@ -56,8 +59,23 @@ export type ReviewThreadResolution =
   | { readonly status: "resolved" }
   | { readonly status: "stale"; readonly currentSha: string };
 
+export interface ReviewCancellationBoundary {
+  readonly automaticAction?: ReviewJobAction;
+  readonly expectedHeadSha?: string;
+  readonly legacyAutomatic?: true;
+  readonly localCancelledAt?: string;
+  readonly localTriggeredAt?: string;
+  readonly triggeredAt: string;
+  readonly requestedCommentId?: number;
+}
+
 export interface GitHubReviewSession {
   readonly installationToken: string;
+  monitorCancellation?(
+    reference: PullRequestReference,
+    boundary: ReviewCancellationBoundary,
+    signal: AbortSignal,
+  ): Promise<never>;
   startReviewCheck(
     reference: PullRequestReference,
     headSha: string,
@@ -168,6 +186,13 @@ interface GitHubIssueCommentResponse {
   body: string;
   id: number;
   userLogin: string;
+}
+
+interface GitHubCancellationCommentResponse {
+  body: string;
+  createdAt: string;
+  id: number;
+  userId: number;
 }
 
 interface GitHubCheckRunResponse {
@@ -322,6 +347,11 @@ function positiveInteger(value: unknown, path: string): number {
   return value as number;
 }
 
+function positiveDatabaseId(value: unknown, path: string): number {
+  const parsed = typeof value === "string" && /^[1-9][0-9]*$/u.test(value) ? Number(value) : value;
+  return positiveInteger(parsed, path);
+}
+
 function string(value: unknown, path: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`GitHub returned an invalid ${path}.`);
@@ -337,6 +367,41 @@ function optionalString(value: unknown, path: string): string | undefined {
     throw new Error(`GitHub returned an invalid ${path}.`);
   }
   return value;
+}
+
+function canonicalTimestamp(value: unknown, path: string): string {
+  const parsed = string(value, path);
+  if (Number.isNaN(Date.parse(parsed))) {
+    throw new Error(`GitHub returned an invalid ${path}.`);
+  }
+  return new Date(parsed).toISOString();
+}
+
+function parseCancellationComment(value: unknown): GitHubCancellationCommentResponse {
+  const comment = record(value, "cancellation comment");
+  const user = record(comment.user, "cancellation comment user");
+  return {
+    body: string(comment.body, "cancellation comment body"),
+    createdAt: canonicalTimestamp(comment.created_at, "cancellation comment creation time"),
+    id: positiveInteger(comment.id, "cancellation comment id"),
+    userId: positiveInteger(user.id, "cancellation comment user id"),
+  };
+}
+
+function waitForDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timeout);
+      reject(abortReason(signal));
+    };
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    timeout.unref();
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function parseCheckRun(value: unknown): GitHubCheckRunResponse {
@@ -880,7 +945,9 @@ class InstallationSession implements GitHubReviewSession {
   readonly #fetch: FetchLike;
   readonly #now: () => number;
   readonly #pendingFenceAttemptMs: number;
+  readonly #waitForCancellationPoll: typeof waitForDelay;
   readonly #redactor: SecretRedactor;
+  readonly #userId: number;
   #ownedOpenThreadIds = new Set<string>();
   #priorRunWasClean = false;
 
@@ -891,6 +958,8 @@ class InstallationSession implements GitHubReviewSession {
     apiBase: string,
     now: () => number,
     pendingFenceAttemptMs: number,
+    waitForCancellationPoll: typeof waitForDelay,
+    userId: number,
     redactor: SecretRedactor,
   ) {
     this.installationToken = installationToken;
@@ -900,6 +969,8 @@ class InstallationSession implements GitHubReviewSession {
     this.#fetch = fetchImplementation;
     this.#now = now;
     this.#pendingFenceAttemptMs = pendingFenceAttemptMs;
+    this.#waitForCancellationPoll = waitForCancellationPoll;
+    this.#userId = userId;
     this.#redactor = redactor;
   }
 
@@ -923,6 +994,238 @@ class InstallationSession implements GitHubReviewSession {
 
   #timestamp(): string {
     return new Date(this.#now() * 1_000).toISOString();
+  }
+
+  async monitorCancellation(
+    reference: PullRequestReference,
+    boundary: ReviewCancellationBoundary,
+    signal: AbortSignal,
+  ): Promise<never> {
+    let etag: string | undefined;
+    let failures = 0;
+    let pollIntervalMs = 5_000;
+    const requestedCommentId = boundary.requestedCommentId;
+    const since =
+      requestedCommentId === undefined &&
+      boundary.legacyAutomatic !== true &&
+      boundary.localTriggeredAt === undefined
+        ? `&since=${encodeURIComponent(boundary.triggeredAt)}`
+        : "";
+    for (;;) {
+      throwIfAborted(signal);
+      try {
+        let page = 1;
+        let nextEtag = etag;
+        let reachedLegacyTrigger = false;
+        let triggeredAt = Date.parse(boundary.triggeredAt);
+        for (;;) {
+          // Comment pages form one reverse-ordered snapshot and must remain serial.
+          // eslint-disable-next-line no-await-in-loop
+          const response = await this.#request(
+            `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/comments?sort=created&direction=desc${since}&per_page=100&page=${page}`,
+            signal,
+            page === 1 && etag !== undefined ? { headers: { "If-None-Match": etag } } : {},
+          );
+          const configuredPollInterval = Number(response.headers.get("X-Poll-Interval"));
+          if (Number.isFinite(configuredPollInterval) && configuredPollInterval > 0) {
+            pollIntervalMs = Math.max(pollIntervalMs, configuredPollInterval * 1_000);
+          }
+          if (page === 1 && boundary.localTriggeredAt !== undefined) {
+            triggeredAt = this.#serverTimestampForLocal(boundary.localTriggeredAt, response);
+          }
+          if (
+            page === 1 &&
+            boundary.localCancelledAt !== undefined &&
+            (boundary.localTriggeredAt === undefined
+              ? Math.floor(triggeredAt / 1_000) <
+                Math.floor(
+                  this.#serverTimestampForLocal(boundary.localCancelledAt, response) / 1_000,
+                )
+              : Math.floor(Date.parse(boundary.localTriggeredAt) / 1_000) <
+                Math.floor(Date.parse(boundary.localCancelledAt) / 1_000))
+          ) {
+            throw new TargetedReviewCancellationError();
+          }
+          if (page === 1) {
+            nextEtag = response.headers.get("ETag") ?? etag;
+          }
+          if (response.status === 304) {
+            break;
+          }
+          // eslint-disable-next-line no-await-in-loop
+          const value = await responseJson(response, "cancellation comment lookup", signal);
+          if (!Array.isArray(value)) {
+            throw new Error("GitHub cancellation comment lookup returned an invalid response.");
+          }
+          const comments = value.map(parseCancellationComment);
+          for (const comment of comments) {
+            if (comment.userId !== this.#userId || comment.body.trim() !== "@revoirapp cancel") {
+              continue;
+            }
+            let cancels =
+              requestedCommentId === undefined
+                ? boundary.localTriggeredAt === undefined
+                  ? Date.parse(comment.createdAt) > triggeredAt
+                  : Date.parse(comment.createdAt) >= triggeredAt
+                : comment.id > requestedCommentId;
+            if (
+              !cancels &&
+              requestedCommentId === undefined &&
+              boundary.expectedHeadSha !== undefined &&
+              (boundary.legacyAutomatic === true || Date.parse(comment.createdAt) === triggeredAt)
+            ) {
+              // Equal GitHub timestamps require the ordered PR timeline to preserve both
+              // later-cancellation and later-commit semantics.
+              // eslint-disable-next-line no-await-in-loop
+              cancels = await this.#cancellationFollowsAutomaticTrigger(
+                reference,
+                comment.id,
+                { ...boundary, expectedHeadSha: boundary.expectedHeadSha },
+                signal,
+              );
+              if (boundary.legacyAutomatic === true && !cancels) {
+                reachedLegacyTrigger = true;
+              }
+            }
+            if (cancels) {
+              throw new TargetedReviewCancellationError();
+            }
+          }
+          const reachedBoundary =
+            comments.length === 0 ||
+            comments.length < 100 ||
+            (boundary.legacyAutomatic === true
+              ? reachedLegacyTrigger
+              : requestedCommentId === undefined
+                ? comments.some((comment) => Date.parse(comment.createdAt) < triggeredAt)
+                : comments.some((comment) => comment.id <= requestedCommentId));
+          if (reachedBoundary) {
+            break;
+          }
+          page += 1;
+        }
+        etag = nextEtag;
+        failures = 0;
+      } catch (error) {
+        if (error instanceof TargetedReviewCancellationError || signal.aborted) {
+          throw error;
+        }
+        failures += 1;
+        if (failures >= 3) {
+          throw new Error("GitHub cancellation monitoring failed three consecutive times.", {
+            cause: error,
+          });
+        }
+      }
+      // Polls must remain sequential so ETags and failure counts describe one request stream.
+      // eslint-disable-next-line no-await-in-loop
+      await this.#waitForCancellationPoll(pollIntervalMs, signal);
+    }
+  }
+
+  #serverTimestampForLocal(localTimestamp: string, response: Response): number {
+    const serverDate = response.headers.get("Date");
+    const serverNow = serverDate === null ? Number.NaN : Date.parse(serverDate);
+    const localNow = this.#now() * 1_000;
+    const localTime = Date.parse(localTimestamp);
+    if (!Number.isFinite(serverNow) || !Number.isFinite(localTime)) {
+      throw new Error("GitHub cancellation monitoring could not establish a clock boundary.");
+    }
+    return localTime + (serverNow - localNow);
+  }
+
+  async #cancellationFollowsAutomaticTrigger(
+    reference: PullRequestReference,
+    cancellationCommentId: number,
+    boundary: ReviewCancellationBoundary & { readonly expectedHeadSha: string },
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    let before: string | null = null;
+    let sawCancellation = false;
+    for (;;) {
+      // Timeline pages must remain serial so their reverse chronology is authoritative.
+      // eslint-disable-next-line no-await-in-loop
+      const data = await this.#graphql(
+        `query RevoirCancellationOrder(
+          $owner: String!
+          $repository: String!
+          $number: Int!
+          $before: String
+        ) {
+          repository(owner: $owner, name: $repository) {
+            pullRequest(number: $number) {
+              timelineItems(
+                last: 100
+                before: $before
+                itemTypes: [ISSUE_COMMENT, PULL_REQUEST_COMMIT, READY_FOR_REVIEW_EVENT, REOPENED_EVENT]
+              ) {
+                nodes {
+                  __typename
+                  ... on IssueComment { fullDatabaseId }
+                  ... on PullRequestCommit { commit { oid } }
+                  ... on ReadyForReviewEvent { createdAt }
+                  ... on ReopenedEvent { createdAt }
+                }
+                pageInfo { hasPreviousPage startCursor }
+              }
+            }
+          }
+        }`,
+        {
+          owner: reference.owner,
+          repository: reference.repository,
+          number: reference.number,
+          before,
+        },
+        "cancellation timeline lookup",
+        signal,
+      );
+      const repositoryValue = record(data.repository, "cancellation timeline repository");
+      const pullRequest = record(repositoryValue.pullRequest, "cancellation timeline pull request");
+      const timeline = record(pullRequest.timelineItems, "cancellation timeline items");
+      if (!Array.isArray(timeline.nodes)) {
+        throw new Error("GitHub cancellation timeline lookup returned invalid nodes.");
+      }
+      for (const value of timeline.nodes.toReversed()) {
+        const item = record(value, "cancellation timeline item");
+        if (
+          item["__typename"] === "IssueComment" &&
+          positiveDatabaseId(
+            item.fullDatabaseId ?? item.databaseId,
+            "cancellation timeline comment id",
+          ) === cancellationCommentId
+        ) {
+          sawCancellation = true;
+          continue;
+        }
+        const action = boundary.automaticAction;
+        const isCommitTrigger =
+          (action === undefined || action === "opened" || action === "synchronize") &&
+          item["__typename"] === "PullRequestCommit" &&
+          string(
+            record(item.commit, "cancellation timeline commit").oid,
+            "cancellation timeline commit SHA",
+          ) === boundary.expectedHeadSha;
+        const isActionTrigger =
+          ((action === "ready_for_review" && item["__typename"] === "ReadyForReviewEvent") ||
+            (action === "reopened" && item["__typename"] === "ReopenedEvent")) &&
+          Date.parse(string(item.createdAt, "cancellation timeline event timestamp")) ===
+            Date.parse(boundary.triggeredAt);
+        if (isCommitTrigger || isActionTrigger) {
+          return sawCancellation;
+        }
+      }
+      const pageInfo = record(timeline.pageInfo, "cancellation timeline page info");
+      if (typeof pageInfo.hasPreviousPage !== "boolean") {
+        throw new Error("GitHub cancellation timeline lookup returned invalid pagination.");
+      }
+      if (!pageInfo.hasPreviousPage) {
+        throw new Error("GitHub cancellation timeline lookup could not establish event order.");
+      }
+      before = string(pageInfo.startCursor, "cancellation timeline start cursor");
+      // eslint-disable-next-line no-await-in-loop
+      await yieldToEventLoop(signal);
+    }
   }
 
   #reviewCheckExternalId(reference: PullRequestReference, headSha: string): string {
@@ -2199,17 +2502,20 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
   readonly #fetch: FetchLike;
   readonly #now: () => number;
   readonly #pendingFenceAttemptMs: number;
+  readonly #waitForCancellationPoll: typeof waitForDelay;
 
   constructor(
     fetchImplementation: FetchLike = fetch,
     apiBase = "https://api.github.com",
     now: () => number = () => Math.floor(Date.now() / 1000),
     pendingFenceAttemptMs = 1_000,
+    waitForCancellationPoll: typeof waitForDelay = waitForDelay,
   ) {
     this.#fetch = fetchImplementation;
     this.#apiBase = apiBase.replace(/\/$/u, "");
     this.#now = now;
     this.#pendingFenceAttemptMs = pendingFenceAttemptMs;
+    this.#waitForCancellationPoll = waitForCancellationPoll;
   }
 
   async authenticate(
@@ -2278,6 +2584,8 @@ export class GitHubAppReviewGateway implements GitHubReviewGateway {
       this.#apiBase,
       this.#now,
       this.#pendingFenceAttemptMs,
+      this.#waitForCancellationPoll,
+      policy.userId,
       new SecretRedactor({
         configuration,
         installationToken: installation.token,

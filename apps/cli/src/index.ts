@@ -43,6 +43,11 @@ export {
 } from "./diagnostics.js";
 export { SecretRedactor } from "./redaction.js";
 export {
+  isOnlyTargetedReviewCancellation,
+  isTargetedReviewCancellation,
+  TargetedReviewCancellationError,
+} from "./cancellation.js";
+export {
   FilePendingRepositoryStore,
   inferCurrentRepository,
   parseGitHubRemote,
@@ -65,12 +70,18 @@ export {
   type QueueRunService,
 } from "./queue/runner.js";
 export {
+  FileReviewCancellationStore,
+  type ReviewCancellationMarker,
+  type ReviewCancellationStore,
+} from "./review/cancellation-store.js";
+export {
   GitHubAppReviewGateway,
   createGitHubAppJwt,
   type GitHubPendingReview,
   type GitHubReviewCheck,
   type GitHubReviewCheckCompletion,
   type GitHubReviewCheckConclusion,
+  type ReviewCancellationBoundary,
   type GitHubReviewGateway,
   type GitHubReviewSession,
   REVIEW_CHECK_NAME,

@@ -226,6 +226,25 @@ You can also run one review directly:
 revoir review https://github.com/OWNER/REPOSITORY/pull/NUMBER
 ```
 
+To stop active review work and older queued work for one pull request, either run:
+
+```bash
+revoir review cancel https://github.com/OWNER/REPOSITORY/pull/NUMBER
+```
+
+or add this exact standalone comment as the configured GitHub user:
+
+```text
+@revoirapp cancel
+```
+
+Cancellation is idempotent. It marks an active check as cancelled, removes the active
+reaction, cleans the temporary workspace, and does not publish a failure comment or
+retry the cancelled delivery. A later commit or later `@revoirapp review` comment is
+still eligible. CLI cancellation is recorded in protected local state; comment-based
+cancellation is detected with authenticated conditional GitHub polling and does not
+add another Cloudflare resource.
+
 Manual reviews enforce the same repository, author, open/non-draft, and no-fork rules.
 Revoir publishes a completed GitHub check and either non-blocking review findings or a
 clean result. If the pull-request head changes during review, the stale result is

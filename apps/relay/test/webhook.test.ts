@@ -26,6 +26,7 @@ interface WebhookFixture {
   };
   pull_request: {
     number: number;
+    updated_at: string;
     state: string;
     draft: boolean;
     user: { id: number };
@@ -128,6 +129,7 @@ async function issueCommentPayload(overrides: Record<string, unknown> = {}) {
     comment: {
       id: 123456789,
       body: "@revoirapp review",
+      created_at: "2026-08-04T23:59:00Z",
       user: { id: 42 },
     },
     ...overrides,
@@ -145,7 +147,7 @@ describe("GitHub webhook relay", () => {
     assert.equal(response.headers.get("X-Revoir-Relay-Version"), "test-relay-sha");
     assert.deepEqual(messages, [
       {
-        version: 1,
+        version: 2,
         deliveryId: "2f5f7475-33ee-4f91-9b68-0f8af72f6640",
         installationId: 8,
         repository: { id: 99, owner: "owner", name: "repository" },
@@ -161,6 +163,7 @@ describe("GitHub webhook relay", () => {
           headSha: "2".repeat(40),
         },
         enqueuedAt: "2026-07-29T00:00:00.000Z",
+        triggeredAt: "2026-07-28T23:59:00.000Z",
       },
     ]);
   });
@@ -181,7 +184,7 @@ describe("GitHub webhook relay", () => {
     assert.equal(response.status, 202);
     assert.deepEqual(messages, [
       {
-        version: 1,
+        version: 2,
         deliveryId: "6e38fcec-d555-474e-8fd2-34620349aa12",
         installationId: 8,
         repository: { id: 99, owner: "owner", name: "repository" },
@@ -193,6 +196,7 @@ describe("GitHub webhook relay", () => {
           senderId: 42,
         },
         enqueuedAt: "2026-08-05T00:00:00.000Z",
+        triggeredAt: "2026-08-04T23:59:00.000Z",
       },
     ]);
   });

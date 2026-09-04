@@ -11,6 +11,7 @@ import { writePolicy } from "../src/config/policy.js";
 import { writeConfiguration } from "../src/config/store.js";
 import { createDefaultDiagnosticGateway, type DiagnosticGateway } from "../src/diagnostics.js";
 import type { QueueRunService } from "../src/queue/runner.js";
+import type { ReviewCancellationStore } from "../src/review/cancellation-store.js";
 import { FindingContractError, validateModelReviewOutput } from "../src/review/findings.js";
 import type { ManualReviewService } from "../src/review/orchestrator.js";
 import { PullRequestEligibilityError } from "../src/review/pull-request.js";
@@ -137,6 +138,10 @@ describe("CLI", () => {
     stdout.output = "";
     assert.equal(await runCli(["setup", "--help"], { io }), 0);
     assert.match(stdout.output, /Provision and reconcile/u);
+
+    stdout.output = "";
+    assert.equal(await runCli(["review", "cancel", "--help"], { io }), 0);
+    assert.match(stdout.output, /revoir review cancel <GitHub PR URL>/u);
   });
 
   it("keeps normal diagnostics concise and adds redacted stack detail in verbose mode", async () => {
@@ -441,6 +446,66 @@ describe("CLI", () => {
     );
     assert.match(stderr.output, /canonical form/u);
     assert.equal(calls.length, 1);
+  });
+
+  it("records idempotent targeted cancellation only for locally authorized repositories", async () => {
+    const { root, io, stdout, stderr } = await createIo();
+    await writeCredentials(root);
+    const recorded: string[] = [];
+    const cancellationStore: ReviewCancellationStore = {
+      async read() {
+        return undefined;
+      },
+      async record(reference) {
+        recorded.push(reference.url);
+        return { cancelledAt: "2026-09-04T10:00:00.000Z" };
+      },
+    };
+    const url = "https://github.com/owner/repository/pull/17";
+
+    assert.equal(await runCli(["review", "cancel", url], { io, cancellationStore }), 0);
+    assert.equal(await runCli(["review", "cancel", url], { io, cancellationStore }), 0);
+    const customConfigFile = join(root, "custom", "revoir.json");
+    const customConfiguration = createTestConfiguration(
+      {
+        cacheDir: join(root, "custom-cache"),
+        stateDir: join(root, "custom-state"),
+        dataDir: join(root, "custom-data"),
+      },
+      { apiToken: "custom-cloudflare-secret" },
+    );
+    const { policy: customPolicy, ...customStaticConfiguration } = customConfiguration;
+    await writeConfiguration(customConfigFile, customStaticConfiguration);
+    await writePolicy(`${customConfigFile}.policy.json`, customPolicy);
+    assert.equal(
+      await runCli(["review", "cancel", url, "--config", customConfigFile], {
+        io,
+        cancellationStore,
+      }),
+      0,
+    );
+    assert.deepEqual(recorded, [url, url, url]);
+    assert.equal(
+      stdout.output,
+      `Cancellation recorded for ${url}.\nCancellation recorded for ${url}.\nCancellation recorded for ${url}.\n`,
+    );
+
+    assert.equal(await runCli(["review", "cancel", url, "--json"], { io, cancellationStore }), 2);
+    assert.equal(
+      await runCli(["review", "cancel", url, "--unsupported"], { io, cancellationStore }),
+      2,
+    );
+    assert.match(stderr.output, /--json is not supported|requires exactly one canonical/u);
+
+    stderr.output = "";
+    assert.equal(
+      await runCli(["review", "cancel", "https://github.com/other/repository/pull/17"], {
+        io,
+        cancellationStore,
+      }),
+      2,
+    );
+    assert.match(stderr.output, /not in the configured repository allowlist/u);
   });
 
   it("runs the authenticated pull consumer without accepting review inputs", async () => {

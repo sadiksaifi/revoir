@@ -40,6 +40,13 @@ function positiveInteger(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : undefined;
 }
 
+function normalizedTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    return undefined;
+  }
+  return new Date(value).toISOString();
+}
+
 function lowerHexBytes(value: string): ArrayBuffer {
   const buffer = new ArrayBuffer(value.length / 2);
   const bytes = new Uint8Array(buffer);
@@ -154,6 +161,7 @@ function createAutomaticReviewJob(
   const headRepositoryId = positiveInteger(headRepository.id);
   const baseRepositoryName = baseRepository.full_name;
   const headRepositoryName = headRepository.full_name;
+  const triggeredAt = normalizedTimestamp(pullRequest.updated_at);
   if (
     configuredRepository === undefined ||
     repositoryId === undefined ||
@@ -169,7 +177,8 @@ function createAutomaticReviewJob(
     typeof headRepositoryName !== "string" ||
     baseRepositoryName.toLowerCase() !==
       `${configuredRepository.owner}/${configuredRepository.name}`.toLowerCase() ||
-    headRepositoryName.toLowerCase() !== baseRepositoryName.toLowerCase()
+    headRepositoryName.toLowerCase() !== baseRepositoryName.toLowerCase() ||
+    triggeredAt === undefined
   ) {
     return undefined;
   }
@@ -186,13 +195,14 @@ function createAutomaticReviewJob(
   };
   try {
     return parseReviewQueueJob({
-      version: 1,
+      version: 2,
       deliveryId,
       installationId,
       repository: configuredRepository,
       pullRequest: { number: pullRequestNumber },
       trigger,
       enqueuedAt: now.toISOString(),
+      triggeredAt,
     });
   } catch {
     return undefined;
@@ -235,6 +245,7 @@ function createRequestedReviewJob(
   const commentId = positiveInteger(comment.id);
   const senderId = positiveInteger(sender.id);
   const commentAuthorId = positiveInteger(commentAuthor.id);
+  const triggeredAt = normalizedTimestamp(comment.created_at);
   if (
     payload.action !== "created" ||
     configuredRepository === undefined ||
@@ -243,7 +254,8 @@ function createRequestedReviewJob(
     senderId !== policy.userId ||
     commentAuthorId !== senderId ||
     typeof comment.body !== "string" ||
-    !REVIEW_COMMAND.test(comment.body.trim())
+    !REVIEW_COMMAND.test(comment.body.trim()) ||
+    triggeredAt === undefined
   ) {
     return undefined;
   }
@@ -256,13 +268,14 @@ function createRequestedReviewJob(
   };
   try {
     return parseReviewQueueJob({
-      version: 1,
+      version: 2,
       deliveryId,
       installationId,
       repository: configuredRepository,
       pullRequest: { number: pullRequestNumber },
       trigger,
       enqueuedAt: now.toISOString(),
+      triggeredAt,
     });
   } catch {
     return undefined;

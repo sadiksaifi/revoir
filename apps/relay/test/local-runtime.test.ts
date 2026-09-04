@@ -141,6 +141,7 @@ describe("Cloudflare local runtime", () => {
                 comment: {
                   id: 123456789,
                   body: "@revoirapp review",
+                  created_at: "2026-08-04T23:59:00Z",
                   user: { id: 42 },
                 },
               });
@@ -164,7 +165,8 @@ describe("Cloudflare local runtime", () => {
         assert.equal(jobs.length, 1);
         const job = parseReviewQueueJob(jobs[0]);
         assert.equal(job.deliveryId, "2f5f7475-33ee-4f91-9b68-0f8af72f6640");
-        assert.equal(job.version, 1);
+        assert.equal(job.version, 2);
+        assert.ok(job.version === 2 && job.triggeredAt.endsWith(".000Z"));
         assert.equal(job.trigger.kind, scenario.expectedTrigger);
       } finally {
         await miniflare.dispose();

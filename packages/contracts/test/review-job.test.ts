@@ -45,11 +45,26 @@ function requestedReviewJob() {
   };
 }
 
-describe("review queue job contract v1", () => {
+describe("review queue job contracts", () => {
   it("round-trips automatic and requested triggers across JSON and structured clone", () => {
     for (const value of [automaticReviewJob(), requestedReviewJob()]) {
       assert.deepEqual(parseReviewQueueJob(JSON.stringify(structuredClone(value))), value);
     }
+  });
+
+  it("accepts v1 jobs and requires a normalized source timestamp for v2 jobs", () => {
+    const v1 = automaticReviewJob();
+    const v2 = {
+      ...automaticReviewJob(),
+      version: 2,
+      triggeredAt: "2026-07-28T23:59:00.000Z",
+    };
+    assert.equal(parseReviewQueueJob(v1).version, 1);
+    assert.deepEqual(parseReviewQueueJob(v2), v2);
+    assert.throws(
+      () => parseReviewQueueJob({ ...v2, triggeredAt: "2026-07-28T23:59:00Z" }),
+      ReviewJobSchemaError,
+    );
   });
 
   it("accepts exactly the supported automatic actions", () => {
