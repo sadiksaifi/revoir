@@ -166,6 +166,33 @@ describe("GitHub App review gateway", () => {
     );
   });
 
+  it("keeps a same-second automatic trigger eligible after a cancellation comment", async () => {
+    const controller = new AbortController();
+    const session = await cancellationSession(
+      async () =>
+        json([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: "2026-09-04T10:00:00Z",
+            user: { id: 42 },
+          },
+        ]),
+      async () => {
+        controller.abort(new Error("automatic trigger remains eligible"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T10:00:00.000Z" },
+        controller.signal,
+      ),
+      /automatic trigger remains eligible/u,
+    );
+  });
+
   it("uses reverse pagination and conditional ETags while polling comments", async () => {
     const requests: Array<{ init: RequestInit | undefined; url: string }> = [];
     const pollDelays: number[] = [];

@@ -1040,7 +1040,7 @@ class InstallationSession implements GitHubReviewSession {
               comment.userId === this.#userId &&
               comment.body.trim() === "@revoirapp cancel" &&
               (requestedCommentId === undefined
-                ? Date.parse(comment.createdAt) >= Date.parse(boundary.triggeredAt)
+                ? Date.parse(comment.createdAt) > Date.parse(boundary.triggeredAt)
                 : comment.id > requestedCommentId),
           );
           if (cancellation !== undefined) {
@@ -1051,7 +1051,7 @@ class InstallationSession implements GitHubReviewSession {
             comments.length < 100 ||
             (requestedCommentId === undefined
               ? comments.some(
-                  (comment) => Date.parse(comment.createdAt) < Date.parse(boundary.triggeredAt),
+                  (comment) => Date.parse(comment.createdAt) <= Date.parse(boundary.triggeredAt),
                 )
               : comments.some((comment) => comment.id <= requestedCommentId));
           if (reachedBoundary) {
