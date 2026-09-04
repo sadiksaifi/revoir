@@ -10,6 +10,7 @@ import {
   type GitHubReviewCheck,
   type GitHubReviewCheckCompletion,
   type GitHubReviewGateway,
+  type GitHubReviewSession,
 } from "./github.js";
 import { FileReviewLock, type ReviewLock } from "./lock.js";
 import { PiReviewEngine, type ReviewEngine } from "./pi.js";
@@ -348,11 +349,16 @@ export class CleanReviewOrchestrator implements ManualReviewService {
         : { requestedCommentId: options.requestedCommentId }),
     };
     const monitorPromises: Promise<unknown>[] = [];
+    const monitorLifetimeSignal = AbortSignal.any([
+      monitorStop.signal,
+      deadline.signal,
+      ...(options?.signal === undefined ? [] : [options.signal]),
+    ]);
     this.#startMonitor(
       this.#monitorLocalCancellation(
         reference,
         initialCancellation?.cancelledAt,
-        monitorStop.signal,
+        monitorLifetimeSignal,
       ),
       monitorStop,
       monitorFailure,
@@ -363,12 +369,28 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       monitorFailure.signal,
       ...(options?.signal === undefined ? [] : [options.signal]),
     ]);
-    const acquisition = this.#lock.acquire(reviewSignal);
+    let acquisition: ReturnType<ReviewLock["acquire"]> | undefined;
     let lease: Awaited<ReturnType<ReviewLock["acquire"]>>;
+    let policy: RevoirPolicy;
+    let github: GitHubReviewSession;
     try {
+      policy = await deadline.wait(this.#loadPolicy(reviewSignal));
+      github = await deadline.wait(
+        this.#github.authenticate(this.#configuration.github, policy, reference, reviewSignal),
+      );
+      if (github.monitorCancellation !== undefined) {
+        this.#startMonitor(
+          github.monitorCancellation(reference, boundary, monitorLifetimeSignal),
+          monitorStop,
+          monitorFailure,
+          monitorPromises,
+        );
+      }
+      throwIfAborted(reviewSignal);
+      acquisition = this.#lock.acquire(reviewSignal);
       lease = await deadline.wait(acquisition);
     } catch (error) {
-      if (error === deadline.error) {
+      if (error === deadline.error && acquisition !== undefined) {
         this.#retainFinalization(
           acquisition.then(async (lateLease) => {
             await completeTerminal(createTerminalHandle(lateLease.release));
@@ -385,11 +407,11 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       this.#finalizeReview(
         reference,
         options,
-        boundary,
+        policy,
+        github,
         reviewSignal,
         lease,
         monitorStop,
-        monitorFailure,
         monitorPromises,
       ),
     );
@@ -450,15 +472,11 @@ export class CleanReviewOrchestrator implements ManualReviewService {
   async #finalizeReview(
     reference: PullRequestReference,
     options: ManualReviewOptions | undefined,
-    boundary: {
-      readonly localCancelledAt?: string;
-      readonly triggeredAt: string;
-      readonly requestedCommentId?: number;
-    },
+    policy: RevoirPolicy,
+    github: GitHubReviewSession,
     signal: AbortSignal,
     lease: Awaited<ReturnType<ReviewLock["acquire"]>>,
     monitorStop: AbortController,
-    monitorFailure: AbortController,
     monitorPromises: Promise<unknown>[],
   ): Promise<ManualReviewResult> {
     let result: ManualReviewResult | undefined;
@@ -467,10 +485,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       result = await this.#reviewWithLease(
         reference,
         options,
-        boundary,
+        policy,
+        github,
         signal,
         monitorStop,
-        monitorFailure,
         monitorPromises,
       );
     } catch (error) {
@@ -499,14 +517,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
   async #reviewWithLease(
     reference: PullRequestReference,
     options: ManualReviewOptions | undefined,
-    boundary: {
-      readonly localCancelledAt?: string;
-      readonly triggeredAt: string;
-      readonly requestedCommentId?: number;
-    },
+    policy: RevoirPolicy,
+    github: GitHubReviewSession,
     signal: AbortSignal,
     monitorStop: AbortController,
-    monitorFailure: AbortController,
     monitorPromises: Promise<unknown>[],
   ): Promise<ManualReviewResult> {
     const terminalSignal = new AbortController().signal;
@@ -518,22 +532,6 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     let failure: unknown;
 
     try {
-      throwIfAborted(signal);
-      const policy = await this.#loadPolicy(signal);
-      const github = await this.#github.authenticate(
-        this.#configuration.github,
-        policy,
-        reference,
-        signal,
-      );
-      if (github.monitorCancellation !== undefined) {
-        this.#startMonitor(
-          github.monitorCancellation(reference, boundary, monitorStop.signal),
-          monitorStop,
-          monitorFailure,
-          monitorPromises,
-        );
-      }
       throwIfAborted(signal);
       const pullRequest = await github.getPullRequest(reference, signal);
       assertPullRequestEligible(reference, pullRequest, policy);

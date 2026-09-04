@@ -513,7 +513,38 @@ describe("clean review orchestrator", () => {
       test.orchestrator.review(reference, { triggeredAt: "2026-09-04T10:00:00.000Z" }),
       TargetedReviewCancellationError,
     );
-    assert.deepEqual(test.events, []);
+    assert.equal(test.events.includes("get-pr"), false);
+  });
+
+  it("applies a pre-existing local cutoff while waiting for the process lock", async () => {
+    const cancelledAt = "2026-09-04T10:01:00.000Z";
+    const test = harness({
+      cancellations: {
+        async read() {
+          return { cancelledAt };
+        },
+        async record() {
+          return { cancelledAt };
+        },
+      },
+      async monitorCancellation(_reference, boundary) {
+        assert.equal(boundary.localCancelledAt, cancelledAt);
+        throw new TargetedReviewCancellationError();
+      },
+      lock: {
+        async acquire(signal) {
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        },
+      },
+    });
+
+    await assert.rejects(
+      test.orchestrator.review(reference, { triggeredAt: "2026-09-04T10:00:00.000Z" }),
+      TargetedReviewCancellationError,
+    );
+    assert.equal(test.events.includes("get-pr"), false);
   });
 
   it("cancels active model work, cleans artifacts, and completes the check as cancelled", async () => {
@@ -1402,8 +1433,9 @@ describe("clean review orchestrator", () => {
     assert.deepEqual(timedOut.events.slice(-2), ["cleanup", "delete-10"]);
   });
 
-  it("cancels policy loading at the review deadline and releases the lock", async () => {
+  it("cancels policy loading at the review deadline before acquiring the lock", async () => {
     let policySignal: AbortSignal | undefined;
+    let acquisitions = 0;
     let releases = 0;
     const timedOut = harness({
       reviewMs: 5,
@@ -1415,6 +1447,7 @@ describe("clean review orchestrator", () => {
       },
       lock: {
         async acquire() {
+          acquisitions += 1;
           return {
             async release() {
               releases += 1;
@@ -1426,7 +1459,8 @@ describe("clean review orchestrator", () => {
 
     await assert.rejects(timedOut.orchestrator.review(reference), ReviewTimeoutError);
     assert.equal(policySignal?.aborted, true);
-    await waitFor(() => releases === 1, "timed-out policy loading retained the process lock");
+    assert.equal(acquisitions, 0);
+    assert.equal(releases, 0);
   });
 
   it("propagates caller cancellation before releasing the worker slot", async () => {
@@ -1495,7 +1529,7 @@ describe("clean review orchestrator", () => {
       cancellation,
     );
     assert.equal(releases, 1);
-    assert.deepEqual(cancelled.events, []);
+    assert.equal(cancelled.events.includes("get-pr"), false);
   });
 
   it("keeps the process lock while a timed-out review engine is still active", async () => {
@@ -1548,9 +1582,22 @@ describe("clean review orchestrator", () => {
     const reviewStarted = new Promise<void>((resolve) => {
       markReviewStarted = resolve;
     });
+    let monitorStopped = false;
     const first = harness({
       reviewMs: 50,
       lock: new FileReviewLock(stateDirectory),
+      async monitorCancellation(_reference, _boundary, signal) {
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              monitorStopped = true;
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      },
       review: async () => {
         markReviewStarted?.();
         return new Promise<void>(() => {});
@@ -1564,6 +1611,7 @@ describe("clean review orchestrator", () => {
       await assert.rejects(firstReview, ReviewTimeoutError);
       await assert.rejects(() => second.orchestrator.review(reference), ReviewInProgressError);
       assert.equal(await fileIsMissing(join(stateDirectory, "manual-review.lock")), false);
+      assert.equal(monitorStopped, true);
     } finally {
       await rm(stateDirectory, { recursive: true, force: true });
     }
@@ -1636,7 +1684,7 @@ describe("clean review orchestrator", () => {
       );
       await assert.rejects(firstReview, ReviewTimeoutError);
       await assert.rejects(() => second.orchestrator.review(reference), ReviewInProgressError);
-      assert.deepEqual(second.events, []);
+      assert.equal(second.events.includes("get-pr"), false);
 
       finishReconciliation?.();
       await waitFor(
@@ -1676,7 +1724,7 @@ describe("clean review orchestrator", () => {
       ReviewTimeoutError,
     );
     assert.equal(acquisitionSignal?.aborted, true);
-    assert.deepEqual(timedOut.events, []);
+    assert.equal(timedOut.events.includes("get-pr"), false);
 
     assert.ok(finishAcquiring);
     finishAcquiring({
@@ -1688,7 +1736,7 @@ describe("clean review orchestrator", () => {
       setImmediate(resolve);
     });
     assert.equal(releases, 1);
-    assert.deepEqual(timedOut.events, []);
+    assert.equal(timedOut.events.includes("get-pr"), false);
   });
 
   it("retains a lock committed after timeout and retries release until it is gone", async () => {
@@ -1742,7 +1790,7 @@ describe("clean review orchestrator", () => {
       const failure = await foreground;
 
       assert.ok(failure instanceof ReviewTimeoutError);
-      assert.deepEqual(timedOut.events, []);
+      assert.equal(timedOut.events.includes("get-pr"), false);
       assert.equal(await fileIsMissing(lockPath), false);
 
       resumeLink?.();
@@ -1752,7 +1800,7 @@ describe("clean review orchestrator", () => {
       );
       assert.equal(releaseReads, 3);
       assert.equal(releaseUnlinks, 2);
-      assert.deepEqual(timedOut.events, []);
+      assert.equal(timedOut.events.includes("get-pr"), false);
     } finally {
       resumeLink?.();
       await rm(root, { recursive: true, force: true });
