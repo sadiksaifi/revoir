@@ -1,5 +1,7 @@
 import { createSign } from "node:crypto";
 
+import type { ReviewJobAction } from "@revoir/contracts";
+
 import { TargetedReviewCancellationError } from "../cancellation.js";
 import { installationForRepository, type RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
@@ -58,6 +60,7 @@ export type ReviewThreadResolution =
   | { readonly status: "stale"; readonly currentSha: string };
 
 export interface ReviewCancellationBoundary {
+  readonly automaticAction?: ReviewJobAction;
   readonly expectedHeadSha?: string;
   readonly localCancelledAt?: string;
   readonly triggeredAt: string;
@@ -1057,7 +1060,7 @@ class InstallationSession implements GitHubReviewSession {
               cancels = await this.#cancellationFollowsAutomaticTrigger(
                 reference,
                 comment.id,
-                boundary.expectedHeadSha,
+                { ...boundary, expectedHeadSha: boundary.expectedHeadSha },
                 signal,
               );
             }
@@ -1121,7 +1124,7 @@ class InstallationSession implements GitHubReviewSession {
   async #cancellationFollowsAutomaticTrigger(
     reference: PullRequestReference,
     cancellationCommentId: number,
-    expectedHeadSha: string,
+    boundary: ReviewCancellationBoundary & { readonly expectedHeadSha: string },
     signal: AbortSignal,
   ): Promise<boolean> {
     let before: string | null = null;
@@ -1141,12 +1144,14 @@ class InstallationSession implements GitHubReviewSession {
               timelineItems(
                 last: 100
                 before: $before
-                itemTypes: [ISSUE_COMMENT, PULL_REQUEST_COMMIT]
+                itemTypes: [ISSUE_COMMENT, PULL_REQUEST_COMMIT, READY_FOR_REVIEW_EVENT, REOPENED_EVENT]
               ) {
                 nodes {
                   __typename
                   ... on IssueComment { databaseId }
                   ... on PullRequestCommit { commit { oid } }
+                  ... on ReadyForReviewEvent { createdAt }
+                  ... on ReopenedEvent { createdAt }
                 }
                 pageInfo { hasPreviousPage startCursor }
               }
@@ -1178,13 +1183,20 @@ class InstallationSession implements GitHubReviewSession {
           sawCancellation = true;
           continue;
         }
-        if (
+        const action = boundary.automaticAction;
+        const isCommitTrigger =
+          (action === undefined || action === "opened" || action === "synchronize") &&
           item["__typename"] === "PullRequestCommit" &&
           string(
             record(item.commit, "cancellation timeline commit").oid,
             "cancellation timeline commit SHA",
-          ) === expectedHeadSha
-        ) {
+          ) === boundary.expectedHeadSha;
+        const isActionTrigger =
+          ((action === "ready_for_review" && item["__typename"] === "ReadyForReviewEvent") ||
+            (action === "reopened" && item["__typename"] === "ReopenedEvent")) &&
+          Date.parse(string(item.createdAt, "cancellation timeline event timestamp")) ===
+            Date.parse(boundary.triggeredAt);
+        if (isCommitTrigger || isActionTrigger) {
           return sawCancellation;
         }
       }

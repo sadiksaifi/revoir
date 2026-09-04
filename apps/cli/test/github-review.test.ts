@@ -215,6 +215,55 @@ describe("GitHub App review gateway", () => {
     );
   });
 
+  it("keeps a same-second ready-for-review trigger eligible after an older cancellation", async () => {
+    const controller = new AbortController();
+    const session = await cancellationSession(
+      async (input) => {
+        if (String(input).endsWith("/graphql")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  timelineItems: {
+                    nodes: [
+                      { __typename: "IssueComment", databaseId: 123 },
+                      { __typename: "ReadyForReviewEvent", createdAt: "2026-09-04T10:00:00Z" },
+                    ],
+                    pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                  },
+                },
+              },
+            },
+          });
+        }
+        return json([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: "2026-09-04T10:00:00Z",
+            user: { id: 42 },
+          },
+        ]);
+      },
+      async () => {
+        controller.abort(new Error("ready-for-review trigger remains eligible"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          automaticAction: "ready_for_review",
+          expectedHeadSha: "2".repeat(40),
+          triggeredAt: "2026-09-04T10:00:00.000Z",
+        },
+        controller.signal,
+      ),
+      /ready-for-review trigger remains eligible/u,
+    );
+  });
+
   it("accepts a same-second cancellation after an automatic trigger", async () => {
     const headSha = "2".repeat(40);
     const controller = new AbortController();

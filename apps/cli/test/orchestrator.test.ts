@@ -537,6 +537,7 @@ describe("clean review orchestrator", () => {
       },
       async monitorCancellation(_reference, boundary) {
         assert.equal(boundary.localCancelledAt, cancelledAt);
+        assert.equal(boundary.automaticAction, "ready_for_review");
         throw new TargetedReviewCancellationError();
       },
       lock: {
@@ -549,7 +550,10 @@ describe("clean review orchestrator", () => {
     });
 
     await assert.rejects(
-      test.orchestrator.review(reference, { triggeredAt: "2026-09-04T10:00:00.000Z" }),
+      test.orchestrator.review(reference, {
+        automaticAction: "ready_for_review",
+        triggeredAt: "2026-09-04T10:00:00.000Z",
+      }),
       TargetedReviewCancellationError,
     );
     assert.equal(test.events.includes("get-pr"), false);

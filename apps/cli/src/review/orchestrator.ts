@@ -1,3 +1,5 @@
+import type { ReviewJobAction } from "@revoir/contracts";
+
 import {
   isCallerCancellation,
   isTargetedReviewCancellation,
@@ -44,6 +46,7 @@ export type ManualReviewResult =
     };
 
 export interface ManualReviewOptions {
+  automaticAction?: ReviewJobAction;
   expectedHeadSha?: string;
   requestedCommentId?: number;
   signal?: AbortSignal;
@@ -346,6 +349,9 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     }
     const boundary = {
       triggeredAt: options?.triggeredAt ?? new Date().toISOString(),
+      ...(options?.automaticAction === undefined
+        ? {}
+        : { automaticAction: options.automaticAction }),
       ...(options?.expectedHeadSha === undefined
         ? {}
         : { expectedHeadSha: options.expectedHeadSha }),

@@ -457,7 +457,9 @@ export class QueueReviewRunner implements QueueRunService {
     let result: Awaited<ReturnType<ManualReviewService["review"]>>;
     try {
       result = await this.#reviews.review(referenceFor(job), {
-        ...(job.trigger.kind === "automatic" ? { expectedHeadSha: job.trigger.headSha } : {}),
+        ...(job.trigger.kind === "automatic"
+          ? { automaticAction: job.trigger.action, expectedHeadSha: job.trigger.headSha }
+          : {}),
         ...(job.trigger.kind === "requested" ? { requestedCommentId: job.trigger.commentId } : {}),
         triggeredAt: job.version === 2 ? job.triggeredAt : job.enqueuedAt,
         ...(signal === undefined ? {} : { signal }),
