@@ -470,7 +470,11 @@ export class QueueReviewRunner implements QueueRunService {
     try {
       result = await this.#reviews.review(referenceFor(job), {
         ...(job.trigger.kind === "automatic"
-          ? { automaticAction: job.trigger.action, expectedHeadSha: job.trigger.headSha }
+          ? {
+              automaticAction: job.trigger.action,
+              expectedHeadSha: job.trigger.headSha,
+              ...(job.version === 1 ? { legacyAutomatic: true as const } : {}),
+            }
           : {}),
         ...(job.trigger.kind === "requested" ? { requestedCommentId: job.trigger.commentId } : {}),
         triggeredAt: job.version === 2 ? job.triggeredAt : job.enqueuedAt,

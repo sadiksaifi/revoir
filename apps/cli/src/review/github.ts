@@ -62,6 +62,7 @@ export type ReviewThreadResolution =
 export interface ReviewCancellationBoundary {
   readonly automaticAction?: ReviewJobAction;
   readonly expectedHeadSha?: string;
+  readonly legacyAutomatic?: true;
   readonly localCancelledAt?: string;
   readonly localTriggeredAt?: string;
   readonly triggeredAt: string;
@@ -1000,7 +1001,9 @@ class InstallationSession implements GitHubReviewSession {
     let pollIntervalMs = 5_000;
     const requestedCommentId = boundary.requestedCommentId;
     const since =
-      requestedCommentId === undefined && boundary.localTriggeredAt === undefined
+      requestedCommentId === undefined &&
+      boundary.legacyAutomatic !== true &&
+      boundary.localTriggeredAt === undefined
         ? `&since=${encodeURIComponent(boundary.triggeredAt)}`
         : "";
     for (;;) {
@@ -1008,6 +1011,7 @@ class InstallationSession implements GitHubReviewSession {
       try {
         let page = 1;
         let nextEtag = etag;
+        let reachedLegacyTrigger = false;
         let triggeredAt = Date.parse(boundary.triggeredAt);
         for (;;) {
           // Comment pages form one reverse-ordered snapshot and must remain serial.
@@ -1063,7 +1067,7 @@ class InstallationSession implements GitHubReviewSession {
               !cancels &&
               requestedCommentId === undefined &&
               boundary.expectedHeadSha !== undefined &&
-              Date.parse(comment.createdAt) === triggeredAt
+              (boundary.legacyAutomatic === true || Date.parse(comment.createdAt) === triggeredAt)
             ) {
               // Equal GitHub timestamps require the ordered PR timeline to preserve both
               // later-cancellation and later-commit semantics.
@@ -1074,6 +1078,9 @@ class InstallationSession implements GitHubReviewSession {
                 { ...boundary, expectedHeadSha: boundary.expectedHeadSha },
                 signal,
               );
+              if (boundary.legacyAutomatic === true && !cancels) {
+                reachedLegacyTrigger = true;
+              }
             }
             if (cancels) {
               throw new TargetedReviewCancellationError();
@@ -1082,9 +1089,11 @@ class InstallationSession implements GitHubReviewSession {
           const reachedBoundary =
             comments.length === 0 ||
             comments.length < 100 ||
-            (requestedCommentId === undefined
-              ? comments.some((comment) => Date.parse(comment.createdAt) <= triggeredAt)
-              : comments.some((comment) => comment.id <= requestedCommentId));
+            (boundary.legacyAutomatic === true
+              ? reachedLegacyTrigger
+              : requestedCommentId === undefined
+                ? comments.some((comment) => Date.parse(comment.createdAt) <= triggeredAt)
+                : comments.some((comment) => comment.id <= requestedCommentId));
           if (reachedBoundary) {
             break;
           }

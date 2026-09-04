@@ -216,6 +216,7 @@ describe("queue review runner", () => {
     const failures = new MemoryOperationalFailureStore();
     let acknowledgements = 0;
     let reviews = 0;
+    let receivedOptions: Parameters<ManualReviewService["review"]>[1];
     const runner = new QueueReviewRunner(
       configuration(),
       {
@@ -231,8 +232,9 @@ describe("queue review runner", () => {
         async retry() {},
       },
       {
-        async review() {
+        async review(_reference, options) {
           reviews += 1;
+          receivedOptions = options;
           throw new TargetedReviewCancellationError();
         },
       },
@@ -244,6 +246,7 @@ describe("queue review runner", () => {
     assert.equal(failures.failures.get(job.deliveryId)?.reviewCompleted, true);
     assert.equal(await runner.consumeOne(), "settled");
     assert.equal(reviews, 1);
+    assert.equal(receivedOptions?.legacyAutomatic, true);
     assert.equal(acknowledgements, 2);
     assert.equal(failures.failures.size, 0);
   });

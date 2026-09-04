@@ -215,6 +215,54 @@ describe("GitHub App review gateway", () => {
     );
   });
 
+  it("finds a legacy automatic cancellation that predates delayed enqueueing", async () => {
+    const headSha = "2".repeat(40);
+    let requestedUrl: string | undefined;
+    const session = await cancellationSession(async (input) => {
+      if (String(input).endsWith("/graphql")) {
+        return json({
+          data: {
+            repository: {
+              pullRequest: {
+                timelineItems: {
+                  nodes: [
+                    { __typename: "PullRequestCommit", commit: { oid: headSha } },
+                    { __typename: "IssueComment", databaseId: 123 },
+                  ],
+                  pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                },
+              },
+            },
+          },
+        });
+      }
+      requestedUrl = String(input);
+      return json([
+        {
+          id: 123,
+          body: "@revoirapp cancel",
+          created_at: "2026-09-04T10:00:00Z",
+          user: { id: 42 },
+        },
+      ]);
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          automaticAction: "synchronize",
+          expectedHeadSha: headSha,
+          legacyAutomatic: true,
+          triggeredAt: "2026-09-04T10:05:00.000Z",
+        },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.equal(new URL(requestedUrl!).searchParams.has("since"), false);
+  });
+
   it("keeps a same-second ready-for-review trigger eligible after an older cancellation", async () => {
     const controller = new AbortController();
     const session = await cancellationSession(

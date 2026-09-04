@@ -48,6 +48,7 @@ export type ManualReviewResult =
 export interface ManualReviewOptions {
   automaticAction?: ReviewJobAction;
   expectedHeadSha?: string;
+  legacyAutomatic?: true;
   requestedCommentId?: number;
   signal?: AbortSignal;
   triggeredAt?: string;
@@ -357,6 +358,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       ...(options?.expectedHeadSha === undefined
         ? {}
         : { expectedHeadSha: options.expectedHeadSha }),
+      ...(options?.legacyAutomatic === true ? { legacyAutomatic: true as const } : {}),
       ...(initialCancellation === undefined
         ? {}
         : { localCancelledAt: initialCancellation.cancelledAt }),
