@@ -133,8 +133,10 @@ describe("GitHub App review gateway", () => {
   }
 
   it("accepts only an exact authorized cancellation newer than a review comment", async () => {
-    const session = await cancellationSession(async () =>
-      json([
+    let requestedUrl: string | undefined;
+    const session = await cancellationSession(async (input) => {
+      requestedUrl = String(input);
+      return json([
         {
           id: 125,
           body: "@revoirapp cancel now",
@@ -153,8 +155,8 @@ describe("GitHub App review gateway", () => {
           created_at: "2026-09-04T10:00:00Z",
           user: { id: 42 },
         },
-      ]),
-    );
+      ]);
+    });
 
     await assert.rejects(
       session.monitorCancellation!(
@@ -164,6 +166,7 @@ describe("GitHub App review gateway", () => {
       ),
       TargetedReviewCancellationError,
     );
+    assert.equal(new URL(requestedUrl!).searchParams.has("since"), false);
   });
 
   it("keeps a same-second automatic trigger eligible after a cancellation comment", async () => {

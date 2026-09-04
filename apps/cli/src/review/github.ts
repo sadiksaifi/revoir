@@ -994,7 +994,10 @@ class InstallationSession implements GitHubReviewSession {
     let failures = 0;
     let pollIntervalMs = 5_000;
     const requestedCommentId = boundary.requestedCommentId;
-    const since = encodeURIComponent(boundary.triggeredAt);
+    const since =
+      requestedCommentId === undefined
+        ? `&since=${encodeURIComponent(boundary.triggeredAt)}`
+        : "";
     for (;;) {
       throwIfAborted(signal);
       try {
@@ -1004,7 +1007,7 @@ class InstallationSession implements GitHubReviewSession {
           // Comment pages form one reverse-ordered snapshot and must remain serial.
           // eslint-disable-next-line no-await-in-loop
           const response = await this.#request(
-            `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/comments?sort=created&direction=desc&since=${since}&per_page=100&page=${page}`,
+            `/repos/${reference.owner}/${reference.repository}/issues/${reference.number}/comments?sort=created&direction=desc${since}&per_page=100&page=${page}`,
             signal,
             page === 1 && etag !== undefined ? { headers: { "If-None-Match": etag } } : {},
           );
