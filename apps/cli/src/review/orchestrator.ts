@@ -347,8 +347,10 @@ export class CleanReviewOrchestrator implements ManualReviewService {
       deadline.dispose();
       throw error;
     }
+    const triggeredAt = options?.triggeredAt ?? new Date().toISOString();
     const boundary = {
-      triggeredAt: options?.triggeredAt ?? new Date().toISOString(),
+      triggeredAt,
+      ...(options?.triggeredAt === undefined ? { localTriggeredAt: triggeredAt } : {}),
       ...(options?.automaticAction === undefined
         ? {}
         : { automaticAction: options.automaticAction }),

@@ -496,6 +496,19 @@ function validatedFinding(): ReviewFindingV2 {
 }
 
 describe("clean review orchestrator", () => {
+  it("marks a direct manual review boundary as locally timed", async () => {
+    let observedBoundary: Parameters<NonNullable<GitHubReviewSession["monitorCancellation"]>>[1];
+    const test = harness({
+      async monitorCancellation(_reference, boundary) {
+        observedBoundary = boundary;
+        throw new TargetedReviewCancellationError();
+      },
+    });
+
+    await assert.rejects(test.orchestrator.review(reference), TargetedReviewCancellationError);
+    assert.equal(observedBoundary!.localTriggeredAt, observedBoundary!.triggeredAt);
+  });
+
   it("observes a local cancellation while waiting for the process lock", async () => {
     let reads = 0;
     const test = harness({

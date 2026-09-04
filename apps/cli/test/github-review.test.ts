@@ -504,6 +504,44 @@ describe("GitHub App review gateway", () => {
     );
   });
 
+  it("accepts a same-second manual cancellation when the local clock is ahead", async () => {
+    const localNow = 1_000_000;
+    const serverNow = localNow - 5 * 60_000;
+    let requestedUrl: string | undefined;
+    const session = await cancellationSession(async (input) => {
+      requestedUrl = String(input);
+      return new Response(
+        JSON.stringify([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: new Date(serverNow).toISOString(),
+            user: { id: 42 },
+          },
+        ]),
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Date: new Date(serverNow).toUTCString(),
+          },
+        },
+      );
+    });
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        {
+          localTriggeredAt: new Date(localNow).toISOString(),
+          triggeredAt: new Date(localNow).toISOString(),
+        },
+        new AbortController().signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.equal(new URL(requestedUrl!).searchParams.has("since"), false);
+  });
+
   it("signs a short-lived RS256 GitHub App JWT", () => {
     const jwt = createGitHubAppJwt(7, TEST_PRIVATE_KEY, 1_000);
     const [encodedHeader, encodedPayload, encodedSignature] = jwt.split(".");

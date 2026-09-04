@@ -63,6 +63,7 @@ export interface ReviewCancellationBoundary {
   readonly automaticAction?: ReviewJobAction;
   readonly expectedHeadSha?: string;
   readonly localCancelledAt?: string;
+  readonly localTriggeredAt?: string;
   readonly triggeredAt: string;
   readonly requestedCommentId?: number;
 }
@@ -999,12 +1000,15 @@ class InstallationSession implements GitHubReviewSession {
     let pollIntervalMs = 5_000;
     const requestedCommentId = boundary.requestedCommentId;
     const since =
-      requestedCommentId === undefined ? `&since=${encodeURIComponent(boundary.triggeredAt)}` : "";
+      requestedCommentId === undefined && boundary.localTriggeredAt === undefined
+        ? `&since=${encodeURIComponent(boundary.triggeredAt)}`
+        : "";
     for (;;) {
       throwIfAborted(signal);
       try {
         let page = 1;
         let nextEtag = etag;
+        let triggeredAt = Date.parse(boundary.triggeredAt);
         for (;;) {
           // Comment pages form one reverse-ordered snapshot and must remain serial.
           // eslint-disable-next-line no-await-in-loop
@@ -1017,14 +1021,19 @@ class InstallationSession implements GitHubReviewSession {
           if (Number.isFinite(configuredPollInterval) && configuredPollInterval > 0) {
             pollIntervalMs = Math.max(pollIntervalMs, configuredPollInterval * 1_000);
           }
+          if (page === 1 && boundary.localTriggeredAt !== undefined) {
+            triggeredAt = this.#serverTimestampForLocal(boundary.localTriggeredAt, response);
+          }
           if (
             page === 1 &&
             boundary.localCancelledAt !== undefined &&
-            this.#localCancellationPrecedesTrigger(
-              boundary.localCancelledAt,
-              boundary.triggeredAt,
-              response,
-            )
+            (boundary.localTriggeredAt === undefined
+              ? Math.floor(triggeredAt / 1_000) <
+                Math.floor(
+                  this.#serverTimestampForLocal(boundary.localCancelledAt, response) / 1_000,
+                )
+              : Math.floor(Date.parse(boundary.localTriggeredAt) / 1_000) <
+                Math.floor(Date.parse(boundary.localCancelledAt) / 1_000))
           ) {
             throw new TargetedReviewCancellationError();
           }
@@ -1046,13 +1055,15 @@ class InstallationSession implements GitHubReviewSession {
             }
             let cancels =
               requestedCommentId === undefined
-                ? Date.parse(comment.createdAt) > Date.parse(boundary.triggeredAt)
+                ? boundary.localTriggeredAt === undefined
+                  ? Date.parse(comment.createdAt) > triggeredAt
+                  : Date.parse(comment.createdAt) >= triggeredAt
                 : comment.id > requestedCommentId;
             if (
               !cancels &&
               requestedCommentId === undefined &&
               boundary.expectedHeadSha !== undefined &&
-              Date.parse(comment.createdAt) === Date.parse(boundary.triggeredAt)
+              Date.parse(comment.createdAt) === triggeredAt
             ) {
               // Equal GitHub timestamps require the ordered PR timeline to preserve both
               // later-cancellation and later-commit semantics.
@@ -1072,9 +1083,7 @@ class InstallationSession implements GitHubReviewSession {
             comments.length === 0 ||
             comments.length < 100 ||
             (requestedCommentId === undefined
-              ? comments.some(
-                  (comment) => Date.parse(comment.createdAt) <= Date.parse(boundary.triggeredAt),
-                )
+              ? comments.some((comment) => Date.parse(comment.createdAt) <= triggeredAt)
               : comments.some((comment) => comment.id <= requestedCommentId));
           if (reachedBoundary) {
             break;
@@ -1100,25 +1109,15 @@ class InstallationSession implements GitHubReviewSession {
     }
   }
 
-  #localCancellationPrecedesTrigger(
-    localCancellation: string,
-    trigger: string,
-    response: Response,
-  ): boolean {
+  #serverTimestampForLocal(localTimestamp: string, response: Response): number {
     const serverDate = response.headers.get("Date");
     const serverNow = serverDate === null ? Number.NaN : Date.parse(serverDate);
     const localNow = this.#now() * 1_000;
-    const localCancelledAt = Date.parse(localCancellation);
-    const triggeredAt = Date.parse(trigger);
-    if (
-      !Number.isFinite(serverNow) ||
-      !Number.isFinite(localCancelledAt) ||
-      !Number.isFinite(triggeredAt)
-    ) {
+    const localTime = Date.parse(localTimestamp);
+    if (!Number.isFinite(serverNow) || !Number.isFinite(localTime)) {
       throw new Error("GitHub cancellation monitoring could not establish a clock boundary.");
     }
-    const serverCancelledAt = localCancelledAt + (serverNow - localNow);
-    return Math.floor(triggeredAt / 1_000) < Math.floor(serverCancelledAt / 1_000);
+    return localTime + (serverNow - localNow);
   }
 
   async #cancellationFollowsAutomaticTrigger(
