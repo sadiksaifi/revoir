@@ -348,8 +348,7 @@ function positiveInteger(value: unknown, path: string): number {
 }
 
 function positiveDatabaseId(value: unknown, path: string): number {
-  const parsed =
-    typeof value === "string" && /^[1-9][0-9]*$/u.test(value) ? Number(value) : value;
+  const parsed = typeof value === "string" && /^[1-9][0-9]*$/u.test(value) ? Number(value) : value;
   return positiveInteger(parsed, path);
 }
 
@@ -1098,7 +1097,7 @@ class InstallationSession implements GitHubReviewSession {
             (boundary.legacyAutomatic === true
               ? reachedLegacyTrigger
               : requestedCommentId === undefined
-                ? comments.some((comment) => Date.parse(comment.createdAt) <= triggeredAt)
+                ? comments.some((comment) => Date.parse(comment.createdAt) < triggeredAt)
                 : comments.some((comment) => comment.id <= requestedCommentId));
           if (reachedBoundary) {
             break;
@@ -1194,8 +1193,7 @@ class InstallationSession implements GitHubReviewSession {
           positiveDatabaseId(
             item.fullDatabaseId ?? item.databaseId,
             "cancellation timeline comment id",
-          ) ===
-            cancellationCommentId
+          ) === cancellationCommentId
         ) {
           sawCancellation = true;
           continue;

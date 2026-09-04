@@ -440,6 +440,66 @@ describe("GitHub App review gateway", () => {
     assert.deepEqual(pollDelays, [7_000]);
   });
 
+  it("continues pagination across a full page at the automatic boundary second", async () => {
+    const headSha = "2".repeat(40);
+    const requestedPages: number[] = [];
+    const controller = new AbortController();
+    const session = await cancellationSession(
+      async (input) => {
+        if (String(input).endsWith("/graphql")) {
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  timelineItems: {
+                    nodes: [
+                      { __typename: "PullRequestCommit", commit: { oid: headSha } },
+                      { __typename: "IssueComment", fullDatabaseId: "123" },
+                    ],
+                    pageInfo: { hasPreviousPage: false, startCursor: "start" },
+                  },
+                },
+              },
+            },
+          });
+        }
+        const page = Number(new URL(String(input)).searchParams.get("page"));
+        requestedPages.push(page);
+        if (page === 1) {
+          return json(
+            Array.from({ length: 100 }, (_, index) => ({
+              id: 300 - index,
+              body: "ordinary comment",
+              created_at: "2026-09-04T10:00:00Z",
+              user: { id: 42 },
+            })),
+          );
+        }
+        return json([
+          {
+            id: 123,
+            body: "@revoirapp cancel",
+            created_at: "2026-09-04T10:00:00Z",
+            user: { id: 42 },
+          },
+        ]);
+      },
+      async () => {
+        controller.abort(new Error("boundary page was skipped"));
+      },
+    );
+
+    await assert.rejects(
+      session.monitorCancellation!(
+        reference,
+        { triggeredAt: "2026-09-04T10:00:00.000Z", expectedHeadSha: headSha },
+        controller.signal,
+      ),
+      TargetedReviewCancellationError,
+    );
+    assert.deepEqual(requestedPages, [1, 2]);
+  });
+
   it("turns three consecutive comment-monitor failures into a GitHub failure", async () => {
     let attempts = 0;
     const session = await cancellationSession(async () => {
