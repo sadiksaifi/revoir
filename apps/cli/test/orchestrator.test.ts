@@ -159,6 +159,8 @@ function harness(
     threadResolutionStaleSha?: string;
     prepareError?: Error;
     completionError?: Error;
+    failureCommentRemovalStarted?: () => void;
+    delayFailureCommentRemoval?: boolean;
     reactionError?: ReviewReaction;
     reconciliationNeverSettles?: boolean;
     reactionReconciliationGate?: Promise<void>;
@@ -281,6 +283,12 @@ function harness(
     },
     async removeOwnFailureComment() {
       events.push("remove-failure-comment");
+      options.failureCommentRemovalStarted?.();
+      if (options.delayFailureCommentRemoval === true) {
+        await new Promise<void>((resolve) => {
+          setImmediate(resolve);
+        });
+      }
     },
     async removeOwnPendingReview() {
       events.push("remove-pending-review");
@@ -615,6 +623,38 @@ describe("clean review orchestrator", () => {
           "Revoir could not complete this review. See the failure comment or service logs for details.",
       },
     ]);
+  });
+
+  it("stops cancellation monitoring before irreversible publication", async () => {
+    for (const findings of [false, true]) {
+      let signalFailureRemoval!: () => void;
+      const failureRemovalStarted = new Promise<void>((resolve) => {
+        signalFailureRemoval = resolve;
+      });
+      const test = harness({
+        delayFailureCommentRemoval: true,
+        failureCommentRemovalStarted: signalFailureRemoval,
+        async monitorCancellation(_reference, _boundary, signal) {
+          await Promise.race([
+            failureRemovalStarted,
+            new Promise<never>((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            }),
+          ]);
+          signal.throwIfAborted();
+          throw new TargetedReviewCancellationError();
+        },
+        ...(findings
+          ? {
+              review: async () => ({ findings: [validatedFinding()], diagnostics: [] }),
+            }
+          : {}),
+      });
+
+      const result = await test.orchestrator.review(reference);
+      assert.equal(result.status, findings ? "findings" : "clean");
+      assert.equal(test.checkCompletions[0]?.conclusion, "success");
+    }
   });
 
   it("runs the exact clean lifecycle after eligibility and cleans before completion", async () => {

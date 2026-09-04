@@ -437,7 +437,8 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     operations: Promise<unknown>[],
   ): void {
     const monitored = operation.catch((error: unknown) => {
-      if (!stop.signal.aborted && !failure.signal.aborted) {
+      const expectedStop = stop.signal.aborted && error === stop.signal.reason;
+      if (!expectedStop && !failure.signal.aborted) {
         failure.abort(error);
       }
       throw error;
@@ -538,6 +539,11 @@ export class CleanReviewOrchestrator implements ManualReviewService {
     let reviewCheck: GitHubReviewCheck | undefined;
     let result: ManualReviewResult | undefined;
     let failure: unknown;
+    const stopCancellationMonitoring = async (): Promise<void> => {
+      monitorStop.abort();
+      await Promise.allSettled(monitorPromises);
+      throwIfAborted(signal);
+    };
 
     try {
       throwIfAborted(signal);
@@ -693,6 +699,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
                 throwIfAborted(signal);
                 if (postDraftSha === pullRequest.headSha) {
                   try {
+                    await stopCancellationMonitoring();
                     await pendingReview.submit(signal, terminalSignal);
                   } catch (error) {
                     if (error instanceof ReviewSubmissionUncertainError) {
@@ -727,6 +734,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
                   diagnostics: engineResult.diagnostics,
                 };
               } else if (result === undefined) {
+                await stopCancellationMonitoring();
                 activeReaction = createTerminalHandle(() =>
                   github.removeOwnReaction(reference, "+1", terminalSignal),
                 );
