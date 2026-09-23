@@ -139,6 +139,22 @@ describe("greenfield configuration", () => {
     assert.deepEqual(configuration.timeouts, { reviewMs: 1_200_000, shellCommandMs: 120_000 });
   });
 
+  it("keeps the review model fixed by the application", () => {
+    const configuration = testConfiguration({
+      cacheDir: "/cache",
+      stateDir: "/state",
+      dataDir: "/data",
+    });
+    assert.throws(
+      () =>
+        validateConfiguration({
+          ...configuration,
+          model: { ...configuration.model, id: "openai-codex/gpt-6-sol" },
+        }),
+      /model\.id must be openai-codex\/gpt-5\.6-sol/u,
+    );
+  });
+
   it("rejects the old combined configuration instead of migrating it", () => {
     const configuration = testConfiguration({
       cacheDir: "/cache",

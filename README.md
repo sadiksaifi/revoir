@@ -252,7 +252,7 @@ discarded.
 
 Revoir posts material P0-P2 findings on changed lines. Each comment names the defect,
 explains the failure and impact, gives a fix direction, and identifies Revoir and the
-model used for that review. A review with missing critical context, invalid finding prose, or
+model fixed by this build. A review with missing critical context, invalid finding prose, or
 no honest changed-line anchor fails instead of reporting a clean result. GitHub
 rejection of an inline comment does not turn it into a review-body finding.
 

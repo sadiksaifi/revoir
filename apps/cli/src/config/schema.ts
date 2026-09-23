@@ -122,8 +122,8 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
   const model = readObject(root.model, "model", issues);
   if (model !== undefined) checkKeys(model, "model", ["id", "reasoning"], issues);
   const modelId = model === undefined ? undefined : readString(model.id, "model.id", issues);
-  if (modelId !== undefined && !/^openai-codex\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(modelId)) {
-    issues.push('model.id must use the "openai-codex/<model>" format.');
+  if (modelId !== undefined && modelId !== DEFAULT_MODEL) {
+    issues.push(`model.id must be ${DEFAULT_MODEL}.`);
   }
   const reasoning = model?.reasoning;
   if (
