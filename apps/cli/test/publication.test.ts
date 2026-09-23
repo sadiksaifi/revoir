@@ -51,9 +51,14 @@ describe("findings-only review publication", () => {
     assert.match(comment, /A second submission replaces/u);
     assert.match(comment, /The first review never completes/u);
     assert.match(comment, /\*\*Fix:\*\* Keep a cancellation signal for each review/u);
-    assert.match(comment, /^Reviewed by Revoir using gpt-5\.6-sol\.$/mu);
+    assert.ok(
+      comment.endsWith(
+        "> Reviewed with [Revoir](https://github.com/sadiksaifi/revoir) using [openai/gpt-5.6-sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol)",
+      ),
+    );
     assert.doesNotMatch(comment, /- Evidence:|- Location:|Fix direction:/u);
     assert.match(comment, /<!-- revoir:finding:v1:/u);
+    assert.ok(comment.indexOf("<!-- revoir:finding:v1:") < comment.indexOf("> Reviewed with"));
 
     const changedModel = createReviewPublication(
       "1".repeat(40),
@@ -61,9 +66,10 @@ describe("findings-only review publication", () => {
       [],
       "openai-codex/gpt-6-sol",
     );
-    assert.match(
-      changedModel.payload.comments?.[0]?.body ?? "",
-      /^Reviewed by Revoir using gpt-6-sol\.$/mu,
+    assert.ok(
+      (changedModel.payload.comments?.[0]?.body ?? "").endsWith(
+        "> Reviewed with [Revoir](https://github.com/sadiksaifi/revoir) using [openai/gpt-6-sol](https://developers.openai.com/api/docs/models/gpt-6-sol)",
+      ),
     );
   });
 

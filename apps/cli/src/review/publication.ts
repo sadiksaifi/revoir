@@ -130,9 +130,9 @@ function inlineDetails(finding: ReviewFindingV2, modelId: string): string {
     "",
     `**Fix:** ${markdownText(finding.fix)}`,
     "",
-    `Reviewed by ${REVIEW_AGENT_NAME} using ${modelSlug}.`,
-    "",
     ...markers,
+    "",
+    `> Reviewed with [${REVIEW_AGENT_NAME}](https://github.com/sadiksaifi/revoir) using [openai/${modelSlug}](https://developers.openai.com/api/docs/models/${modelSlug})`,
   ].join("\n");
 }
 
