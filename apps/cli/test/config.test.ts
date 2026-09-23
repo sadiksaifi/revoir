@@ -149,9 +149,9 @@ describe("greenfield configuration", () => {
       () =>
         validateConfiguration({
           ...configuration,
-          model: { ...configuration.model, id: "openai-codex/gpt-6-astra" },
+          model: { ...configuration.model, id: "other-provider/gpt-6-sol" },
         }),
-      /model\.id must be openai-codex\/gpt-6-sol/u,
+      /model\.id must use the "openai-codex\/<model>" format/u,
     );
   });
 
@@ -166,6 +166,19 @@ describe("greenfield configuration", () => {
       model: { ...configuration.model, id: "openai-codex/gpt-5.6-sol" },
     };
     assert.equal(validateConfiguration(priorInstallation).model.id, "openai-codex/gpt-6-sol");
+  });
+
+  it("loads a previously configured custom model as the current build model", () => {
+    const configuration = testConfiguration({
+      cacheDir: "/cache",
+      stateDir: "/state",
+      dataDir: "/data",
+    });
+    const priorInstallation = {
+      ...configuration,
+      model: { ...configuration.model, id: "openai-codex/gpt-5.5" },
+    };
+    assert.equal(validateConfiguration(priorInstallation).model.id, DEFAULT_MODEL);
   });
 
   it("rejects the old combined configuration instead of migrating it", () => {

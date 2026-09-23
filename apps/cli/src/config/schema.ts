@@ -2,7 +2,6 @@ import { isAbsolute } from "node:path";
 
 export const CONFIG_VERSION = 1 as const;
 export const DEFAULT_MODEL = "openai-codex/gpt-6-sol";
-const PREVIOUS_DEFAULT_MODEL = "openai-codex/gpt-5.6-sol";
 export const DEFAULT_REASONING = "high" as const;
 export const DEFAULT_REVIEW_TIMEOUT_MS = 20 * 60 * 1000;
 export const DEFAULT_SHELL_COMMAND_TIMEOUT_MS = 2 * 60 * 1000;
@@ -123,8 +122,8 @@ export function validateConfiguration(value: unknown): RevoirConfiguration {
   const model = readObject(root.model, "model", issues);
   if (model !== undefined) checkKeys(model, "model", ["id", "reasoning"], issues);
   const modelId = model === undefined ? undefined : readString(model.id, "model.id", issues);
-  if (modelId !== undefined && modelId !== DEFAULT_MODEL && modelId !== PREVIOUS_DEFAULT_MODEL) {
-    issues.push(`model.id must be ${DEFAULT_MODEL}.`);
+  if (modelId !== undefined && !/^openai-codex\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(modelId)) {
+    issues.push('model.id must use the "openai-codex/<model>" format.');
   }
   const reasoning = model?.reasoning;
   if (
