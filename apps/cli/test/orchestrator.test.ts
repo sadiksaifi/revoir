@@ -9,7 +9,7 @@ import { withRepository, type RevoirPolicy } from "../src/config/policy.js";
 import { createConfiguration } from "../src/config/schema.js";
 import type { ReviewCancellationStore } from "../src/review/cancellation-store.js";
 import type { GitHubReviewEvidence } from "../src/review/evidence.js";
-import type { ReviewFindingV2 } from "../src/review/findings.js";
+import { ReviewBlockedError, type ReviewFindingV2 } from "../src/review/findings.js";
 import type {
   GitHubReviewCheckCompletion,
   GitHubReviewGateway,
@@ -793,6 +793,23 @@ describe("clean review orchestrator", () => {
         title: "Review failed",
         summary:
           "Revoir could not complete this review. See the failure comment or service logs for details.",
+      },
+    ]);
+  });
+
+  it("reports an incomplete review as blocked", async () => {
+    const reviewed = harness({
+      review: async () => {
+        throw new ReviewBlockedError();
+      },
+    });
+
+    await assert.rejects(() => reviewed.orchestrator.review(reference), ReviewBlockedError);
+    assert.deepEqual(reviewed.checkCompletions, [
+      {
+        conclusion: "failure",
+        title: "Review blocked",
+        summary: "Revoir could not complete the review because critical context was unavailable.",
       },
     ]);
   });

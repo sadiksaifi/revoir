@@ -1861,7 +1861,9 @@ describe("GitHub App review gateway", () => {
     };
     const historicalBodies = [
       createReviewPublication("1".repeat(40), [fileFinding]).payload.body!,
-      createReviewPublication("1".repeat(40), [fallbackFinding]).fallbackPayload.body!,
+      createReviewPublication("1".repeat(40), [
+        { ...fallbackFinding, attachment: { kind: "file", path: "source.ts" } },
+      ]).payload.body!,
     ];
 
     await Promise.all(
@@ -2005,7 +2007,7 @@ describe("GitHub App review gateway", () => {
     assert.deepEqual(events, ["DELETE 1", "GET PENDING", "DELETE 2"]);
   });
 
-  it("falls back from rejected inline anchors to one file-level pending review", async () => {
+  it("leaves a rejected inline finding unposted", async () => {
     const creationBodies: unknown[] = [];
     let attempts = 0;
     const fetchImplementation: FetchLike = async (input, init) => {
@@ -2019,10 +2021,7 @@ describe("GitHub App review gateway", () => {
       if (url.endsWith("/pulls/17/reviews") && init?.method === "POST") {
         attempts += 1;
         creationBodies.push(JSON.parse(String(init.body)));
-        return attempts === 1 ? json({ message: "invalid line" }, 422) : json({ id: 91 });
-      }
-      if (url.endsWith("/reviews/91") && init?.method === "DELETE") {
-        return json({ message: "Not Found" }, 404);
+        return json({ message: "invalid line" }, 422);
       }
       throw new Error(`Unexpected request ${url}`);
     };
@@ -2048,19 +2047,13 @@ describe("GitHub App review gateway", () => {
           },
         ],
       },
-      fallbackPayload: {
-        commit_id: "2".repeat(40),
-        body: "validated finding with explicit location",
-      },
     };
-    const pending = await session.createPendingReview(
-      reference,
-      publication,
-      new AbortController().signal,
+    await assert.rejects(
+      () => session.createPendingReview(reference, publication, new AbortController().signal),
+      /pending review creation failed with HTTP 422/u,
     );
-    await pending.delete(new AbortController().signal);
-
-    assert.deepEqual(creationBodies, [publication.payload, publication.fallbackPayload]);
+    assert.equal(attempts, 1);
+    assert.deepEqual(creationBodies, [publication.payload]);
   });
 
   it("rejects invalid pending-review responses and submission states", async () => {
@@ -2100,7 +2093,6 @@ describe("GitHub App review gateway", () => {
     );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
-      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
     };
     await assert.rejects(
       () => session.createPendingReview(reference, publication, new AbortController().signal),
@@ -2159,7 +2151,6 @@ describe("GitHub App review gateway", () => {
     );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
-      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
     };
     const pending = await session.createPendingReview(
       reference,
@@ -2215,7 +2206,6 @@ describe("GitHub App review gateway", () => {
     );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
-      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
     };
     const pending = await session.createPendingReview(
       reference,
@@ -2274,7 +2264,6 @@ describe("GitHub App review gateway", () => {
     );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
-      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
     };
     const pending = await session.createPendingReview(
       reference,
@@ -2340,7 +2329,6 @@ describe("GitHub App review gateway", () => {
     );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
-      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
     };
     const pending = await session.createPendingReview(
       reference,
@@ -2385,7 +2373,6 @@ describe("GitHub App review gateway", () => {
     );
     const publication = {
       payload: { commit_id: "2".repeat(40), body: "finding" },
-      fallbackPayload: { commit_id: "2".repeat(40), body: "finding" },
     };
     const pending = await session.createPendingReview(
       reference,

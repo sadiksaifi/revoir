@@ -151,31 +151,8 @@ describe("Pi clean review adapter", () => {
     assert.equal(sessions.options[0]?.model, "openai-codex/gpt-5.6-sol");
     assert.equal(sessions.options[0]?.reasoning, "high");
     assert.equal(sessions.options[0]?.shellCommandMs, 120_000);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /read, grep, find, ls, and bash/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /login and interactive shell/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /full local/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /AGENTS\.md takes/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /install dependencies/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /prefer non-fixing verification/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /original reviewed HEAD/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /format-write, code generation/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /"version":2/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /P0\|P1\|P2\|P3/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /"defectKind"/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /"reason"/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /renders all review prose locally/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /formatting or lint automation/u);
-    assert.match(
-      sessions.options[0]?.systemPrompt ?? "",
-      /Do not repeat a concern already raised as review feedback/u,
-    );
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /replies and thread resolution/u);
-    assert.match(
-      sessions.options[0]?.systemPrompt ?? "",
-      /linked issue and pull-request bodies and comments as requirements/u,
-    );
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /do not suppress a defect/u);
-    assert.match(sessions.options[0]?.systemPrompt ?? "", /Do not include a fingerprint/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /every eligible changed path/u);
+    assert.match(sessions.options[0]?.systemPrompt ?? "", /"title":"specific defect title"/u);
     assert.equal(sessions.prompts.length, 1);
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.baseSha, "u"));
     assert.match(sessions.prompts[0] ?? "", new RegExp(pullRequest.headSha, "u"));
@@ -197,7 +174,7 @@ describe("Pi clean review adapter", () => {
     assert.equal(sessions.disposed, 1);
   });
 
-  it("returns validated findings and diagnostics from mixed fake-model output", async () => {
+  it("returns validated findings with specific posting prose", async () => {
     const checkout = await mkdtemp(join(tmpdir(), "revoir-pi-findings-"));
     try {
       await writeFile(join(checkout, "source.ts"), "const current = true;\n");
@@ -216,16 +193,9 @@ describe("Pi clean review adapter", () => {
             reason:
               "The new transition can replace the active signal and stall the earlier review.",
             anchor: "const current = true;",
-          },
-          {
-            priority: "P9",
-            path: "source.ts",
-            range: null,
-            defectKind: "correctness",
-            impactKind: "incorrect-result",
-            fixAction: "guard",
-            reason: "The file-level change produces an incorrect result.",
-            anchor: "source.ts",
+            title: "Earlier review can stall",
+            impact: "The earlier review never completes.",
+            fix: "Keep one cancellation signal per review.",
           },
         ],
       });
@@ -258,7 +228,8 @@ index 1111111..2222222 100644
         result.findings[0]?.reason,
         "The new transition can replace the active signal and stall the earlier review.",
       );
-      assert.equal(result.diagnostics.length, 1);
+      assert.equal(result.findings[0]?.title, "Earlier review can stall");
+      assert.equal(result.diagnostics.length, 0);
       assert.equal(sessions.disposed, 1);
     } finally {
       await rm(checkout, { recursive: true, force: true });
@@ -293,6 +264,9 @@ index 1111111..2222222 100644
             fixAction: "guard",
             reason: "The invalid candidate escapes the reviewed repository.",
             anchor: "source.ts",
+            title: "Invalid path",
+            impact: "The path escapes the checkout.",
+            fix: "Use a repository path.",
           },
         ],
       });
@@ -356,6 +330,32 @@ index 1111111..2222222 100644
           new AbortController().signal,
         ),
       /invalid finding envelope/u,
+    );
+    assert.equal(sessions.disposed, 1);
+  });
+
+  it("does not turn blocked review context into a clean result", async () => {
+    const sessions = new FakeSessionFactory();
+    sessions.result = JSON.stringify({
+      version: 2,
+      findings: [],
+      blocked: "The required repository guidance cannot be read.",
+    });
+    const engine = new PiReviewEngine(
+      { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      sessions,
+    );
+    await assert.rejects(
+      () =>
+        engine.review(
+          {
+            reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
+            pullRequest,
+            workspace,
+          },
+          new AbortController().signal,
+        ),
+      /Review blocked/u,
     );
     assert.equal(sessions.disposed, 1);
   });

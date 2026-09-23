@@ -34,6 +34,28 @@ function finding(overrides: Partial<ReviewFindingV2> = {}): ReviewFindingV2 {
 }
 
 describe("findings-only review publication", () => {
+  it("posts specific proof, impact, fix, and runtime attribution inline", () => {
+    const candidate = finding({
+      title: "Earlier review can stall",
+      impact: "The first review never completes.",
+      fix: "Keep a cancellation signal for each review.",
+    });
+    const publication = createReviewPublication(
+      "1".repeat(40),
+      [candidate],
+      [],
+      "openai-codex/gpt-5.6-sol",
+    );
+    const comment = publication.payload.comments?.[0]?.body ?? "";
+    assert.match(comment, /^\*\*P1: Earlier review can stall\*\*$/mu);
+    assert.match(comment, /A second submission replaces/u);
+    assert.match(comment, /The first review never completes/u);
+    assert.match(comment, /\*\*Fix:\*\* Keep a cancellation signal for each review/u);
+    assert.match(comment, /Reviewed by Pi using gpt/u);
+    assert.doesNotMatch(comment, /- Evidence:|- Location:|Fix direction:/u);
+    assert.match(comment, /<!-- revoir:finding:v1:/u);
+  });
+
   it("builds exact inline coordinates with only a stable hidden run marker", () => {
     const single = finding();
     const multiline = finding({
@@ -77,7 +99,7 @@ describe("findings-only review publication", () => {
     assert.equal("event" in publication.payload, false);
   });
 
-  it("places only unattachable findings in the same pending-review body", () => {
+  it("retains legacy file findings in the pending-review body", () => {
     const inline = finding();
     const file = finding({
       fingerprint: "c".repeat(64),
@@ -98,11 +120,6 @@ describe("findings-only review publication", () => {
       )}`,
     );
     assert.equal(publication.payload.comments?.length, 1);
-    assert.equal(
-      publication.fallbackPayload.body,
-      `${renderFileFinding(inline)}\n\n${renderFileFinding(file)}\n\n<!-- revoir:body-state:v1 -->\n<!-- revoir:body-finding:v1:${inline.fingerprint} -->\n<!-- revoir:body-finding:v1:${file.fingerprint} -->\n\n${renderRunMarker("2".repeat(40))}`,
-    );
-    assert.equal("comments" in publication.fallbackPayload, false);
   });
 
   it("publishes the complete body-finding state with a delta review", () => {

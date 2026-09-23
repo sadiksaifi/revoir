@@ -2404,20 +2404,11 @@ class InstallationSession implements GitHubReviewSession {
     signal: AbortSignal,
   ): Promise<GitHubPendingReview> {
     const response = await this.#createReview(reference, publication.payload, signal);
-    let reviewResponse = response;
-    if (
-      !response.ok &&
-      response.status === 422 &&
-      publication.payload.comments !== undefined &&
-      publication.payload.comments.length > 0
-    ) {
-      reviewResponse = await this.#createReview(reference, publication.fallbackPayload, signal);
-    }
-    if (!reviewResponse.ok) {
-      throw new Error(`GitHub pending review creation failed with HTTP ${reviewResponse.status}.`);
+    if (!response.ok) {
+      throw new Error(`GitHub pending review creation failed with HTTP ${response.status}.`);
     }
     const created = record(
-      await responseJson(reviewResponse, "pending review creation", signal),
+      await responseJson(response, "pending review creation", signal),
       "pending review",
     );
     const id = positiveInteger(created.id, "pending review id");

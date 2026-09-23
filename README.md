@@ -250,6 +250,12 @@ Revoir publishes a completed GitHub check and either non-blocking review finding
 clean result. If the pull-request head changes during review, the stale result is
 discarded.
 
+Revoir posts material P0-P2 findings on changed lines. Each comment names the defect,
+explains the failure and impact, gives a fix direction, and identifies Pi and the
+configured model. A review with missing critical context, invalid finding prose, or
+no honest changed-line anchor fails instead of reporting a clean result. GitHub
+rejection of an inline comment does not turn it into a review-body finding.
+
 ## Operations and diagnostics
 
 ```bash

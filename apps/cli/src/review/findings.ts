@@ -68,6 +68,13 @@ export class FindingContractError extends Error {
   }
 }
 
+export class ReviewBlockedError extends FindingContractError {
+  constructor() {
+    super("Review blocked because critical context was unavailable.");
+    this.name = "ReviewBlockedError";
+  }
+}
+
 function safeRepositoryPath(value: string): string {
   if (
     posix.isAbsolute(value) ||
@@ -335,6 +342,7 @@ export async function validateModelReviewOutput(
     diff: string;
     signal?: AbortSignal;
     shellCommandMs?: number;
+    requirePostableProse?: boolean;
   },
 ): Promise<ValidatedReviewOutput> {
   let envelope;
@@ -349,12 +357,28 @@ export async function validateModelReviewOutput(
     );
   }
 
+  if (envelope.blocked !== undefined) {
+    throw new ReviewBlockedError();
+  }
+
   const diff = parseGitDiff(options.diff);
   const diagnostics: FindingDiagnostic[] = [];
   const candidates: ValidatedCandidate[] = [];
   for (const [index, candidate] of envelope.findings.entries()) {
     try {
       const modelFinding = parseModelFinding(candidate, index);
+      if (options.requirePostableProse === true) {
+        if (modelFinding.priority === "P3") {
+          throw new Error("P3 is not a postable review priority.");
+        }
+        if (
+          modelFinding.title === undefined ||
+          modelFinding.impact === undefined ||
+          modelFinding.fix === undefined
+        ) {
+          throw new Error("title, impact, and fix are required for a posted finding.");
+        }
+      }
       const repositoryPath = safeRepositoryPath(modelFinding.path);
       if (!classifyReviewFile(repositoryPath).detailedReview) {
         throw new Error("path is excluded from detailed review by the fixed file policy.");
@@ -376,6 +400,9 @@ export async function validateModelReviewOutput(
         throw new Error("range is not a contiguous changed-line range in the reviewed diff.");
       }
       const anchoredFinding = validateTechnicalAnchor(modelFinding, file);
+      if (options.requirePostableProse === true && anchoredFinding.range === null) {
+        throw new Error("finding has no honest changed-line anchor.");
+      }
       const context = anchorOccurrenceContext(file, anchoredFinding);
       candidates.push({
         index,
@@ -441,9 +468,14 @@ export async function validateModelReviewOutput(
     });
   }
 
-  if (envelope.findings.length > 0 && findings.length === 0) {
+  if (
+    (envelope.findings.length > 0 && findings.length === 0) ||
+    (options.requirePostableProse === true && diagnostics.some((entry) => entry.code === "invalid"))
+  ) {
     throw new FindingContractError(
-      `Pi returned no publishable findings (${diagnostics.length} rejected).`,
+      findings.length === 0
+        ? `Pi returned no publishable findings (${diagnostics.length} rejected).`
+        : `Pi returned an incomplete finding set (${diagnostics.length} rejected).`,
       diagnostics,
     );
   }

@@ -19,7 +19,6 @@ export interface GitHubReviewPayload {
 
 export interface ReviewPublication {
   payload: GitHubReviewPayload;
-  fallbackPayload: GitHubReviewPayload;
 }
 
 function code(value: string): string {
@@ -107,6 +106,34 @@ function details(finding: ReviewFindingV2, location?: string): string {
   ].join("\n");
 }
 
+function inlineDetails(finding: ReviewFindingV2, modelId: string): string {
+  if (finding.title === undefined || finding.impact === undefined || finding.fix === undefined) {
+    return details(finding);
+  }
+  const separator = modelId.indexOf("/");
+  if (separator < 1 || separator === modelId.length - 1) {
+    throw new Error("The configured review model identifier is invalid.");
+  }
+  const modelSlug = modelId.slice(separator + 1);
+  const markers = [
+    `<!-- revoir:finding:v1:${finding.fingerprint} -->`,
+    ...(finding.fingerprintAliases ?? []).map(
+      (alias) => `<!-- revoir:finding-alias:v1:${finding.fingerprint}:${alias} -->`,
+    ),
+  ];
+  return [
+    `**${finding.priority}: ${markdownText(finding.title)}**`,
+    "",
+    `${markdownText(finding.reason)} ${markdownText(finding.impact)}`,
+    "",
+    `**Fix:** ${markdownText(finding.fix)}`,
+    "",
+    `Reviewed by Pi using ${markdownText(modelSlug)}.`,
+    "",
+    ...markers,
+  ].join("\n");
+}
+
 function explicitLocation(finding: ReviewFindingV2): string {
   if (finding.range === null) {
     return finding.path;
@@ -118,8 +145,8 @@ function explicitLocation(finding: ReviewFindingV2): string {
   return `${finding.path}:${lines} (${finding.range.side})`;
 }
 
-export function renderInlineFinding(finding: ReviewFindingV2): string {
-  return details(finding);
+export function renderInlineFinding(finding: ReviewFindingV2, modelId?: string): string {
+  return modelId === undefined ? details(finding) : inlineDetails(finding, modelId);
 }
 
 export function renderFileFinding(finding: ReviewFindingV2): string {
@@ -157,6 +184,7 @@ export function createReviewPublication(
   currentBodyFindings: readonly ReviewFindingV2[] = findings.filter(
     (finding) => finding.attachment.kind === "file",
   ),
+  modelId?: string,
 ): ReviewPublication {
   const comments: GitHubInlineReviewComment[] = [];
   const bodyFindings: ReviewFindingV2[] = [];
@@ -172,7 +200,7 @@ export function createReviewPublication(
               start_line: finding.attachment.startLine,
               start_side: finding.attachment.side,
             }),
-        body: renderInlineFinding(finding),
+        body: renderInlineFinding(finding, modelId),
       });
     } else {
       bodyFindings.push(finding);
@@ -185,23 +213,11 @@ export function createReviewPublication(
     bodyState(currentBodyFindings),
     marker,
   ].join("\n\n");
-  const fallbackBodyFindings = new Map(
-    currentBodyFindings.concat(findings).map((finding) => [finding.fingerprint, finding]),
-  );
-  const fallbackBody = [
-    ...(findings.length === 0 ? [] : [findings.map(renderFileFinding).join("\n\n")]),
-    bodyState([...fallbackBodyFindings.values()]),
-    marker,
-  ].join("\n\n");
   return {
     payload: {
       commit_id: commitId,
       body,
       ...(comments.length === 0 ? {} : { comments }),
-    },
-    fallbackPayload: {
-      commit_id: commitId,
-      body: fallbackBody,
     },
   };
 }

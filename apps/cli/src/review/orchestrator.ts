@@ -8,7 +8,7 @@ import {
 import type { RevoirPolicy } from "../config/policy.js";
 import type { RevoirConfiguration } from "../config/schema.js";
 import { FileReviewCancellationStore, type ReviewCancellationStore } from "./cancellation-store.js";
-import type { FindingDiagnostic } from "./findings.js";
+import { ReviewBlockedError, type FindingDiagnostic } from "./findings.js";
 import {
   GitHubAppReviewGateway,
   PendingReviewUncertainError,
@@ -268,6 +268,13 @@ function reviewCheckCompletion(
         conclusion: "cancelled",
         title: "Review cancelled",
         summary: "The Revoir process stopped before this review could finish.",
+      };
+    }
+    if (failure instanceof ReviewBlockedError) {
+      return {
+        conclusion: "failure",
+        title: "Review blocked",
+        summary: "Revoir could not complete the review because critical context was unavailable.",
       };
     }
     return {
@@ -688,6 +695,7 @@ export class CleanReviewOrchestrator implements ManualReviewService {
                   pullRequest.headSha,
                   reconciliation.netNewFindings,
                   reconciliation.currentBodyFindings,
+                  this.#configuration.model.id,
                 );
                 pendingReviewCleanup = createTerminalHandle(() =>
                   github.removeOwnPendingReview(reference, terminalSignal),

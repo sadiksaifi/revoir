@@ -59,11 +59,15 @@ export interface ModelFindingV2 {
   fixAction: FindingFixAction;
   reason: string;
   anchor: string;
+  title?: string;
+  impact?: string;
+  fix?: string;
 }
 
 export interface ModelReviewOutputV2 {
   version: typeof FINDING_CONTRACT_VERSION;
   findings: readonly unknown[];
+  blocked?: string;
 }
 
 export interface FindingV2 extends ModelFindingV2 {
@@ -228,7 +232,11 @@ export function parseModelReviewOutput(value: string): ModelReviewOutputV2 {
     throw new FindingSchemaError("Review output must be valid JSON.");
   }
   const envelope = record(parsed, "review output");
-  exactKeys(envelope, ["version", "findings"], "review output");
+  exactKeys(
+    envelope,
+    ["version", "findings", ...(envelope.blocked === undefined ? [] : ["blocked"])],
+    "review output",
+  );
   if (typeof envelope.version === "string") {
     contractString(envelope.version, "review output.version");
   }
@@ -243,7 +251,18 @@ export function parseModelReviewOutput(value: string): ModelReviewOutputV2 {
   if (envelope.findings.length > 100) {
     throw new FindingSchemaError("review output.findings may contain at most 100 findings.");
   }
-  return { version: FINDING_CONTRACT_VERSION, findings: envelope.findings };
+  const blocked =
+    envelope.blocked === undefined
+      ? undefined
+      : reasonString(envelope.blocked, "review output.blocked");
+  if (blocked !== undefined && envelope.findings.length > 0) {
+    throw new FindingSchemaError("review output cannot contain findings when blocked.");
+  }
+  return {
+    version: FINDING_CONTRACT_VERSION,
+    findings: envelope.findings,
+    ...(blocked === undefined ? {} : { blocked }),
+  };
 }
 
 export function parseModelFinding(value: unknown, index: number): ModelFindingV2 {
@@ -251,12 +270,27 @@ export function parseModelFinding(value: unknown, index: number): ModelFindingV2
   const finding = record(value, path);
   exactKeys(
     finding,
-    ["priority", "path", "range", "defectKind", "impactKind", "fixAction", "reason", "anchor"],
+    [
+      "priority",
+      "path",
+      "range",
+      "defectKind",
+      "impactKind",
+      "fixAction",
+      "reason",
+      "anchor",
+      ...["title", "impact", "fix"].filter((key) => key in finding),
+    ],
     path,
   );
   const priority = contractString(finding.priority, `${path}.priority`) as FindingPriority;
   if (!PRIORITIES.has(priority)) {
     throw new FindingSchemaError(`${path}.priority must be one of P0, P1, P2, or P3.`);
+  }
+  const title =
+    finding.title === undefined ? undefined : reasonString(finding.title, `${path}.title`);
+  if (title !== undefined && [...title].length > 120) {
+    throw new FindingSchemaError(`${path}.title must contain at most 120 characters.`);
   }
   return {
     priority,
@@ -267,5 +301,10 @@ export function parseModelFinding(value: unknown, index: number): ModelFindingV2
     fixAction: enumString(finding.fixAction, `${path}.fixAction`, FIX_ACTIONS, "fix action"),
     reason: reasonString(finding.reason, `${path}.reason`),
     anchor: anchorString(finding.anchor, `${path}.anchor`, MAX_ANCHOR_LENGTH),
+    ...(title === undefined ? {} : { title }),
+    ...(finding.impact === undefined
+      ? {}
+      : { impact: reasonString(finding.impact, `${path}.impact`) }),
+    ...(finding.fix === undefined ? {} : { fix: reasonString(finding.fix, `${path}.fix`) }),
   };
 }

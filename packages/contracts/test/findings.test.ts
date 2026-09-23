@@ -18,6 +18,31 @@ function finding(priority = "P1") {
 }
 
 describe("finding contract v2", () => {
+  it("accepts specific posting prose and an explicit blocked result", () => {
+    const candidate = {
+      ...finding(),
+      title: "Review can stall",
+      impact: "The first review never completes.",
+      fix: "Retain a signal for each review.",
+    };
+    assert.deepEqual(parseModelFinding(candidate, 0), candidate);
+    assert.deepEqual(
+      parseModelReviewOutput('{"version":2,"findings":[],"blocked":"Missing instructions"}'),
+      { version: 2, findings: [], blocked: "Missing instructions" },
+    );
+    assert.throws(
+      () =>
+        parseModelReviewOutput(
+          JSON.stringify({ version: 2, findings: [candidate], blocked: "Missing instructions" }),
+        ),
+      FindingSchemaError,
+    );
+    assert.throws(
+      () => parseModelFinding({ ...candidate, title: "x".repeat(121) }, 0),
+      FindingSchemaError,
+    );
+  });
+
   it("parses clean output and all supported priorities", () => {
     assert.deepEqual(parseModelReviewOutput('{"version":2,"findings":[]}'), {
       version: 2,

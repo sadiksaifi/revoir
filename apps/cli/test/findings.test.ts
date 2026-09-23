@@ -140,6 +140,38 @@ function output(findings: readonly unknown[], extra: Record<string, unknown> = {
 describe("finding validation", () => {
   let checkout = "";
 
+  it("requires supported priority, specific prose, and an inline anchor for posting", async () => {
+    const prose = {
+      title: "Review can stall",
+      impact: "The pending review never completes.",
+      fix: "Keep each review's cancellation signal.",
+    };
+    const cases = [
+      finding({ priority: "P3", ...prose }),
+      finding(),
+      finding({ path: "logo.png", range: null, ...prose }),
+    ];
+    await Promise.all(
+      cases.map((candidate) =>
+        assert.rejects(
+          () =>
+            validateModelReviewOutput(output([candidate]), {
+              checkout,
+              diff: DIFF,
+              requirePostableProse: true,
+            }),
+          FindingContractError,
+        ),
+      ),
+    );
+    const accepted = await validateModelReviewOutput(output([finding(prose)]), {
+      checkout,
+      diff: DIFF,
+      requirePostableProse: true,
+    });
+    assert.equal(accepted.findings[0]?.title, "Review can stall");
+  });
+
   before(async () => {
     checkout = await mkdtemp(join(tmpdir(), "revoir-findings-"));
     await Promise.all([
