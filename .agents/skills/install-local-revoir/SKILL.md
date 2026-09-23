@@ -14,13 +14,14 @@ Require explicit authorization to replace the executable and restart the live da
    mise exec -- pnpm --filter cli release:macos
    ```
 
-3. Verify the metadata path printed by the release command names the checkout's `git rev-parse HEAD`, then atomically replace the executable:
+3. Read only `build.commit` from the printed metadata file. Require it to equal `git rev-parse HEAD`. Set `artifact` to the printed artifact path, then atomically replace the executable:
 
    ```bash
    mise exec -- pnpm --filter cli release:macos:install
    ```
 
-4. Restart the existing service with `~/.local/bin/revoir stop` followed by `~/.local/bin/revoir start`. Do not rerun setup or rewrite configuration.
-5. Require both `~/.local/bin/revoir diagnose` and `~/.local/bin/revoir status` to pass. Report the installed commit and healthy PID.
+4. Require `cmp -s "$artifact" "$HOME/.local/bin/revoir"` and `~/.local/bin/revoir --version` to pass. The comparison proves the installed executable is the artifact built from the recorded commit.
+5. Restart the existing service with `~/.local/bin/revoir stop` followed by `~/.local/bin/revoir start`. Preserve configuration, credentials, and XDG data.
+6. Require both `~/.local/bin/revoir diagnose` and `~/.local/bin/revoir status` to pass. Report the installed commit and healthy PID.
 
 Stop on the first build or install failure. If restart or health verification fails, inspect `~/.local/bin/revoir logs` and report the failure without changing configuration or credentials.
