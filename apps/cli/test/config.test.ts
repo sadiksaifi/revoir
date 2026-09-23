@@ -149,10 +149,23 @@ describe("greenfield configuration", () => {
       () =>
         validateConfiguration({
           ...configuration,
-          model: { ...configuration.model, id: "openai-codex/gpt-6-sol" },
+          model: { ...configuration.model, id: "openai-codex/gpt-6-astra" },
         }),
-      /model\.id must be openai-codex\/gpt-5\.6-sol/u,
+      /model\.id must be openai-codex\/gpt-6-sol/u,
     );
+  });
+
+  it("loads the previous pinned model as the current build model", () => {
+    const configuration = testConfiguration({
+      cacheDir: "/cache",
+      stateDir: "/state",
+      dataDir: "/data",
+    });
+    const priorInstallation = {
+      ...configuration,
+      model: { ...configuration.model, id: "openai-codex/gpt-5.6-sol" },
+    };
+    assert.equal(validateConfiguration(priorInstallation).model.id, "openai-codex/gpt-6-sol");
   });
 
   it("rejects the old combined configuration instead of migrating it", () => {

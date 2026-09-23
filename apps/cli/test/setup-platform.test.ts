@@ -228,7 +228,7 @@ describe("default greenfield setup platform", () => {
     });
 
     await assert.rejects(
-      setup.ensurePiAuthentication("openai-codex/gpt-5.6-sol", "high"),
+      setup.ensurePiAuthentication("openai-codex/gpt-6-sol", "high"),
       browserFailure,
     );
     assert.equal(loginFinished, true);

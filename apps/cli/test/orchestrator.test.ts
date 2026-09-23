@@ -1965,7 +1965,7 @@ describe("clean review orchestrator", () => {
         }),
     };
     const engine = new PiReviewEngine(
-      { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      { id: "openai-codex/gpt-6-sol", reasoning: "high" },
       sessions,
     );
     const timedOut = harness({

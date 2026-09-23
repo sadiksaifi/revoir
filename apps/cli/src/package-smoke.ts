@@ -445,7 +445,7 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
       },
     },
     defaults: {
-      model: { id: "openai-codex/gpt-5.6-sol", reasoning: "high" },
+      model: { id: "openai-codex/gpt-6-sol", reasoning: "high" },
       service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
       timeouts: { reviewMs: 1_200_000, shellCommandMs: 120_000 },
       paths: { cacheDir: paths.cacheDir, stateDir: paths.stateDir, dataDir: paths.dataDir },

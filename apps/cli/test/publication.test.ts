@@ -44,7 +44,7 @@ describe("findings-only review publication", () => {
       "1".repeat(40),
       [candidate],
       [],
-      "openai-codex/gpt-5.6-sol",
+      "openai-codex/gpt-6-sol",
     );
     const comment = publication.payload.comments?.[0]?.body ?? "";
     assert.match(comment, /^\*\*P1: Earlier review can stall\*\*$/mu);
@@ -53,7 +53,7 @@ describe("findings-only review publication", () => {
     assert.match(comment, /\*\*Fix:\*\* Keep a cancellation signal for each review/u);
     assert.ok(
       comment.endsWith(
-        "> Reviewed with [Revoir](https://github.com/sadiksaifi/revoir) using [openai/gpt-5.6-sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol)",
+        "> Reviewed with [Revoir](https://github.com/sadiksaifi/revoir) using [openai/gpt-6-sol](https://developers.openai.com/api/docs/models/gpt-6-sol)",
       ),
     );
     assert.doesNotMatch(comment, /- Evidence:|- Location:|Fix direction:/u);
@@ -64,11 +64,11 @@ describe("findings-only review publication", () => {
       "1".repeat(40),
       [candidate],
       [],
-      "openai-codex/gpt-6-sol",
+      "openai-codex/gpt-6-astra",
     );
     assert.ok(
       (changedModel.payload.comments?.[0]?.body ?? "").endsWith(
-        "> Reviewed with [Revoir](https://github.com/sadiksaifi/revoir) using [openai/gpt-6-sol](https://developers.openai.com/api/docs/models/gpt-6-sol)",
+        "> Reviewed with [Revoir](https://github.com/sadiksaifi/revoir) using [openai/gpt-6-astra](https://developers.openai.com/api/docs/models/gpt-6-astra)",
       ),
     );
   });
