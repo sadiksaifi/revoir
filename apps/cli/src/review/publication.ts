@@ -106,15 +106,17 @@ function details(finding: ReviewFindingV2, location?: string): string {
   ].join("\n");
 }
 
+const REVIEW_AGENT_NAME = "Revoir";
+
 function inlineDetails(finding: ReviewFindingV2, modelId: string): string {
   if (finding.title === undefined || finding.impact === undefined || finding.fix === undefined) {
     return details(finding);
   }
-  const separator = modelId.indexOf("/");
-  if (separator < 1 || separator === modelId.length - 1) {
+  const model = /^openai-codex\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u.exec(modelId);
+  if (model === null) {
     throw new Error("The configured review model identifier is invalid.");
   }
-  const modelSlug = modelId.slice(separator + 1);
+  const modelSlug = model[1]!;
   const markers = [
     `<!-- revoir:finding:v1:${finding.fingerprint} -->`,
     ...(finding.fingerprintAliases ?? []).map(
@@ -128,7 +130,7 @@ function inlineDetails(finding: ReviewFindingV2, modelId: string): string {
     "",
     `**Fix:** ${markdownText(finding.fix)}`,
     "",
-    `Reviewed by Pi using ${markdownText(modelSlug)}.`,
+    `Reviewed by ${REVIEW_AGENT_NAME} using ${modelSlug}.`,
     "",
     ...markers,
   ].join("\n");

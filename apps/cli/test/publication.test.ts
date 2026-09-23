@@ -51,9 +51,20 @@ describe("findings-only review publication", () => {
     assert.match(comment, /A second submission replaces/u);
     assert.match(comment, /The first review never completes/u);
     assert.match(comment, /\*\*Fix:\*\* Keep a cancellation signal for each review/u);
-    assert.match(comment, /Reviewed by Pi using gpt/u);
+    assert.match(comment, /^Reviewed by Revoir using gpt-5\.6-sol\.$/mu);
     assert.doesNotMatch(comment, /- Evidence:|- Location:|Fix direction:/u);
     assert.match(comment, /<!-- revoir:finding:v1:/u);
+
+    const changedModel = createReviewPublication(
+      "1".repeat(40),
+      [candidate],
+      [],
+      "openai-codex/gpt-6-sol",
+    );
+    assert.match(
+      changedModel.payload.comments?.[0]?.body ?? "",
+      /^Reviewed by Revoir using gpt-6-sol\.$/mu,
+    );
   });
 
   it("builds exact inline coordinates with only a stable hidden run marker", () => {

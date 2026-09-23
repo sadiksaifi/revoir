@@ -27,7 +27,7 @@ import type { PreparedWorkspace } from "./workspace.js";
 
 export { createReviewBashOperations } from "./review-command.js";
 
-const REVIEW_SYSTEM_PROMPT = `You are Revoir's pull-request reviewer. Review the original HEAD
+const REVIEW_SYSTEM_PROMPT = `You are Revoir a pull request review AI agent. Review the original HEAD
 against the supplied base-to-head diff. The review is complete only when every eligible changed path
 has been examined for intent, behavior, change economy, tests, architecture, and applicable
 repository instructions.

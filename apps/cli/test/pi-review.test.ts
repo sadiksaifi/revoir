@@ -151,6 +151,10 @@ describe("Pi clean review adapter", () => {
     assert.equal(sessions.options[0]?.model, "openai-codex/gpt-5.6-sol");
     assert.equal(sessions.options[0]?.reasoning, "high");
     assert.equal(sessions.options[0]?.shellCommandMs, 120_000);
+    assert.match(
+      sessions.options[0]?.systemPrompt ?? "",
+      /^You are Revoir a pull request review AI agent\./u,
+    );
     assert.match(sessions.options[0]?.systemPrompt ?? "", /every eligible changed path/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /"title":"specific defect title"/u);
     assert.equal(sessions.prompts.length, 1);

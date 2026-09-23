@@ -251,8 +251,8 @@ clean result. If the pull-request head changes during review, the stale result i
 discarded.
 
 Revoir posts material P0-P2 findings on changed lines. Each comment names the defect,
-explains the failure and impact, gives a fix direction, and identifies Pi and the
-configured model. A review with missing critical context, invalid finding prose, or
+explains the failure and impact, gives a fix direction, and identifies Revoir and the
+model used for that review. A review with missing critical context, invalid finding prose, or
 no honest changed-line anchor fails instead of reporting a clean result. GitHub
 rejection of an inline comment does not turn it into a review-body finding.
 
