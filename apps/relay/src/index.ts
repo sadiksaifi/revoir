@@ -28,7 +28,7 @@ export interface RelayEnvironment {
 }
 
 const SIGNATURE = /^sha256=([0-9a-f]{64})$/u;
-const REVIEW_COMMAND = /^@revoirapp[\t ]+review$/iu;
+const REVIEW_COMMAND = /^@revoirai[\t ]+review$/iu;
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
