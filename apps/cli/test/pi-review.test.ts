@@ -181,7 +181,7 @@ describe("Pi clean review adapter", () => {
     assert.equal(sessions.options[0]?.shellCommandMs, 120_000);
     assert.match(
       sessions.options[0]?.systemPrompt ?? "",
-      /^You are Revoir a pull request review AI agent\./u,
+      /^You are Revoir, a pull request review agent\./u,
     );
     assert.match(sessions.options[0]?.systemPrompt ?? "", /every eligible changed path/u);
     assert.match(sessions.options[0]?.systemPrompt ?? "", /"title":"specific defect title"/u);
