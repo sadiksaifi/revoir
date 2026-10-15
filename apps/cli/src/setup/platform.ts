@@ -207,6 +207,7 @@ interface PiAuthenticationRuntime {
       prompt(prompt: { message: string }): Promise<string>;
       notify(event: { type: string; url?: string; verificationUri?: string }): void;
     },
+    options?: { getDeviceId(): string; agentName: string },
   ): Promise<void>;
 }
 
@@ -400,21 +401,30 @@ export class DefaultSetupPlatform implements SetupPlatform {
         ),
       );
     };
-    await runtime.login(provider, "oauth", {
-      prompt: async (prompt) => this.#secretPrompt(`${prompt.message}: `),
-      notify: (event) => {
-        if (event.type === "auth_url" && typeof event.url === "string") {
-          openBrowser(event.url);
-        } else if (event.type === "device_code" && typeof event.verificationUri === "string") {
-          openBrowser(event.verificationUri);
-        }
+    const { SettingsManager } = await import("@earendil-works/pi-coding-agent");
+    await runtime.login(
+      provider,
+      "oauth",
+      {
+        prompt: async (prompt) => this.#secretPrompt(`${prompt.message}: `),
+        notify: (event) => {
+          if (event.type === "auth_url" && typeof event.url === "string") {
+            openBrowser(event.url);
+          } else if (event.type === "device_code" && typeof event.verificationUri === "string") {
+            openBrowser(event.verificationUri);
+          }
+        },
       },
-    });
+      {
+        getDeviceId: () => SettingsManager.create(process.cwd()).getOrCreateDeviceId(),
+        agentName: "Revoir",
+      },
+    );
     const browserResults = await Promise.all(browserOperations);
     const browserFailure = browserResults.find(({ error }) => error !== undefined);
     if (browserFailure?.error !== undefined) throw browserFailure.error;
     if ((await runtime.checkAuth(provider))?.type !== "oauth") {
-      throw new Error("Pi OpenAI Codex authentication did not complete.");
+      throw new Error("Pi OpenAI authentication did not complete.");
     }
   }
 

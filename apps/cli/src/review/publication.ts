@@ -112,7 +112,7 @@ function inlineDetails(finding: ReviewFindingV2, modelId: string): string {
   if (finding.title === undefined || finding.impact === undefined || finding.fix === undefined) {
     return details(finding);
   }
-  const model = /^openai-codex\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u.exec(modelId);
+  const model = /^openai\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u.exec(modelId);
   if (model === null) {
     throw new Error("The configured review model identifier is invalid.");
   }

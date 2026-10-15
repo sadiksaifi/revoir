@@ -202,6 +202,31 @@ describe("default greenfield setup platform", () => {
     );
   });
 
+  it("reuses the existing OpenAI login without opening a browser", async () => {
+    const setup = platform({
+      process: new FakeProcess(() => ({ stdout: "", stderr: "" })),
+      browserOpen: async () => {
+        assert.fail("An existing OpenAI login must not reopen authorization.");
+      },
+      createPiRuntime: async () => ({
+        getModel(provider, model) {
+          assert.equal(provider, "openai");
+          assert.equal(model, "gpt-6.1-sol");
+          return { reasoning: true };
+        },
+        async checkAuth(provider) {
+          assert.equal(provider, "openai");
+          return { type: "oauth" };
+        },
+        async login() {
+          assert.fail("An existing OpenAI login must be reused.");
+        },
+      }),
+    });
+
+    await setup.ensurePiAuthentication("openai/gpt-6.1-sol", "high");
+  });
+
   it("handles a rejected OAuth browser handoff while login is still active", async () => {
     const browserFailure = new Error("browser unavailable");
     let authenticationChecks = 0;
@@ -228,7 +253,7 @@ describe("default greenfield setup platform", () => {
     });
 
     await assert.rejects(
-      setup.ensurePiAuthentication("openai-codex/gpt-6-sol", "high"),
+      setup.ensurePiAuthentication("openai/gpt-6.1-sol", "high"),
       browserFailure,
     );
     assert.equal(loginFinished, true);

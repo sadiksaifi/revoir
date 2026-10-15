@@ -147,7 +147,7 @@ function setup(state: MemorySetupState, setupPlatform: SetupPlatform) {
     platform: setupPlatform,
     state,
     defaults: {
-      model: { id: "openai-codex/gpt-6-sol", reasoning: "high" },
+      model: { id: "openai/gpt-6.1-sol", reasoning: "high" },
       service: { executablePath: "/Users/test/.local/share/mise/shims:/usr/bin:/bin" },
       timeouts: { reviewMs: 1_200_000, shellCommandMs: 120_000 },
       paths: { cacheDir: "/cache", stateDir: "/state", dataDir: "/data" },

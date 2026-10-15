@@ -6,9 +6,13 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { promisify } from "node:util";
 
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+
+import { DEFAULT_MODEL, DEFAULT_REASONING } from "../src/config/schema.js";
 import { FindingContractError } from "../src/review/findings.js";
 import {
   PiReviewEngine,
+  SdkPiSessionFactory,
   type PiSession,
   type PiSessionFactory,
   type PiSessionOptions,
@@ -81,12 +85,36 @@ class FakeSessionFactory implements PiSessionFactory {
 }
 
 describe("Pi clean review adapter", () => {
+  it("creates the pinned review session from the bundled catalog without network or user state", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "revoir-pinned-model-"));
+    try {
+      const sessions = new SdkPiSessionFactory(
+        ModelRuntime.create({
+          authPath: join(checkout, "auth.json"),
+          modelsPath: null,
+          modelsStorePath: join(checkout, "models-cache.json"),
+          allowModelNetwork: false,
+        }),
+      );
+      const session = await sessions.create(
+        {
+          cwd: checkout,
+          model: DEFAULT_MODEL,
+          reasoning: DEFAULT_REASONING,
+          shellCommandMs: 5_000,
+          systemPrompt: "Review the supplied diff.",
+        },
+        new AbortController().signal,
+      );
+      await session.dispose();
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
+
   it("creates exactly one in-memory review session with Revoir model settings", async () => {
     const sessions = new FakeSessionFactory();
-    const engine = new PiReviewEngine(
-      { id: "openai-codex/gpt-6-sol", reasoning: "high" },
-      sessions,
-    );
+    const engine = new PiReviewEngine({ id: "openai/gpt-6.1-sol", reasoning: "high" }, sessions);
     await engine.review(
       {
         reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
@@ -148,7 +176,7 @@ describe("Pi clean review adapter", () => {
 
     assert.equal(sessions.options.length, 1);
     assert.equal(sessions.options[0]?.cwd, workspace.checkout);
-    assert.equal(sessions.options[0]?.model, "openai-codex/gpt-6-sol");
+    assert.equal(sessions.options[0]?.model, "openai/gpt-6.1-sol");
     assert.equal(sessions.options[0]?.reasoning, "high");
     assert.equal(sessions.options[0]?.shellCommandMs, 120_000);
     assert.match(
@@ -203,10 +231,7 @@ describe("Pi clean review adapter", () => {
           },
         ],
       });
-      const engine = new PiReviewEngine(
-        { id: "openai-codex/gpt-6-sol", reasoning: "high" },
-        sessions,
-      );
+      const engine = new PiReviewEngine({ id: "openai/gpt-6.1-sol", reasoning: "high" }, sessions);
       const result = await engine.review(
         {
           reference: parsePullRequestUrl("https://github.com/owner/repository/pull/17"),
@@ -274,10 +299,7 @@ index 1111111..2222222 100644
           },
         ],
       });
-      const engine = new PiReviewEngine(
-        { id: "openai-codex/gpt-6-sol", reasoning: "high" },
-        sessions,
-      );
+      const engine = new PiReviewEngine({ id: "openai/gpt-6.1-sol", reasoning: "high" }, sessions);
 
       await assert.rejects(
         () =>
@@ -319,10 +341,7 @@ index 1111111..2222222 100644
   it("rejects unknown contract versions", async () => {
     const sessions = new FakeSessionFactory();
     sessions.result = '{"version":1,"findings":[]}';
-    const engine = new PiReviewEngine(
-      { id: "openai-codex/gpt-6-sol", reasoning: "high" },
-      sessions,
-    );
+    const engine = new PiReviewEngine({ id: "openai/gpt-6.1-sol", reasoning: "high" }, sessions);
     await assert.rejects(
       () =>
         engine.review(
@@ -345,10 +364,7 @@ index 1111111..2222222 100644
       findings: [],
       blocked: "The required repository guidance cannot be read.",
     });
-    const engine = new PiReviewEngine(
-      { id: "openai-codex/gpt-6-sol", reasoning: "high" },
-      sessions,
-    );
+    const engine = new PiReviewEngine({ id: "openai/gpt-6.1-sol", reasoning: "high" }, sessions);
     await assert.rejects(
       () =>
         engine.review(
@@ -371,7 +387,7 @@ index 1111111..2222222 100644
           const sessions = new FakeSessionFactory();
           sessions.result = output;
           const engine = new PiReviewEngine(
-            { id: "openai-codex/gpt-6-sol", reasoning: "high" },
+            { id: "openai/gpt-6.1-sol", reasoning: "high" },
             sessions,
           );
           await assert.rejects(() =>
@@ -403,10 +419,7 @@ index 1111111..2222222 100644
           finishCreation = resolve;
         }),
     };
-    const engine = new PiReviewEngine(
-      { id: "openai-codex/gpt-6-sol", reasoning: "high" },
-      sessions,
-    );
+    const engine = new PiReviewEngine({ id: "openai/gpt-6.1-sol", reasoning: "high" }, sessions);
     const cancellation = new Error("cancel late Pi creation");
     const abortController = new AbortController();
     let settled = false;
@@ -500,10 +513,7 @@ index 1111111..2222222 100644
         };
       },
     };
-    const engine = new PiReviewEngine(
-      { id: "openai-codex/gpt-6-sol", reasoning: "high" },
-      sessions,
-    );
+    const engine = new PiReviewEngine({ id: "openai/gpt-6.1-sol", reasoning: "high" }, sessions);
     const abortController = new AbortController();
     const cancellation = new Error("cancel active Pi session");
     let settled = false;
@@ -568,10 +578,7 @@ index 1111111..2222222 100644
         };
       },
     };
-    const engine = new PiReviewEngine(
-      { id: "openai-codex/gpt-6-sol", reasoning: "high" },
-      sessions,
-    );
+    const engine = new PiReviewEngine({ id: "openai/gpt-6.1-sol", reasoning: "high" }, sessions);
     const abortController = new AbortController();
     const cancellation = new Error("cancel stalled Pi session");
     const review = engine.review(

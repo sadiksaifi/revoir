@@ -2,8 +2,11 @@
 
 Revoir is a personal, single-user code-review service for repositories in your GitHub
 account and organizations you belong to. A macOS service receives eligible pull-request
-jobs through Cloudflare, runs an embedded Pi agent with OpenAI Codex, and publishes a
+jobs through Cloudflare, runs an embedded Pi agent with OpenAI, and publishes a
 GitHub check plus review findings—or a clean result.
+
+Reviews use `openai/gpt-6.1-sol` with high reasoning. Revoir shares Pi's OpenAI
+login, including an existing "Sign in with ChatGPT" session.
 
 It is intentionally not a hosted multi-user product. One installation trusts one
 immutable GitHub user identity while allowing that user to opt multiple personal and
@@ -24,7 +27,7 @@ Cloudflare Queue (HTTP pull)
 macOS LaunchAgent -- intersects --> local policy + GitHub installation access
         |
         v
-temporary checkout -> Pi / OpenAI Codex -> GitHub check and review
+temporary checkout -> Pi / OpenAI -> GitHub check and review
 ```
 
 The standalone `revoir` executable contains the CLI, the long-running Queue consumer,
@@ -58,8 +61,8 @@ For the review machine:
 - System Git, GitHub CLI (`gh`), and Cloudflare Wrangler 4 (`wrangler`) on `PATH`;
 - a GitHub account and permission to install an App in each target owner;
 - a Cloudflare account—the free plan is sufficient for the intended personal use;
-- ChatGPT Plus or Pro for the embedded OpenAI Codex OAuth flow;
-- a browser for GitHub, Cloudflare, and Codex authorization.
+- ChatGPT Plus or Pro for the embedded OpenAI OAuth flow;
+- a browser for GitHub, Cloudflare, and OpenAI authorization.
 
 For building from source, install `mise`. The standalone executable embeds its Node and
 Pi runtime, so the installed service does not require a separate global `node` or `pi`
@@ -105,7 +108,7 @@ revoir setup
 
 Setup is interactive, browser-assisted, and resumable. It:
 
-1. verifies `gh` authentication, Wrangler authentication, and embedded Codex OAuth;
+1. verifies `gh` authentication, Wrangler authentication, and embedded OpenAI OAuth;
 2. lets you select the Cloudflare account when Wrangler exposes more than one;
 3. creates one KV namespace, one Queue with an HTTP pull consumer, and one Worker;
 4. deploys the Worker embedded in the executable;
@@ -282,7 +285,7 @@ state, then reports one of:
 a specific recovery message.
 
 `revoir diagnose` is the complete noninteractive health check. It validates the
-standalone runtime, System Git, Codex OAuth, GitHub App identity/events/permissions,
+standalone runtime, System Git, OpenAI OAuth, GitHub App identity/events/permissions,
 immutable installation and repository identities, Cloudflare Queue and HTTP pull
 consumer, Queue-token acknowledgement scope, signed relay path, local/KV policy
 equality, repository authorization states, and LaunchAgent health. Every check must

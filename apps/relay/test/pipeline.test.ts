@@ -59,7 +59,7 @@ function memoryRequestCompletionStore(): ReviewRequestCompletionStore {
 
 const configuration: RevoirConfiguration = {
   version: 1,
-  model: { id: "openai-codex/gpt-6-sol", reasoning: "high" },
+  model: { id: "openai/gpt-6.1-sol", reasoning: "high" },
   service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
   github: {
     appId: 7,

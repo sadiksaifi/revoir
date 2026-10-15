@@ -15,7 +15,7 @@ import {
   writePolicy,
   type RevoirPolicy,
 } from "./config/policy.js";
-import { createConfiguration, type RevoirConfiguration } from "./config/schema.js";
+import { createConfiguration, DEFAULT_MODEL, type RevoirConfiguration } from "./config/schema.js";
 import type { SetupCheckpoint } from "./config/setup-checkpoint.js";
 import { loadConfiguration, writeConfiguration } from "./config/store.js";
 import {
@@ -87,10 +87,20 @@ function codingAgentPackageDirectory(): string {
 }
 
 async function probeOAuth(): Promise<void> {
-  const runtime = await ModelRuntime.create({ modelsPath: null });
-  const oauth = runtime.getProvider("openai-codex")?.auth.oauth;
+  const runtime = await ModelRuntime.create({ modelsPath: null, allowModelNetwork: false });
+  const separator = DEFAULT_MODEL.indexOf("/");
+  const model = runtime.getModel(
+    DEFAULT_MODEL.slice(0, separator),
+    DEFAULT_MODEL.slice(separator + 1),
+  );
+  if (model === undefined || !model.reasoning) {
+    throw new Error(
+      `Packaged Pi does not support Revoir's pinned review model "${DEFAULT_MODEL}".`,
+    );
+  }
+  const oauth = runtime.getProvider("openai")?.auth.oauth;
   if (oauth === undefined) {
-    throw new Error("Packaged Pi did not expose the OpenAI Codex OAuth flow.");
+    throw new Error("Packaged Pi did not expose the OpenAI OAuth flow.");
   }
   const auth = await oauth.toAuth({
     type: "oauth",
@@ -99,33 +109,34 @@ async function probeOAuth(): Promise<void> {
     expires: Number.MAX_SAFE_INTEGER,
   });
   if (auth.apiKey !== "revoir-package-smoke-token") {
-    throw new Error("Packaged Pi did not load its dynamic OpenAI Codex OAuth module.");
+    throw new Error("Packaged Pi did not load its dynamic OpenAI OAuth module.");
   }
   const originalFetch = globalThis.fetch;
-  const payload = Buffer.from(
-    JSON.stringify({
-      "https://api.openai.com/auth": { chatgpt_account_id: "package-smoke-account" },
-    }),
-  ).toString("base64url");
   globalThis.fetch = async () =>
     new Response(
       JSON.stringify({
-        access_token: `header.${payload}.signature`,
+        access_token: "refreshed-package-smoke-access",
         refresh_token: "rotated-package-smoke-refresh",
         expires_in: 3_600,
+        scope: "chatgpt.tokens.use.direct",
       }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   try {
-    const refreshed = await oauth.refresh({
-      type: "oauth",
-      access: "expired",
-      refresh: "package-smoke-refresh",
-      expires: 0,
-    });
+    const refreshed = await oauth.refresh(
+      {
+        type: "oauth",
+        access: "expired",
+        refresh: "package-smoke-refresh",
+        expires: 0,
+        clientId: "package-smoke-client",
+      },
+      AbortSignal.timeout(5_000),
+    );
     if (
       refreshed.refresh !== "rotated-package-smoke-refresh" ||
-      refreshed.accountId !== "package-smoke-account"
+      refreshed.clientId !== "package-smoke-client" ||
+      refreshed.access !== "refreshed-package-smoke-access"
     ) {
       throw new Error("Packaged Pi OAuth refresh returned unexpected credentials.");
     }
@@ -445,7 +456,7 @@ async function probeSetupAndInitializers(input: PackageSmokeInput): Promise<void
       },
     },
     defaults: {
-      model: { id: "openai-codex/gpt-6-sol", reasoning: "high" },
+      model: { id: "openai/gpt-6.1-sol", reasoning: "high" },
       service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
       timeouts: { reviewMs: 1_200_000, shellCommandMs: 120_000 },
       paths: { cacheDir: paths.cacheDir, stateDir: paths.stateDir, dataDir: paths.dataDir },

@@ -102,7 +102,7 @@ async function assertArtifactScan(file) {
     throw new Error("Standalone artifact contains a build-environment secret value.");
   }
   const requiredResources = [
-    "auth/oauth/openai-codex.js",
+    "auth/oauth/openai-chatgpt.js",
     "providers/data/.manifest.json",
     "image-resize-worker.js",
     "photon_rs_bg.wasm",

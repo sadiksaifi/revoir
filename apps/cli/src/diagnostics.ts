@@ -258,10 +258,10 @@ export function createDefaultDiagnosticGateway(
       const authCheck = await modelRuntime.checkAuth(providerId);
       if (auth === undefined || authCheck?.type !== "oauth") {
         throw new Error(
-          'Pi OpenAI Codex login is unavailable. Rerun "revoir setup" to complete browser authentication.',
+          'Pi OpenAI login is unavailable. Rerun "revoir setup" to complete browser authentication.',
         );
       }
-      return `${modelId} (${reasoning} reasoning), OpenAI Codex OAuth`;
+      return `${modelId} (${reasoning} reasoning), OpenAI OAuth`;
     },
 
     async checkGitHub(configuration, policy, timeoutMs = 120_000) {
@@ -515,7 +515,7 @@ export async function runDiagnostics(
   const [runtime, git, pi, github, cloudflare, relay, cloudPolicy] = await Promise.all([
     capture("runtime", "Node runtime", () => gateway.checkRuntime()),
     capture("git", "System Git", () => gateway.checkGit(configuration.timeouts.shellCommandMs)),
-    capture("pi-auth", "Pi Codex authentication", () =>
+    capture("pi-auth", "Pi OpenAI authentication", () =>
       gateway.checkPi(configuration.model.id, configuration.model.reasoning),
     ),
     (async () => {

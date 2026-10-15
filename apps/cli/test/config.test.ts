@@ -151,7 +151,7 @@ describe("greenfield configuration", () => {
           ...configuration,
           model: { ...configuration.model, id: "other-provider/gpt-6-sol" },
         }),
-      /model\.id must use the "openai-codex\/<model>" format/u,
+      /model\.id must use the "openai\/<model>" format/u,
     );
   });
 
@@ -165,7 +165,22 @@ describe("greenfield configuration", () => {
       ...configuration,
       model: { ...configuration.model, id: "openai-codex/gpt-5.6-sol" },
     };
-    assert.equal(validateConfiguration(priorInstallation).model.id, "openai-codex/gpt-6-sol");
+    assert.equal(validateConfiguration(priorInstallation).model.id, "openai/gpt-6.1-sol");
+  });
+
+  it("migrates the previous Codex provider to the OpenAI login", () => {
+    const configuration = testConfiguration({
+      cacheDir: "/cache",
+      stateDir: "/state",
+      dataDir: "/data",
+    });
+    assert.equal(
+      validateConfiguration({
+        ...configuration,
+        model: { ...configuration.model, id: "openai-codex/gpt-6-sol" },
+      }).model.id,
+      "openai/gpt-6.1-sol",
+    );
   });
 
   it("loads a previously configured custom model as the current build model", () => {

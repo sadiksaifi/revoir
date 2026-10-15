@@ -1964,10 +1964,7 @@ describe("clean review orchestrator", () => {
           finishCreatingSession = resolve;
         }),
     };
-    const engine = new PiReviewEngine(
-      { id: "openai-codex/gpt-6-sol", reasoning: "high" },
-      sessions,
-    );
+    const engine = new PiReviewEngine({ id: "openai/gpt-6.1-sol", reasoning: "high" }, sessions);
     const timedOut = harness({
       reviewMs: 5,
       review: (input, signal) => engine.review(input, signal),

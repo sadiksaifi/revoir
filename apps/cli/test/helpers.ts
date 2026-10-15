@@ -59,7 +59,7 @@ export function passingGateway(): DiagnosticGateway {
       return "git version 2.50.0";
     },
     async checkPi(model, reasoning) {
-      return `${model} (${reasoning}), OpenAI Codex OAuth`;
+      return `${model} (${reasoning}), OpenAI OAuth`;
     },
     async checkGitHub(_configuration, policy) {
       return {
