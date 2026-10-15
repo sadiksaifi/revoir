@@ -73,12 +73,10 @@ interface ImageResizeModule {
   ): Promise<unknown>;
 }
 
-interface NativeModifierModule {
+interface NativePlatformModule {
   isModifierPressed(key: string): boolean;
-}
-
-interface ClipboardNativeModule {
-  clipboard: unknown;
+  getText(): unknown;
+  getImage(): unknown;
 }
 
 function codingAgentPackageDirectory(): string {
@@ -180,36 +178,27 @@ async function probeNativeRuntime(): Promise<readonly string[]> {
     .toSorted();
   const tuiEntryPoint = fileURLToPath(import.meta.resolve("@earendil-works/pi-tui"));
   const tuiDirectory = dirname(dirname(tuiEntryPoint));
-  const nativeModifierPath = join(
+  const nativePlatformPath = join(
     tuiDirectory,
     "native",
     "darwin",
     "prebuilds",
     `darwin-${process.arch}`,
-    "darwin-modifiers.node",
+    "darwin-platform.node",
   );
-  const nativeModifier = createRequire(import.meta.url)(nativeModifierPath) as NativeModifierModule;
-  if (typeof nativeModifier.isModifierPressed !== "function") {
-    throw new Error("Packaged Pi TUI native modifier addon did not load.");
+  const nativePlatform = createRequire(import.meta.url)(nativePlatformPath) as NativePlatformModule;
+  if (
+    typeof nativePlatform.isModifierPressed !== "function" ||
+    typeof nativePlatform.getText !== "function" ||
+    typeof nativePlatform.getImage !== "function"
+  ) {
+    throw new Error("Packaged Pi TUI native platform addon did not load.");
   }
-  nativeModifier.isModifierPressed("shift");
-  const clipboardRequire = createRequire(
-    pathToFileURL(join(codingAgentPackageDirectory(), "package.json")).href,
-  );
-  let clipboardBinding: unknown;
-  try {
-    clipboardBinding = clipboardRequire(`@mariozechner/clipboard-darwin-${process.arch}`);
-  } catch (cause) {
-    throw new Error("Packaged host-native clipboard binding could not be required.", { cause });
-  }
-  if (typeof clipboardBinding !== "object" || clipboardBinding === null) {
-    throw new Error("Packaged host-native clipboard binding returned an invalid module.");
-  }
-  const clipboardNativeUrl = pathToFileURL(
-    join(codingAgentPackageDirectory(), "dist", "utils", "clipboard-native.js"),
-  ).href;
-  const clipboardNative = (await import(clipboardNativeUrl)) as ClipboardNativeModule;
-  if (clipboardNative.clipboard === null || clipboardNative.clipboard === undefined) {
+  nativePlatform.isModifierPressed("shift");
+  const { getNativeClipboard } = (await import(pathToFileURL(tuiEntryPoint).href)) as {
+    getNativeClipboard(): unknown;
+  };
+  if (getNativeClipboard() === undefined) {
     throw new Error("Packaged host-native clipboard addon did not load.");
   }
   return nativeAssets;

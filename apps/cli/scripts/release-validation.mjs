@@ -14,18 +14,12 @@ export function machOArchitecture(architecture) {
 export function standaloneNativeAssetPaths(architecture) {
   machOArchitecture(architecture);
   return [
-    `node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-${architecture}/darwin-modifiers.node`,
-    `node_modules/@mariozechner/clipboard-darwin-${architecture}/clipboard.darwin-${architecture}.node`,
+    `node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-${architecture}/darwin-platform.node`,
   ];
 }
 
 export function standaloneNativeRuntimeAssetPaths(architecture) {
-  return [
-    ...standaloneNativeAssetPaths(architecture),
-    "node_modules/@mariozechner/clipboard/index.js",
-    "node_modules/@mariozechner/clipboard/package.json",
-    `node_modules/@mariozechner/clipboard-darwin-${architecture}/package.json`,
-  ];
+  return standaloneNativeAssetPaths(architecture);
 }
 
 export function assertStandaloneNativeManifest(nativeAssets, architecture, manifestRoot) {

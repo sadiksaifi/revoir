@@ -38,20 +38,15 @@ describe("standalone macOS release", () => {
     );
   });
 
-  it("selects only the host architecture's Pi and clipboard native addons", () => {
+  it("selects only the host architecture's Pi native platform addon", () => {
     assert.deepEqual(standaloneNativeAssetPaths("arm64"), [
-      "node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-arm64/darwin-modifiers.node",
-      "node_modules/@mariozechner/clipboard-darwin-arm64/clipboard.darwin-arm64.node",
+      "node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-arm64/darwin-platform.node",
     ]);
     assert.deepEqual(standaloneNativeAssetPaths("x64"), [
-      "node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-x64/darwin-modifiers.node",
-      "node_modules/@mariozechner/clipboard-darwin-x64/clipboard.darwin-x64.node",
+      "node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-x64/darwin-platform.node",
     ]);
     assert.deepEqual(standaloneNativeRuntimeAssetPaths("arm64"), [
       ...standaloneNativeAssetPaths("arm64"),
-      "node_modules/@mariozechner/clipboard/index.js",
-      "node_modules/@mariozechner/clipboard/package.json",
-      "node_modules/@mariozechner/clipboard-darwin-arm64/package.json",
     ]);
   });
 
@@ -64,7 +59,7 @@ describe("standalone macOS release", () => {
         assertStandaloneNativeManifest(
           [
             ...expected,
-            `${root}/node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-x64/darwin-modifiers.node`,
+            `${root}/node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-x64/darwin-platform.node`,
           ],
           "arm64",
           root,
