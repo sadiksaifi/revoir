@@ -214,11 +214,11 @@ The repository must pass all authorization gates, the pull request must be open 
 non-draft, its base and head must be the same repository (fork pull requests are not
 eligible), and its author and event sender must match the configured GitHub user.
 
-To request another review, add this exact standalone comment to an eligible pull
-request:
+To request another review from [@revoirai](https://github.com/apps/revoirai), add
+this exact standalone comment to an eligible pull request:
 
 ```text
-@revoirapp review
+@revoirai review
 ```
 
 The configured user must author the comment. Extra words do not match the command.
@@ -238,12 +238,12 @@ revoir review cancel https://github.com/OWNER/REPOSITORY/pull/NUMBER
 or add this exact standalone comment as the configured GitHub user:
 
 ```text
-@revoirapp cancel
+@revoirai cancel
 ```
 
 Cancellation is idempotent. It marks an active check as cancelled, removes the active
 reaction, cleans the temporary workspace, and does not publish a failure comment or
-retry the cancelled delivery. A later commit or later `@revoirapp review` comment is
+retry the cancelled delivery. A later commit or later `@revoirai review` comment is
 still eligible. CLI cancellation is recorded in protected local state; comment-based
 cancellation is detected with authenticated conditional GitHub polling and does not
 add another Cloudflare resource.

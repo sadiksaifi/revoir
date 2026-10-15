@@ -1059,7 +1059,7 @@ class InstallationSession implements GitHubReviewSession {
           }
           const comments = value.map(parseCancellationComment);
           for (const comment of comments) {
-            if (comment.userId !== this.#userId || comment.body.trim() !== "@revoirapp cancel") {
+            if (comment.userId !== this.#userId || comment.body.trim() !== "@revoirai cancel") {
               continue;
             }
             let cancels =

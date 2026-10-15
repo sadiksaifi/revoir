@@ -63,7 +63,7 @@ const configuration: RevoirConfiguration = {
   service: { executablePath: "/usr/local/bin:/usr/bin:/bin" },
   github: {
     appId: 7,
-    appSlug: "revoirapp",
+    appSlug: "revoirai",
     privateKey: "unused by fake review service",
     webhookSecret: WEBHOOK_SECRET,
   },
@@ -223,7 +223,7 @@ async function enqueueSignedReviewRequest(deliveryId: string): Promise<ReviewQue
     },
     comment: {
       id: 123456789,
-      body: "@revoirapp review",
+      body: "@revoirai review",
       created_at: "2026-08-04T23:59:00Z",
       user: { id: 42 },
     },

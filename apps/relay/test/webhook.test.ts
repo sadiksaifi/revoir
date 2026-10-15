@@ -128,7 +128,7 @@ async function issueCommentPayload(overrides: Record<string, unknown> = {}) {
     },
     comment: {
       id: 123456789,
-      body: "@revoirapp review",
+      body: "@revoirai review",
       created_at: "2026-08-04T23:59:00Z",
       user: { id: 42 },
     },
@@ -331,8 +331,8 @@ describe("GitHub webhook relay", () => {
       { ...original, issue: { number: 17 } },
       { ...original, sender: { id: 43 } },
       { ...original, comment: { ...original.comment, user: { id: 43 } } },
-      { ...original, comment: { ...original.comment, body: "@revoirapp review this" } },
-      { ...original, comment: { ...original.comment, body: "please @revoirapp review" } },
+      { ...original, comment: { ...original.comment, body: "@revoirai review this" } },
+      { ...original, comment: { ...original.comment, body: "please @revoirai review" } },
       { ...original, comment: { ...original.comment, body: "@otherapp review" } },
       { ...original, comment: { ...original.comment, id: 0 } },
     ];

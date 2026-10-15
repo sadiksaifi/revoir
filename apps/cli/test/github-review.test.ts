@@ -139,19 +139,19 @@ describe("GitHub App review gateway", () => {
       return json([
         {
           id: 125,
-          body: "@revoirapp cancel now",
+          body: "@revoirai cancel now",
           created_at: "2026-09-04T10:02:00Z",
           user: { id: 42 },
         },
         {
           id: 124,
-          body: "@revoirapp cancel",
+          body: "@revoirai cancel",
           created_at: "2026-09-04T10:01:00Z",
           user: { id: 99 },
         },
         {
           id: 123,
-          body: " @revoirapp cancel \n",
+          body: " @revoirai cancel \n",
           created_at: "2026-09-04T10:00:00Z",
           user: { id: 42 },
         },
@@ -194,7 +194,7 @@ describe("GitHub App review gateway", () => {
         return json([
           {
             id: 123,
-            body: "@revoirapp cancel",
+            body: "@revoirai cancel",
             created_at: "2026-09-04T10:00:00Z",
             user: { id: 42 },
           },
@@ -240,7 +240,7 @@ describe("GitHub App review gateway", () => {
       return json([
         {
           id: 123,
-          body: "@revoirapp cancel",
+          body: "@revoirai cancel",
           created_at: "2026-09-04T10:00:00Z",
           user: { id: 42 },
         },
@@ -287,7 +287,7 @@ describe("GitHub App review gateway", () => {
         return json([
           {
             id: 123,
-            body: "@revoirapp cancel",
+            body: "@revoirai cancel",
             created_at: "2026-09-04T10:00:00Z",
             user: { id: 42 },
           },
@@ -342,7 +342,7 @@ describe("GitHub App review gateway", () => {
         return json([
           {
             id: 123,
-            body: "@revoirapp cancel",
+            body: "@revoirai cancel",
             created_at: "2026-09-04T10:00:00Z",
             user: { id: 42 },
           },
@@ -388,7 +388,7 @@ describe("GitHub App review gateway", () => {
       return json([
         {
           id: commentId,
-          body: "@revoirapp cancel",
+          body: "@revoirai cancel",
           created_at: "2026-09-04T10:00:00Z",
           user: { id: 42 },
         },
@@ -478,7 +478,7 @@ describe("GitHub App review gateway", () => {
         return json([
           {
             id: 123,
-            body: "@revoirapp cancel",
+            body: "@revoirai cancel",
             created_at: "2026-09-04T10:00:00Z",
             user: { id: 42 },
           },
@@ -537,7 +537,7 @@ describe("GitHub App review gateway", () => {
       return json([
         {
           id: 199,
-          body: "@revoirapp cancel",
+          body: "@revoirai cancel",
           created_at: "2026-09-04T10:00:00Z",
           user: { id: 42 },
         },
@@ -568,7 +568,7 @@ describe("GitHub App review gateway", () => {
           return json([
             {
               id: 401,
-              body: "@revoirapp cancel",
+              body: "@revoirai cancel",
               created_at: "2026-09-04T10:02:00Z",
               user: { id: 42 },
             },
@@ -663,7 +663,7 @@ describe("GitHub App review gateway", () => {
         JSON.stringify([
           {
             id: 123,
-            body: "@revoirapp cancel",
+            body: "@revoirai cancel",
             created_at: new Date(serverNow).toISOString(),
             user: { id: 42 },
           },
