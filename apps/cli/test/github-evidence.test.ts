@@ -720,6 +720,7 @@ describe("GitHub review evidence", () => {
   });
 
   it("follows bounded same-repository issue and pull-request requirements breadth-first", async () => {
+    const lookedUpNumbers: number[] = [];
     const artifacts = new Map<number, Record<string, unknown>>([
       [
         10,
@@ -815,6 +816,7 @@ describe("GitHub review evidence", () => {
           });
         }
         if (request.query.includes("RevoirLinkedArtifact")) {
+          lookedUpNumbers.push(Number(request.variables.number));
           return json({
             data: {
               repository: {
@@ -827,7 +829,7 @@ describe("GitHub review evidence", () => {
           data: {
             repository: {
               pullRequest: {
-                body: "Implement #10 and ignore #17.",
+                body: "Implement #10 and ignore #17. Colors #96004F #487B65; identifiers word#123 and #12abc.",
                 comments: graphQlConnection([
                   graphQlComment("Requirements owner/repository#11.", "2"),
                 ]),
@@ -846,7 +848,7 @@ describe("GitHub review evidence", () => {
                     id: "ISSUE_9",
                     number: 9,
                     title: "Direct closing requirement",
-                    body: "Requires #13.",
+                    body: "Requires #13. Colors #96004F and #487B65.",
                     state: "OPEN",
                     url: "https://github.com/owner/repository/issues/9",
                     comments: graphQlConnection([]),
@@ -876,6 +878,7 @@ describe("GitHub review evidence", () => {
       new AbortController().signal,
     );
 
+    assert.deepEqual(lookedUpNumbers, [10, 11, 12, 13, 14]);
     assert.deepEqual(
       evidence.discussion?.linkedArtifacts.map(({ number, kind, depth, directClosing }) => ({
         number,
@@ -983,63 +986,100 @@ describe("GitHub review evidence", () => {
     );
   });
 
-  it("caps linked artifact lookup attempts when references do not exist", async () => {
-    const textualNumbers = Array.from({ length: 25 }, (_, index) => 100 + index);
-    const lookedUpNumbers: number[] = [];
-    const fetchImplementation: FetchLike = async (input, init) => {
-      const url = String(input);
-      if (url.endsWith("/app")) {
-        return json({ slug: "revoir-test" });
-      }
-      if (url.endsWith("/app/installations/8/access_tokens")) {
-        return json({ token: "installation-secret" });
-      }
-      if (url.includes("/check-runs?")) {
-        return json({ total_count: 0, check_runs: [] });
-      }
-      if (url.endsWith("/graphql")) {
-        const request = JSON.parse(String(init?.body)) as {
-          query: string;
-          variables: Record<string, unknown>;
-        };
-        if (request.query.includes("RevoirLinkedArtifact")) {
-          lookedUpNumbers.push(Number(request.variables.number));
-          return json({ data: { repository: { issueOrPullRequest: null } } });
+  for (const scenario of [
+    { name: "null nodes", errors: [], optional: true },
+    {
+      name: "missing nodes",
+      errors: [{ type: "NOT_FOUND", path: ["repository", "issueOrPullRequest"] }],
+      optional: true,
+    },
+    {
+      name: "permission errors",
+      errors: [{ type: "FORBIDDEN", path: ["repository", "issueOrPullRequest"] }],
+      optional: false,
+    },
+    {
+      name: "missing repositories",
+      errors: [{ type: "NOT_FOUND", path: ["repository"] }],
+      optional: false,
+    },
+    {
+      name: "mixed errors",
+      errors: [
+        { type: "NOT_FOUND", path: ["repository", "issueOrPullRequest"] },
+        { type: "RATE_LIMITED", path: ["repository", "issueOrPullRequest"] },
+      ],
+      optional: false,
+    },
+  ]) {
+    it(`bounds optional linked lookups for ${scenario.name} and preserves other errors`, async () => {
+      const textualNumbers = Array.from({ length: 25 }, (_, index) => 100 + index);
+      const lookedUpNumbers: number[] = [];
+      const fetchImplementation: FetchLike = async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/app")) {
+          return json({ slug: "revoir-test" });
         }
-        return json({
-          data: {
-            repository: {
-              pullRequest: {
-                body: textualNumbers.map((number) => `#${number}`).join(" "),
-                comments: graphQlConnection([]),
-                reviews: graphQlConnection([]),
-                reviewThreads: graphQlConnection([]),
-                closingIssuesReferences: graphQlConnection([]),
+        if (url.endsWith("/app/installations/8/access_tokens")) {
+          return json({ token: "installation-secret" });
+        }
+        if (url.includes("/check-runs?")) {
+          return json({ total_count: 0, check_runs: [] });
+        }
+        if (url.endsWith("/graphql")) {
+          const request = JSON.parse(String(init?.body)) as {
+            query: string;
+            variables: Record<string, unknown>;
+          };
+          if (request.query.includes("RevoirLinkedArtifact")) {
+            lookedUpNumbers.push(Number(request.variables.number));
+            return json({
+              data: { repository: { issueOrPullRequest: null } },
+              errors: scenario.errors,
+            });
+          }
+          return json({
+            data: {
+              repository: {
+                pullRequest: {
+                  body: textualNumbers.map((number) => `#${number}`).join(" "),
+                  comments: graphQlConnection([]),
+                  reviews: graphQlConnection([]),
+                  reviewThreads: graphQlConnection([]),
+                  closingIssuesReferences: graphQlConnection([]),
+                },
               },
             },
-          },
-        });
+          });
+        }
+        throw new Error(`Unexpected request ${url}`);
+      };
+      const session = await new GitHubAppReviewGateway(
+        fetchImplementation,
+        "https://api.test",
+        () => 1_000,
+      ).authenticate(
+        configuration.github,
+        configuration.policy,
+        reference,
+        new AbortController().signal,
+      );
+
+      const pending = session.getReviewEvidence(
+        reference,
+        "2".repeat(40),
+        new AbortController().signal,
+      );
+      if (!scenario.optional) {
+        await assert.rejects(pending, /GitHub linked artifact lookup returned GraphQL errors/);
+        return;
       }
-      throw new Error(`Unexpected request ${url}`);
-    };
-    const session = await new GitHubAppReviewGateway(
-      fetchImplementation,
-      "https://api.test",
-      () => 1_000,
-    ).authenticate(
-      configuration.github,
-      configuration.policy,
-      reference,
-      new AbortController().signal,
-    );
+      const artifacts = (await pending).discussion?.linkedArtifacts;
 
-    const artifacts = (
-      await session.getReviewEvidence(reference, "2".repeat(40), new AbortController().signal)
-    ).discussion?.linkedArtifacts;
-
-    assert.deepEqual(artifacts, []);
-    assert.deepEqual(lookedUpNumbers, textualNumbers.slice(0, 20));
-  });
+      assert.deepEqual(artifacts, []);
+      assert.deepEqual(lookedUpNumbers, textualNumbers.slice(0, 20));
+    });
+  }
 
   it("still fails when required completed-check context is unavailable", async () => {
     const fetchImplementation: FetchLike = async (input) => {
