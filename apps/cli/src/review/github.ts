@@ -909,7 +909,7 @@ function parseLinkedArtifactEvidence(
 
 const MAX_LINKED_ARTIFACTS = 20;
 const LINKED_ARTIFACT_REFERENCE =
-  /https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/(?:issues|pull)\/([1-9][0-9]*)|([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)|#([1-9][0-9]*)/giu;
+  /(?<![\w/])(?:https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/(?:issues|pull)\/([1-9][0-9]*)|([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)|#([1-9][0-9]*))(?!\w)/giu;
 
 function linkedArtifactReferences(
   values: readonly string[],
@@ -1608,6 +1608,7 @@ class InstallationSession implements GitHubReviewSession {
     variables: Record<string, unknown>,
     action: string,
     signal: AbortSignal,
+    allowMissingLinkedArtifact = false,
   ): Promise<Record<string, unknown>> {
     const response = await this.#request("/graphql", signal, {
       method: "POST",
@@ -1616,7 +1617,26 @@ class InstallationSession implements GitHubReviewSession {
     });
     const envelope = record(await responseJson(response, action, signal), action);
     if (Array.isArray(envelope.errors) && envelope.errors.length > 0) {
-      throw new Error(`GitHub ${action} returned GraphQL errors.`);
+      // GitHub reports a missing issue with both a null node and NOT_FOUND errors.
+      // Only this optional lookup may omit that node; other errors remain fatal.
+      const data = envelope.data as { repository?: { issueOrPullRequest?: unknown } } | null;
+      const missingLinkedArtifact =
+        allowMissingLinkedArtifact &&
+        data?.repository?.issueOrPullRequest === null &&
+        envelope.errors.every((value: unknown) => {
+          if (typeof value !== "object" || value === null) return false;
+          const error = value as { type?: unknown; path?: unknown };
+          return (
+            error.type === "NOT_FOUND" &&
+            Array.isArray(error.path) &&
+            error.path.length === 2 &&
+            error.path[0] === "repository" &&
+            error.path[1] === "issueOrPullRequest"
+          );
+        });
+      if (!missingLinkedArtifact) {
+        throw new Error(`GitHub ${action} returned GraphQL errors.`);
+      }
     }
     return record(envelope.data, `${action} data`);
   }
@@ -1691,6 +1711,7 @@ class InstallationSession implements GitHubReviewSession {
       { owner: reference.owner, repository: reference.repository, number },
       "linked artifact lookup",
       signal,
+      true,
     );
     const repositoryValue = record(data.repository, "linked artifact repository");
     if (repositoryValue.issueOrPullRequest === null) {
